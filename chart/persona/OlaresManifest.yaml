@@ -13,8 +13,7 @@ metadata:
   icon: https://raw.githubusercontent.com/Drlucaslu/locius/main/deploy/market/assets/icon.png
   version: '0.1.0'
   categories:
-    - AI
-    - Productivity
+    - agents
   tags:
     - agent
     - assistant
