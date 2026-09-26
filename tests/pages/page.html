@@ -1,0 +1,15 @@
+<!doctype html>
+<html><head><title>Test Shop</title></head>
+<body>
+<h1>Order #12345</h1>
+<p>Status: <b>Processing</b>. Estimated shipping in 2 days.</p>
+<form action="/submitted.html" method="get">
+  <label>Email <input type="email" name="email" value="lucas@example.com"></label>
+  <label>Password <input type="password" name="pw" value="secret-should-not-leak"></label>
+  <label>Search orders <input type="search" name="q"></label>
+  <select name="size"><option>S</option><option selected>M</option></select>
+  <button type="submit">Submit order</button>
+</form>
+<a href="/other.html">Other page</a>
+<p>Your verification code is 482913. Reset link: https://shop.example.com/reset-password?token=abcdef1234567890</p>
+</body></html>

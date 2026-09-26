@@ -1,0 +1,415 @@
+"""Agent Runtime HTTP API (reached only through Sentinel's reverse proxy)."""
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import time
+from contextlib import asynccontextmanager
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+
+from app.common.util import VERSION, token_ok
+from app.runtime.agent import TERMINAL, WORKSPACE, Runtime
+from app.runtime import goals as G
+from app.runtime.scheduler import EVENT_SOURCES, Scheduler, create_schedule, describe, next_run, validate
+
+DATA = os.environ.get("RUNTIME_DATA", "/data")
+RUNTIME_TOKEN = os.environ.get("RUNTIME_TOKEN", "")
+
+subscribers: set[asyncio.Queue] = set()
+
+
+async def publish(ev: dict):
+    ev.setdefault("ts", time.time())
+    for q in list(subscribers):
+        try:
+            q.put_nowait(ev)
+        except asyncio.QueueFull:
+            pass
+
+
+rt: Runtime = None  # type: ignore
+sched: Scheduler = None  # type: ignore
+
+
+@asynccontextmanager
+async def lifespan(app):
+    global rt, sched
+    rt = Runtime(DATA, publish)
+    sched = Scheduler(rt)
+    sched.start()
+    await rt.recover()
+    yield
+
+
+app = FastAPI(lifespan=lifespan, title="Locius Runtime")
+
+
+def internal_auth(x_persona_runtime: str | None = Header(default=None)):
+    if not token_ok(x_persona_runtime, RUNTIME_TOKEN):
+        raise HTTPException(401, "unauthorized")
+
+
+@app.get("/api/health")
+async def health():
+    return {"ok": True, "version": VERSION}
+
+
+# ------------------------------------------------------------------ chat & conversations
+@app.post("/api/chat")
+async def chat(req: Request):
+    b = await req.json()
+    text = str(b.get("message", "")).strip()
+    if not text:
+        raise HTTPException(400, "message is empty")
+    cid = b.get("conversation_id")
+    if not cid or not rt.store.conv(cid):
+        cid = rt.store.create_conv(text[:40])
+    rt.store.add_msg(cid, "user", text)
+    t = await rt.submit(cid, text)
+    rt.store.db.execute("UPDATE messages SET task_id=? WHERE id=(SELECT MAX(id) FROM messages WHERE conv_id=? AND role='user')", (t["id"], cid))
+    await publish({"kind": "conv_update", "conv_id": cid})
+    return {"conversation_id": cid, "task_id": t["id"]}
+
+
+@app.get("/api/conversations")
+async def conversations(kind: str | None = None):
+    rows = rt.store.convs(200)
+    if kind:
+        rows = [r for r in rows if r["kind"] == kind]
+    return {"conversations": rows}
+
+
+@app.get("/api/conversations/{cid}")
+async def conversation(cid: str):
+    c = rt.store.conv(cid)
+    if not c:
+        raise HTTPException(404)
+    msgs = rt.store.msgs(cid, 300)
+    tids = sorted({m["task_id"] for m in msgs if m["task_id"]})
+    tasks = {tid: rt.task_brief(rt.store.task(tid)) for tid in tids if rt.store.task(tid)}
+    return {"conversation": c, "messages": msgs, "tasks": tasks}
+
+
+@app.delete("/api/conversations/{cid}")
+async def del_conv(cid: str):
+    rt.store.delete_conv(cid)
+    return {"ok": True}
+
+
+# ------------------------------------------------------------------ tasks
+@app.get("/api/tasks")
+async def tasks(status: str | None = None, limit: int = 100):
+    return {"tasks": rt.store.tasks(status, min(limit, 500))}
+
+
+@app.get("/api/tasks/{tid}")
+async def task(tid: str):
+    t = rt.store.task(tid)
+    if not t:
+        raise HTTPException(404)
+    brief = rt.task_brief(t)
+    brief["events"] = rt.store.events(tid)
+    return brief
+
+
+@app.post("/api/tasks/{tid}/{action}")
+async def task_action(tid: str, action: str):
+    t = rt.store.task(tid)
+    if not t:
+        raise HTTPException(404)
+    if action == "cancel":
+        await rt.cancel(tid)
+    elif action == "pause":
+        await rt.pause(tid)
+    elif action == "resume":
+        await rt.resume(tid)
+    elif action == "retry":
+        if t["status"] not in TERMINAL:
+            raise HTTPException(409, "task still active")
+        nt = await rt.submit(t["conv_id"], t["goal"], t["source"], t["schedule_id"])
+        return {"ok": True, "task_id": nt["id"]}
+    else:
+        raise HTTPException(404, "unknown action")
+    return {"ok": True}
+
+
+# ------------------------------------------------------------------ live events (SSE)
+@app.get("/api/stream")
+async def stream(request: Request):
+    q: asyncio.Queue = asyncio.Queue(maxsize=500)
+    subscribers.add(q)
+
+    async def gen():
+        try:
+            yield "retry: 3000\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    ev = await asyncio.wait_for(q.get(), timeout=15)
+                    yield f"data: {json.dumps(ev, ensure_ascii=False, default=str)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+        finally:
+            subscribers.discard(q)
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# ------------------------------------------------------------------ schedules
+@app.get("/api/schedules")
+async def schedules():
+    out = []
+    for x in rt.store.schedules():
+        if x.get("goal_id"):
+            continue  # shown on the goal card
+        st = x["state"] or {}
+        x["describe"] = describe(x)
+        x["state"] = {k: v for k, v in st.items() if not str(k).startswith("_")}
+        x["trigger"] = {k: st.get(k) for k in ("_error", "_error_at", "_checked", "_last_events") if st.get(k) is not None}
+        out.append(x)
+    return {"schedules": out, "sources": EVENT_SOURCES}
+
+
+# ------------------------------------------------------------------ goals
+@app.get("/api/goals")
+async def goals():
+    return {"goals": [G.brief(rt.store, g) for g in rt.store.goals()]}
+
+
+@app.post("/api/goals")
+async def add_goal(req: Request):
+    b = await req.json()
+    try:
+        g = G.create_goal(rt.store, title=str(b.get("title", "")), objective=str(b.get("objective", "")),
+                          criteria=str(b.get("criteria", "")), kind=str(b.get("kind", "interval")), spec=b.get("spec", "60"),
+                          tz=rt.store.settings()["timezone"], deadline=b.get("deadline") or None)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    await rt.audit("user", "goal.create", resource=g["id"], detail={"title": g["title"]})
+    if b.get("run_now"):
+        await sched.run_now(g["schedule_id"])
+    return G.brief(rt.store, rt.store.goal(g["id"]))
+
+
+@app.put("/api/goals/{gid}")
+async def upd_goal(gid: str, req: Request):
+    g = rt.store.goal(gid)
+    if not g:
+        raise HTTPException(404)
+    b = await req.json()
+    data = {}
+    for k in ("title", "objective", "criteria"):
+        if k in b:
+            data[k] = str(b[k])[:3000]
+    try:
+        if "deadline" in b:
+            data["deadline"] = G.parse_deadline(b["deadline"])
+        if data:
+            data["updated_at"] = time.time()
+            rt.store.db.update("goals", "id", gid, data)
+        if "kind" in b or "spec" in b:
+            sch = rt.store.schedule(g["schedule_id"])
+            kind, spec = str(b.get("kind", sch["kind"])), b.get("spec", sch["spec"])
+            spec = spec if isinstance(spec, str) else json.dumps(spec, ensure_ascii=False)
+            validate(kind, spec)
+            rt.store.db.update("schedules", "id", sch["id"], {"kind": kind, "spec": spec, "next_run": next_run(kind, spec, sch["tz"])})
+        if "status" in b:
+            G.set_status(rt.store, gid, str(b["status"]))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    await rt.audit("user", "goal.update", resource=gid, detail={k: b[k] for k in b if k != "objective"})
+    return G.brief(rt.store, rt.store.goal(gid))
+
+
+@app.post("/api/goals/{gid}/run")
+async def run_goal(gid: str):
+    g = rt.store.goal(gid)
+    if not g:
+        raise HTTPException(404)
+    if g["status"] != "active":
+        raise HTTPException(400, "目标不在进行中 (goal is not active)")
+    t = await sched.run_now(g["schedule_id"])
+    return {"task_id": t["id"]}
+
+
+@app.delete("/api/goals/{gid}")
+async def del_goal(gid: str):
+    g = rt.store.goal(gid)
+    if g:
+        rt.store.db.execute("DELETE FROM schedules WHERE id=?", (g["schedule_id"],))
+        rt.store.db.execute("DELETE FROM goals WHERE id=?", (gid,))
+    await rt.audit("user", "goal.delete", resource=gid)
+    return {"ok": True}
+
+
+@app.post("/api/schedules")
+async def add_schedule(req: Request):
+    b = await req.json()
+    try:
+        spec = b["spec"] if isinstance(b["spec"], str) else json.dumps(b["spec"], ensure_ascii=False)
+        s = create_schedule(rt.store, str(b["name"]), str(b["goal"]), str(b.get("kind", "cron")), spec,
+                            str(b.get("tz") or rt.store.settings()["timezone"]))
+    except (KeyError, ValueError) as e:
+        raise HTTPException(400, str(e))
+    await rt.audit("user", "schedule.create", resource=s["id"], detail={"name": s["name"], "spec": s["spec"]})
+    return s
+
+
+@app.put("/api/schedules/{sid}")
+async def upd_schedule(sid: str, req: Request):
+    s = rt.store.schedule(sid)
+    if not s:
+        raise HTTPException(404)
+    b = await req.json()
+    data = {}
+    for k in ("name", "goal", "kind", "spec", "tz"):
+        if k in b:
+            data[k] = b[k] if isinstance(b[k], str) else json.dumps(b[k], ensure_ascii=False)
+    if "enabled" in b:
+        data["enabled"] = 1 if b["enabled"] else 0
+    merged = {**s, **data}
+    try:
+        validate(merged["kind"], merged["spec"])
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    data["next_run"] = next_run(merged["kind"], merged["spec"], merged["tz"])
+    rt.store.db.update("schedules", "id", sid, data)
+    return rt.store.schedule(sid)
+
+
+@app.delete("/api/schedules/{sid}")
+async def del_schedule(sid: str):
+    rt.store.db.execute("DELETE FROM schedules WHERE id=?", (sid,))
+    await rt.audit("user", "schedule.delete", resource=sid)
+    return {"ok": True}
+
+
+@app.post("/api/schedules/{sid}/poll")
+async def poll_schedule(sid: str):
+    """Check an event trigger right now (instead of waiting for the next poll)."""
+    s = rt.store.schedule(sid)
+    if not s or s["kind"] != "event":
+        raise HTTPException(400, "不是事件触发器 (not an event trigger)")
+    last = rt.store.task(s["last_task"]) if s.get("last_task") else None
+    if last and last["status"] not in TERMINAL:
+        raise HTTPException(409, "上一次运行还没结束 (previous run still active)")
+    await sched.poll_event(s)
+    s2 = rt.store.schedule(sid)
+    st = s2["state"] or {}
+    return {"ok": not st.get("_error"), "error": st.get("_error", ""), "fired": s2["last_task"] != s.get("last_task"),
+            "task_id": s2["last_task"] if s2["last_task"] != s.get("last_task") else ""}
+
+
+@app.post("/api/schedules/{sid}/run")
+async def run_schedule(sid: str):
+    t = await sched.run_now(sid)
+    return {"task_id": t["id"]}
+
+
+# ------------------------------------------------------------------ memory
+@app.get("/api/memory")
+async def memory():
+    return {"facts": rt.store.facts(), "episodes": rt.store.episodes(50)}
+
+
+@app.post("/api/memory")
+async def add_memory(req: Request):
+    b = await req.json()
+    r = rt.store.add_fact(str(b.get("fact", "")), str(b.get("category") or "preference"), str(b.get("entity") or ""),
+                          source="user-ui", confidence=1.0)
+    if not r:
+        raise HTTPException(400, "empty fact")
+    await rt.audit("user", "memory.add", detail={"fact": r["fact"]})
+    return r
+
+
+@app.delete("/api/memory/{fid}")
+async def del_memory(fid: str):
+    rt.store.delete_fact(fid)
+    await rt.audit("user", "memory.forget", resource=fid)
+    return {"ok": True}
+
+
+# ------------------------------------------------------------------ notifications
+@app.get("/api/notifications")
+async def notifications():
+    return {"notifications": rt.store.notifications(50)}
+
+
+@app.post("/api/notifications/read")
+async def notifications_read():
+    rt.store.db.execute("UPDATE notifications SET read=1")
+    return {"ok": True}
+
+
+# ------------------------------------------------------------------ settings
+@app.get("/api/settings")
+async def get_settings():
+    return {"settings": rt.store.settings(), "skills": [{"name": s["name"], "description": s["description"]} for s in rt.skills()]}
+
+
+@app.put("/api/settings")
+async def put_settings(req: Request):
+    b = await req.json()
+    s = rt.store.set_settings(b)
+    await rt.audit("user", "settings.update", detail={k: v for k, v in b.items() if k != "extra_body"})
+    return {"settings": s}
+
+
+@app.post("/api/settings/test-model")
+async def test_model():
+    t0 = time.time()
+    try:
+        r = await rt.llm.chat([{"role": "user", "content": "只回复 OK 两个字母。Reply with just OK."}], purpose="test",
+                              max_tokens=400, no_think=True)
+        return {"ok": True, "reply": r["content"][:200], "latency_s": round(time.time() - t0, 2)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:500]}
+
+
+# ------------------------------------------------------------------ workspace files (read-only for the UI)
+@app.get("/api/files")
+async def files(path: str = ""):
+    base = os.path.realpath(os.path.join(WORKSPACE, path.lstrip("/")))
+    if not base.startswith(WORKSPACE):
+        raise HTTPException(400)
+    if not os.path.isdir(base):
+        raise HTTPException(404)
+    items = []
+    for n in sorted(os.listdir(base)):
+        if n.startswith("."):
+            continue
+        fp = os.path.join(base, n)
+        items.append({"name": n, "path": os.path.relpath(fp, WORKSPACE), "dir": os.path.isdir(fp),
+                      "size": os.path.getsize(fp) if os.path.isfile(fp) else None, "mtime": os.path.getmtime(fp)})
+    return {"path": os.path.relpath(base, WORKSPACE), "items": items}
+
+
+@app.get("/api/files/raw")
+async def file_raw(path: str):
+    fp = os.path.realpath(os.path.join(WORKSPACE, path.lstrip("/")))
+    if not fp.startswith(WORKSPACE + os.sep) or not os.path.isfile(fp) or "/.quarantine/" in fp:
+        raise HTTPException(404)
+    return FileResponse(fp)
+
+
+# ------------------------------------------------------------------ internal callbacks from Sentinel
+@app.post("/internal/approval_resolved", dependencies=[Depends(internal_auth)])
+async def approval_resolved(req: Request):
+    await rt.on_approval_resolved(await req.json())
+    return {"ok": True}
+
+
+@app.post("/internal/takeover_ended", dependencies=[Depends(internal_auth)])
+async def takeover_ended(req: Request):
+    await rt.on_takeover_ended(await req.json())
+    return {"ok": True}
+
+
+@app.exception_handler(HTTPException)
+async def http_exc(req, exc: HTTPException):
+    return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
