@@ -96,11 +96,17 @@ label.field > span { font-weight: 600; color: var(--text); }
 .dec-ALLOW, .dec-APPROVED { color: var(--ok); } .dec-DENY { color: var(--danger); } .dec-ASK_USER { color: var(--approve); }
 
 /* ---------------- chat */
-.chat { display: grid; grid-template-columns: 240px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); gap: 0; height: calc(100% + 40px); margin: -20px; }
+.chat { position: relative; display: grid; grid-template-columns: var(--conv-w, 240px) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); gap: 0; height: calc(100% + 40px); margin: -20px; }
+/* drag handle between the chat list and the thread (resizable chat list) */
+.conv-resizer { position: absolute; top: 0; bottom: 0; left: calc(var(--conv-w, 240px) - 4px); width: 8px; cursor: col-resize; z-index: 5; touch-action: none; }
+.conv-resizer::after { content: ""; position: absolute; top: 0; bottom: 0; left: 3px; width: 2px; background: transparent; transition: background .15s; }
+.conv-resizer:hover::after, .conv-resizer:focus-visible::after, .chat.resizing .conv-resizer::after { background: var(--accent); }
+.conv-resizer:focus-visible { outline: none; }
+.chat.resizing { cursor: col-resize; user-select: none; }
 .convlist { border-right: 1px solid var(--line); background: var(--surface); overflow: auto; padding: 10px; display: flex; flex-direction: column; gap: 2px; }
 .convlist .newchat { margin-bottom: 8px; justify-content: center; }
 .convlist .conv { padding: 7px 8px 7px 10px; border-radius: 8px; cursor: pointer; font-size: 13px; display: grid; grid-template-columns: 1fr auto; grid-template-rows: auto auto; column-gap: 6px; align-items: center; }
-.convlist .conv .ct { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.convlist .conv .ct { overflow: hidden; min-width: 0; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow-wrap: anywhere; line-height: 1.35; }
 .convlist .conv .cd { font-size: 11px; grid-column: 1; }
 .convlist .conv .cx { grid-column: 2; grid-row: 1 / span 2; border: 0; background: none; color: var(--faint); font-size: 16px; cursor: pointer; border-radius: 6px; padding: 0 6px; visibility: hidden; }
 .convlist .conv:hover .cx, .convlist .conv:focus-within .cx { visibility: visible; }
@@ -230,7 +236,7 @@ table.data tr.clickable { cursor: pointer; } table.data tr.clickable:hover { bac
 
 @media (max-width: 760px) {
   .chat { grid-template-columns: minmax(0, 1fr); }
-  .chat > .convlist { display: none; }
+  .chat > .convlist, .chat > .conv-resizer { display: none; }
   .thread-head .hist-btn { display: inline-flex; }
   .thread-head { padding: 8px 12px; }
   .thread-head .th-meta { display: none; }

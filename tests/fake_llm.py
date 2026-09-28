@@ -66,6 +66,22 @@ async def chat(req: Request):
     tools_done = [m for m in msgs if m["role"] == "tool"]
     n = len(tools_done)
     last_tool = tools_done[-1]["content"] if tools_done else ""
+    if "MAKEPDF" in goal:   # write a Chinese report, print it to PDF locally, hand it over
+        if n == 0:
+            return reply("", [tc("files_write", {"path": "reports/cn.md", "content":
+                "# AI 未来学院分析报告\n\n**结论**：本地生成，无需上传。\n\n| 公司 | 产品 |\n|---|---|\n| 腾讯 | WorkBuddy |\n\n"
+                "- 要点一\n  - 子项\n\n![图表](chart.png)\n\n![追踪](http://shop.test:8099/track-md.png)\n"})])
+        if n == 1:
+            return reply("", [tc("make_pdf", {"source": "reports/cn.md"})])
+        if n == 2:
+            return reply("", [tc("send_file", {"path": "reports/cn.pdf", "note": "PDF 版报告"})])
+        return reply("PDF 已发送 " + last_tool[:200])
+    if "SENDFILE" in goal:   # make a report, then hand it to the user as a download
+        if n == 0:
+            return reply("", [tc("files_write", {"path": "reports/brief.md", "content": "# Brief\n\nHello from Locius.\n"})])
+        if n == 1:
+            return reply("", [tc("send_file", {"path": "reports/brief.md", "note": "今天的简报 today's brief"})])
+        return reply("文件已发送 File sent: " + last_tool[:200])
     if "LOOPFEED" in goal:   # a model stuck re-opening the same RSS feed (the 2026-09-28 news-brief run)
         if not b.get("tools"):
             return reply(f"LOOP SUMMARY after {n} tool calls: feed read, email not sent.")

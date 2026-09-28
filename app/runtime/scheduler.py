@@ -32,6 +32,8 @@ ORPHAN_AFTER = 10 * 60          # "running" in the DB but no live worker (e.g. a
 WAITING = ("WAITING_APPROVAL", "WAITING_EXTERNAL", "PAUSED")
 STATUS_ZH = {"WAITING_APPROVAL": "等待你审批", "WAITING_EXTERNAL": "等待你接管浏览器", "PAUSED": "已暂停",
              "CREATED": "排队中", "PLANNING": "规划中", "RUNNING": "运行中"}
+STATUS_EN = {"WAITING_APPROVAL": "waiting for your approval", "WAITING_EXTERNAL": "waiting for you to take over the browser",
+             "PAUSED": "paused", "CREATED": "queued", "PLANNING": "planning", "RUNNING": "running"}
 
 
 def event_spec(spec: str) -> dict:
@@ -191,12 +193,19 @@ class Scheduler:
         except Exception:
             pass
 
+    def _en(self) -> bool:
+        return self.rt.store.settings().get("language") == "en"
+
     async def supersede(self, sch: dict, last: dict, manual: bool = False):
         was = last["status"]
-        why = STATUS_ZH.get(was, was)
-        reason = (f"你手动开始了新的一次运行，这次运行（{why}）已取消 (replaced by a manual run while {was})" if manual else
-                  f"定时任务「{sch['name']}」到了下一次运行时间，这次运行仍在「{why}」，已自动取消，由新的一次运行接替 "
-                  f"(superseded by the next scheduled run while {was})")
+        en = self._en()
+        why = (STATUS_EN if en else STATUS_ZH).get(was, was)
+        if en:
+            reason = (f"Cancelled: you started a new run while this one was {why}." if manual else
+                      f"Cancelled: \"{sch['name']}\" was due again while this run was still {why}; a fresh run replaced it.")
+        else:
+            reason = (f"你手动开始了新的一次运行，这次运行（{why}）已取消" if manual else
+                      f"定时任务「{sch['name']}」到了下一次运行时间，这次运行仍在「{why}」，已自动取消，由新的一次运行接替")
         await self.rt.cancel(last["id"], reason=reason)
         await self.rt.audit("scheduler", "schedule.superseded", last["id"], resource=sch["id"], result="cancelled",
                             detail={"status": was, "manual": manual})
@@ -204,13 +213,16 @@ class Scheduler:
             self._set_state(sch["id"], _skipped=None)
             return
         self._set_state(sch["id"], _superseded={"ts": time.time(), "task": last["id"], "status": was}, _skipped=None)
-        hint = ("想以后自动发送、不用每次点批准：审批时在范围里选「以后总是允许（同一目标）」。"
-                "Tip: choose \"Always allow\" in the approval dialog to stop being asked for this recipient."
-                if was == "WAITING_APPROVAL" else "")
-        await self._tell(f"⏰ 「{sch['name']}」上一次运行一直{why}，已自动取消",
-                         f"新的一次运行已经开始。The previous run was still {was.lower().replace('_', ' ')} "
-                         f"when the next run was due, so it was cancelled and a fresh run started. {hint}".strip(),
-                         task_id=last["id"])
+        if en:
+            hint = (" Tip: choose \"Always allow\" in the approval dialog so this doesn't need your click every time."
+                    if was == "WAITING_APPROVAL" else "")
+            await self._tell(f"⏰ \"{sch['name']}\": previous run cancelled",
+                             f"The previous run was still {why} when the next run was due, so it was cancelled and a fresh "
+                             f"run started.{hint}", task_id=last["id"])
+        else:
+            hint = ("想以后自动发送、不用每次点批准：审批时在范围里选「以后总是允许（同一目标）」。" if was == "WAITING_APPROVAL" else "")
+            await self._tell(f"⏰ 「{sch['name']}」上一次运行一直{why}，已自动取消", f"新的一次运行已经开始。{hint}",
+                             task_id=last["id"])
 
     async def note_skip(self, sch: dict, last: dict):
         prev = (sch.get("state") or {}).get("_skipped") or {}
@@ -223,11 +235,16 @@ class Scheduler:
                                              "told": time.time() if tell else told})
         if not tell:
             return
-        why = STATUS_ZH.get(last["status"], last["status"])
-        await self._tell(f"⏰ 「{sch['name']}」这次没有运行",
-                         f"上一次运行还在「{why}」，所以这次跳过了。处理完它（或在「任务」里取消）之后会恢复正常。"
-                         f"Skipped: the previous run is still {last['status'].lower().replace('_', ' ')}.",
-                         task_id=last["id"])
+        if self._en():
+            why = STATUS_EN.get(last["status"], last["status"])
+            await self._tell(f"⏰ \"{sch['name']}\" was skipped this time",
+                             f"The previous run is still {why}. Once you deal with it (or cancel it in Tasks), "
+                             "the schedule runs normally again.", task_id=last["id"])
+        else:
+            why = STATUS_ZH.get(last["status"], last["status"])
+            await self._tell(f"⏰ 「{sch['name']}」这次没有运行",
+                             f"上一次运行还在「{why}」，所以这次跳过了。处理完它（或在「任务」里取消）之后会恢复正常。",
+                             task_id=last["id"])
 
     async def poll_event(self, sch: dict):
         store = self.rt.store
@@ -249,9 +266,12 @@ class Scheduler:
         if events:
             fired = [x for x in st.get("_fired", []) if x > time.time() - 3600]
             if len(fired) >= MAX_EVENT_RUNS_PER_HOUR:
-                st["_error"] = f"1 小时内触发超过 {MAX_EVENT_RUNS_PER_HOUR} 次，已自动停用以防循环 (auto-disabled: too many runs)"
+                en = self._en()
+                st["_error"] = (f"Auto-disabled: fired more than {MAX_EVENT_RUNS_PER_HOUR} times in an hour (loop protection)"
+                                if en else f"1 小时内触发超过 {MAX_EVENT_RUNS_PER_HOUR} 次，已自动停用以防循环")
                 store.db.execute("UPDATE schedules SET enabled=0, state=? WHERE id=?", (dumps(st), sch["id"]))
-                n = store.notify(f"⚡ 触发器「{sch['name']}」已自动停用", st["_error"], level="warning")
+                n = store.notify(f"⚡ Trigger \"{sch['name']}\" was turned off" if en else f"⚡ 触发器「{sch['name']}」已自动停用",
+                                 st["_error"], level="warning")
                 await self.rt.publish({"kind": "notification", "notification": n})
                 return
             st["_fired"] = fired + [time.time()]

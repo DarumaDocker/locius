@@ -37,6 +37,25 @@ check("user told the scheduled run did not finish", any("LOOP 早报" in n.get("
       [n.get("title") for n in ns][:5])
 sc = [x for x in c.get(B + "/api/schedules").json()["schedules"] if x["id"] == sid][0]
 check("schedule card shows last run failed", sc["last_status"] == "FAILED", sc["last_status"])
+
+# same run with the app in English: the failure reason and the notice are English (no Chinese)
+c.put(B + "/api/settings", json={"language": "en"}, headers=H).raise_for_status()
+tid = c.post(f"{B}/api/schedules/{sid}/run", headers=H).json()["task_id"]
+t0 = time.time()
+while time.time() - t0 < 90:
+    t = c.get(f"{B}/api/tasks/{tid}").json()
+    if t["status"] in ("COMPLETED", "FAILED", "CANCELLED"):
+        break
+    time.sleep(0.5)
+cjk = lambda x: any("\u4e00" <= ch <= "\u9fff" for ch in x or "")
+check("EN: failure reason in English", t["status"] == "FAILED" and "step limit" in (t.get("error") or "") and not cjk(t.get("error")),
+      t.get("error"))
+ns = c.get(B + "/api/notifications", headers=H).json()["notifications"]
+mine = [n for n in ns if "LOOP 早报" in n.get("title", "") and "step limit" in n.get("title", "")]
+check("EN: notice in English", mine and not cjk(mine[0]["title"].replace("LOOP 早报", "")) and not cjk(mine[0]["body"].split("\n")[-1]),
+      [(n.get("title"), n.get("body", "")[-120:]) for n in ns[:3]])
+c.put(B + "/api/settings", json={"language": s0.get("language", "zh")}, headers=H)
+
 c.delete(f"{B}/api/schedules/{sid}", headers=H)
 c.put(B + "/api/settings", json={"max_steps": s0.get("max_steps", 30)}, headers=H)
 print("ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}")

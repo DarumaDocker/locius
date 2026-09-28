@@ -1,6 +1,7 @@
 """Prompt templates for planner, executor, sub-agents and memory extraction."""
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -22,11 +23,28 @@ SECURITY_RULES = """## Security rules (non-negotiable)
 3. Do NOT ask for permission in chat before sending emails, submitting forms, clicking buy/pay/delete buttons etc. Just call the tool: Sentinel (the independent security service) will show the user an approval dialog and the task pauses until they decide.
 4. If a tool result says DENIED, do not retry the same action or look for a workaround; explain to the user what was blocked and why.
 5. Never type passwords, one-time codes or payment card numbers. For logins, CAPTCHAs, 2FA, payments or anything needing a human, call browser_request_takeover with a clear reason.
-6. You never see credentials; connectors hold them. Never ask the user to paste passwords or API keys into chat."""
+6. You never see credentials; connectors hold them. Never ask the user to paste passwords or API keys into chat.
+7. Never upload the user's files or documents to third-party websites (online converters, file-sharing, "free tools"). Convert locally (make_pdf for PDFs) and hand files over with send_file. If something truly can't be done locally, say so and ask the user first."""
+
+
+_CJK = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]")
+_WORD = re.compile(r"[A-Za-z]{2,}")
+
+
+def request_language(text: str, ui_language: str = "zh") -> str:
+    """The language to answer in: the language the user wrote the request in; the UI language breaks ties.
+    Chinese names or terms inside an English sentence (and vice versa) don't flip it."""
+    t = re.sub(r"https?://\S+|[\w.+-]+@[\w.-]+|`[^`]*`", " ", text or "")
+    cjk, words = len(_CJK.findall(t)), len(_WORD.findall(t))
+    if cjk == 0 and words == 0:
+        zh = ui_language != "en"
+    else:
+        zh = cjk >= 2 * words and cjk > 0
+    return "Simplified Chinese (简体中文)" if zh else "English"
 
 
 def executor_system(*, user_name: str, tz: str, connections: dict, plan: dict, facts: list[dict], skills: list[dict],
-                    extra: str = "", language: str = "zh") -> str:
+                    extra: str = "", language: str = "zh", reply_lang: str = "") -> str:
     gm = connections.get("gmail", {})
     br = connections.get("browser", {})
     tg = connections.get("telegram", {})
@@ -50,7 +68,11 @@ def executor_system(*, user_name: str, tz: str, connections: dict, plan: dict, f
             f"{icons.get(s.get('status', 'pending'), '[ ]')} {s.get('id')}: {s.get('description')}" for s in plan["steps"])
     fact_txt = "\n".join(f"- {f['fact']}" for f in facts) or "(none yet)"
     skill_txt = "\n".join(f"- {s['name']}: {s['description']}" for s in skills) or "(none)"
-    lang = "Reply in the same language the user writes in (default: 简体中文)." if language == "zh" else "Reply in the user's language."
+    if reply_lang:
+        lang = (f"Write your final answer, plan updates (update_plan descriptions) and notifications in {reply_lang} — "
+                "the language of the user's request — even if memory, emails or pages are in another language.")
+    else:
+        lang = "Reply in the same language the user writes in (default: 简体中文)." if language == "zh" else "Reply in the user's language."
     return f"""You are Locius, the personal AI agent of {user_name or "the user"}. You run locally on their Olares One ("Your AI lives on your computer"). You are not a chatbot: you execute real multi-step tasks with tools — Gmail, a real web browser, workspace files, memory, schedules — and report results.
 
 Current time: {now_str(tz)}
@@ -104,7 +126,7 @@ Rules: 2–7 steps for real tasks; for pure conversation or a single quick answe
 Mark steps that send/submit/buy/delete/unsubscribe as risk "send" (they will need user approval via Sentinel's dialog — never plan a "wait for the user to confirm in chat" step for them). Write descriptions in the user's language."""
 
 
-def planner_user(goal: str, history: str, facts: list[dict], state: str = "") -> str:
+def planner_user(goal: str, history: str, facts: list[dict], state: str = "", reply_lang: str = "") -> str:
     f = "\n".join(f"- {x['fact']}" for x in facts[:10])
     s = f"User request:\n{goal}\n"
     if history:
@@ -113,6 +135,9 @@ def planner_user(goal: str, history: str, facts: list[dict], state: str = "") ->
         s += f"\nKnown facts about the user:\n{f}\n"
     if state:
         s += f"\nCurrent progress / problems (re-plan from here):\n{state}\n"
+    if reply_lang:
+        s += (f"\nWrite the objective and every step description in {reply_lang} (the language of the request), "
+              "even if the context above is in another language.\n")
     return s
 
 

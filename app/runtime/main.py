@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import mimetypes
 import os
 import time
 from contextlib import asynccontextmanager
@@ -399,11 +400,21 @@ async def files(path: str = ""):
 
 
 @app.get("/api/files/raw")
-async def file_raw(path: str):
+async def file_raw(path: str, download: int = 0):
     fp = os.path.realpath(os.path.join(WORKSPACE, path.lstrip("/")))
     if not fp.startswith(WORKSPACE + os.sep) or not os.path.isfile(fp) or "/.quarantine/" in fp:
         raise HTTPException(404)
-    return FileResponse(fp)
+    # download=1: save with its real name (the chat's download button); otherwise open in the browser (PDF, images).
+    # Active content (HTML/SVG/XML/JS, e.g. a page the agent downloaded) is never rendered on the app's own origin —
+    # it could call the app's APIs — so it is always a download, and sandboxed just in case.
+    mime = mimetypes.guess_type(fp)[0] or "application/octet-stream"
+    risky = any(x in mime for x in ("html", "svg", "xml", "javascript")) or fp.lower().endswith((".htm", ".html", ".svg", ".xhtml", ".js", ".mjs"))
+    inline = not download and not risky
+    headers = {"X-Content-Type-Options": "nosniff"}
+    if risky:
+        headers["Content-Security-Policy"] = "sandbox; default-src 'none'"
+    return FileResponse(fp, filename=os.path.basename(fp), content_disposition_type="inline" if inline else "attachment",
+                        media_type=mime if not risky else "application/octet-stream", headers=headers)
 
 
 # ------------------------------------------------------------------ internal callbacks from Sentinel

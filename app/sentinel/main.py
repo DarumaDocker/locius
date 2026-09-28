@@ -196,6 +196,48 @@ async def internal_notify(req: Request):
         return {"sent": False, "error": str(e)}
 
 
+@app.post("/internal/render_pdf", dependencies=[Depends(runtime_auth)])
+async def internal_render_pdf(req: Request):
+    """Print a workspace document (Markdown / text / HTML) to PDF on this machine — no online converters."""
+    b = await req.json()
+    body = {k: str(b.get(k) or "") for k in ("source", "markdown", "output", "title")}
+    try:
+        r = await actions.broker("POST", "/pdf", body, timeout=150)
+    except ActionError as e:
+        store.audit("sentinel", "pdf.render", task_id=str(b.get("task_id", "")), resource=body["source"] or "text",
+                    result="error", detail={"error": str(e)[:200]})
+        return {"error": str(e)}
+    store.audit("sentinel", "pdf.render", task_id=str(b.get("task_id", "")), resource=r.get("path", ""), result="success",
+                detail={"source": body["source"] or "(text)", "size": r.get("size")})
+    return r
+
+
+TG_FILE_MAX = 50 * 1024 * 1024   # Telegram Bot API upload limit
+
+
+@app.post("/internal/send_file", dependencies=[Depends(runtime_auth)])
+async def internal_send_file(req: Request):
+    """The agent sent a file to the chat. If that chat is the Telegram conversation, also deliver it there —
+    only ever to the configured owner chat (the bot never talks to anyone else)."""
+    b = await req.json()
+    conv, path, name = str(b.get("conv_id", "")), str(b.get("path", "")), str(b.get("name", "")) or "file"
+    if not (bot and bot.status.get("running") and conv and conv == (store.kv_get("tg_conv", "") or "")):
+        return {"sent": False}
+    try:
+        async with httpx.AsyncClient(timeout=120) as c:
+            r = await c.get(RUNTIME_URL + "/api/files/raw", params={"path": path, "download": 1})
+        if r.status_code != 200:
+            return {"sent": False, "error": f"读取文件失败 (HTTP {r.status_code})"}
+        if len(r.content) > TG_FILE_MAX:
+            return {"sent": False, "error": "文件超过 Telegram 的 50 MB 上限 (over Telegram's 50 MB limit)"}
+        await bot.send_document(name, r.content, str(b.get("caption", ""))[:900])
+    except Exception as e:
+        return {"sent": False, "error": str(e)[:200]}
+    store.audit("sentinel", "telegram.send_file", task_id=str(b.get("task_id", "")), resource=name, result="success",
+                detail={"size": len(r.content), "path": path})
+    return {"sent": True}
+
+
 @app.post("/internal/expire_approvals", dependencies=[Depends(runtime_auth)])
 async def internal_expire_approvals(req: Request):
     """A task ended without the user deciding (cancelled, or superseded by the next scheduled run):

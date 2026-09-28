@@ -347,6 +347,108 @@ async def health():
     return {"ok": True, "mode": broker.mode, "headless": broker.headless}
 
 
+# ================================================================== local PDF export
+# A separate headless Chromium (not the user's browser profile), JavaScript off and every network request blocked:
+# documents are printed on this machine and nothing in them can reach the internet while rendering.
+PDF_MAX_SRC = 5_000_000
+_pdf = {"browser": None, "lock": asyncio.Lock()}
+
+
+def _ws(rel: str) -> str:
+    p = os.path.realpath(os.path.join(WORKSPACE, str(rel or "").strip().lstrip("/")))
+    if not p.startswith(WORKSPACE + os.sep) or os.sep + ".quarantine" in p:
+        raise HTTPException(400, "路径必须在工作区内 (path must be inside the workspace)")
+    return p
+
+
+def _img_data(base_dir: str):
+    import base64
+    import mimetypes
+
+    def resolve(src: str) -> str | None:
+        if re.match(r"^[a-z]+:", src, re.I):
+            return None   # remote images are not fetched (no network while printing)
+        try:
+            p = os.path.realpath(os.path.join(base_dir, src))
+            if not p.startswith(WORKSPACE + os.sep) or not os.path.isfile(p) or os.path.getsize(p) > 10_000_000:
+                return None
+            mt = mimetypes.guess_type(p)[0] or ""
+            if mt not in ("image/png", "image/jpeg", "image/gif", "image/webp"):
+                return None
+            with open(p, "rb") as f:
+                return f"data:{mt};base64," + base64.b64encode(f.read()).decode()
+        except OSError:
+            return None
+    return resolve
+
+
+async def _print_pdf(doc: str) -> bytes:
+    async with _pdf["lock"]:
+        b = _pdf["browser"]
+        if b is None or not b.is_connected():
+            b = _pdf["browser"] = await broker.pw.chromium.launch(headless=True)
+        ctx = await b.new_context(java_script_enabled=False, locale="zh-CN")
+        try:
+            async def block(route):
+                if route.request.url.startswith("data:"):
+                    await route.continue_()
+                else:
+                    await route.abort()
+            await ctx.route("**/*", block)
+            page = await ctx.new_page()
+            await page.set_content(doc, wait_until="load", timeout=30000)
+            footer = ('<div style="width:100%;font-size:8px;color:#9ca3af;text-align:center;font-family:sans-serif">'
+                      '<span class="pageNumber"></span> / <span class="totalPages"></span></div>')
+            return await page.pdf(format="A4", print_background=True, prefer_css_page_size=True, display_header_footer=True,
+                                  header_template="<div></div>", footer_template=footer,
+                                  margin={"top": "18mm", "bottom": "20mm", "left": "16mm", "right": "16mm"})
+        finally:
+            await ctx.close()
+
+
+@app.post("/pdf", dependencies=[Depends(auth)])
+async def make_pdf(req: Request):
+    from app.common.mdhtml import md_to_html, page as html_page
+    b = await req.json()
+    src_rel, title = str(b.get("source") or ""), str(b.get("title") or "")
+    base = WORKSPACE
+    if src_rel:
+        sp = _ws(src_rel)
+        if not os.path.isfile(sp):
+            raise HTTPException(404, f"文件不存在 file not found: {src_rel}")
+        if os.path.getsize(sp) > PDF_MAX_SRC:
+            raise HTTPException(400, "源文件太大 (source over 5 MB)")
+        with open(sp, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+        base = os.path.dirname(sp)
+        ext = os.path.splitext(sp)[1].lower()
+    else:
+        text, ext = str(b.get("markdown") or ""), ".md"
+        if not text.strip():
+            raise HTTPException(400, "没有内容 (nothing to print)")
+    if not title:
+        m = re.search(r"^#\s+(.+)$", text, re.M)
+        title = m.group(1).strip() if m else (os.path.splitext(os.path.basename(src_rel))[0] if src_rel else "Document")
+    if ext in (".html", ".htm"):
+        doc = text   # printed with JavaScript off and no network, so scripts / trackers in it do nothing
+    elif ext in (".md", ".markdown", ".txt", ""):
+        body = md_to_html(text, _img_data(base)) if ext != ".txt" else f"<pre>{__import__('html').escape(text)}</pre>"
+        doc = html_page(title, body)
+    else:
+        raise HTTPException(400, f"不支持的格式 unsupported source type: {ext}（支持 .md .txt .html）")
+    out_rel = str(b.get("output") or "")
+    if not out_rel:
+        out_rel = (os.path.splitext(src_rel)[0] if src_rel else "reports/" + re.sub(r"[^\w\-\u4e00-\u9fff]+", "_", title)[:60]) + ".pdf"
+    if not out_rel.lower().endswith(".pdf"):
+        out_rel += ".pdf"
+    op = _ws(out_rel)
+    data = await _print_pdf(doc)
+    os.makedirs(os.path.dirname(op), exist_ok=True)
+    with open(op, "wb") as f:
+        f.write(data)
+    return {"path": os.path.relpath(op, WORKSPACE), "size": len(data), "title": title}
+
+
 # ================================================================== agent API
 @app.post("/agent/{action}", dependencies=[Depends(auth)])
 async def agent_action(action: str, req: Request):

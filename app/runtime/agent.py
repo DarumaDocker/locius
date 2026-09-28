@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import json
+import mimetypes
 import os
 import re
 import time
@@ -28,6 +29,7 @@ SKILLS_DIR = os.environ.get("SKILLS_DIR", os.path.join(os.path.dirname(os.path.d
 TERMINAL = {"COMPLETED", "FAILED", "CANCELLED"}
 WAITING = {"WAITING_APPROVAL", "WAITING_EXTERNAL", "PAUSED"}
 RESULT_LIMIT = 9000
+SEND_FILE_MAX = 200 * 1024 * 1024    # chat download; Telegram's own bot limit (50 MB) is checked by Sentinel
 SUBAGENT_TOOLS = {"gmail_search", "gmail_get_message", "gmail_get_thread", "browser_navigate", "browser_snapshot",
                   "browser_click", "browser_type", "browser_press", "browser_scroll", "browser_back", "browser_wait",
                   "browser_select", "files_read", "files_list", "files_search", "memory_search"}
@@ -96,6 +98,19 @@ LOCAL_TOOLS = [
     _fn("files_write", "写入工作区文件（报告、笔记、数据）Write a text file in the workspace (creates folders).",
         {"path": S, "content": S, "append": {"type": "boolean"}}, ["path", "content"]),
     _fn("files_search", "在工作区文件中搜索文字 Search text inside workspace files.", {"query": S}, ["query"]),
+    _fn("send_file", "把工作区里的文件发到对话里，用户可以直接点击下载（报告、PDF、图片、表格等）；如果对话来自 Telegram，也会发到 Telegram。"
+        "用户说「发给我」「让我下载」时用它，不要让用户自己去 Files 里找。"
+        " Send a workspace file to the user as a downloadable attachment in this chat (and to Telegram when the chat "
+        "came from Telegram). Use it whenever the user wants a file you made or downloaded.",
+        {"path": S, "note": {"type": "string", "description": "一句说明 one-line caption"}}, ["path"]),
+    _fn("make_pdf", "在本机把工作区文件（.md / .txt / .html）或一段 Markdown 生成 PDF（支持中文、表格、图片，A4，带页码）。"
+        "所有文件都在本机处理——绝对不要把用户的文件上传到在线转换网站。生成后如果用户要文件，用 send_file 发给他。"
+        " Make a PDF locally from a workspace file (.md/.txt/.html) or Markdown text. Never upload the user's documents "
+        "to online converters. Then use send_file if the user wants the file.",
+        {"source": {"type": "string", "description": "工作区里的源文件 workspace path of the source (.md/.txt/.html)"},
+         "markdown": {"type": "string", "description": "或者直接给 Markdown 内容 or Markdown text instead of a file"},
+         "output": {"type": "string", "description": "输出路径，默认与源文件同名 .pdf output path (default: next to source)"},
+         "title": S}),
     _fn("memory_search", "搜索长期记忆 Search long-term memory about the user.", {"query": S}, ["query"]),
     _fn("memory_remember", "记住用户明确要求记住的事实 Save a durable fact the user explicitly asked to remember.",
         {"fact": S, "category": S, "entity": S}, ["fact"]),
@@ -218,19 +233,24 @@ class Runtime:
             await self.event(task_id, "error", {"message": str(e)[:500]})
             t = self.store.task(task_id)
             if t:
-                self.store.add_msg(t["conv_id"], "assistant", f"⚠️ 任务失败 Task failed：{e}", task_id)
+                en = self.store.settings().get("language") == "en"
+                self.store.add_msg(t["conv_id"], "assistant", f"⚠️ Task failed: {e}" if en else f"⚠️ 任务失败：{e}", task_id)
                 await self.publish({"kind": "conv_update", "conv_id": t["conv_id"]})
-                await self._warn_unattended(t, "运行出错", f"{type(e).__name__}: {e}")
+                await self._warn_unattended(t, ("运行出错", "failed with an error"), f"{type(e).__name__}: {e}")
 
-    async def _warn_unattended(self, t: dict, what: str, detail: str):
-        """A scheduled / triggered run went wrong while nobody was watching: tell the user (app + Telegram)."""
+    async def _warn_unattended(self, t: dict, what: tuple[str, str], detail: str):
+        """A scheduled / triggered run went wrong while nobody was watching: tell the user (app + Telegram).
+        `what` = (Chinese, English) — the notice follows the app language."""
         if t.get("source") != "schedule":
             return
         sch = self.store.schedule(t["schedule_id"]) if t.get("schedule_id") else None
         name = (sch or {}).get("name") or truncate(t["goal"], 40)
-        title = f"⚠️ 「{name}」这次{what}"
-        body = (f"{truncate(detail, 600)}\n可以在「自动化」里点 ▶ 立即运行 重试，或在任务详情里查看过程。"
-                f" The scheduled run did not finish ({what}); open the task to see what happened, or run it again.")
+        if self.store.settings().get("language") == "en":
+            title = f"⚠️ \"{name}\" {what[1]}"
+            body = f"{truncate(detail, 600)}\nOpen the task to see what happened, or run it again with ▶ Run now in Automations."
+        else:
+            title = f"⚠️ 「{name}」这次{what[0]}"
+            body = f"{truncate(detail, 600)}\n可以在「自动化」里点 ▶ 立即运行 重试，或在任务详情里查看过程。"
         try:
             n = self.store.notify(title, body, task_id=t["id"], level="warning")
             await self.publish({"kind": "notification", "notification": n})
@@ -339,13 +359,20 @@ class Runtime:
                 out.append(f)
         return out[:15]
 
+    @staticmethod
+    def reply_lang(task: dict, settings: dict) -> str:
+        # the user's own words only: trigger payloads (emails, messages) come after the untrusted_content marker
+        own = str(task.get("goal") or "").split("<untrusted_content")[0]
+        return prompts.request_language(own, settings.get("language", "zh"))
+
     async def _plan(self, task: dict, facts: list[dict], history_txt: str, state: str = "") -> dict:
         s = self.store.settings()
         mcp = ((await self.catalog()).get("connections") or {}).get("mcp") or {}
         live = [f"{x['name']} (mcp:{x['id']})" for x in mcp.get("servers") or [] if x.get("enabled") and x.get("tools")]
         sys_prompt = prompts.PLANNER_SYSTEM + (f"\nConnected MCP servers: {', '.join(live)}." if live else "")
         msgs = [{"role": "system", "content": sys_prompt},
-                {"role": "user", "content": prompts.planner_user(task["goal"], history_txt, facts, state)}]
+                {"role": "user", "content": prompts.planner_user(task["goal"], history_txt, facts, state,
+                                                                 reply_lang=self.reply_lang(task, s))}]
         try:
             r = await self.llm.chat(msgs, purpose="planner", task_id=task["id"], max_tokens=1500, temperature=0.2,
                                     model=s.get("planner_model") or None, no_think=True)
@@ -458,7 +485,8 @@ class Runtime:
             t = self.store.task(task_id)
             transcript[0] = {"role": "system", "content": prompts.executor_system(
                 user_name=s["user_name"], tz=s["timezone"], connections=catalog.get("connections", {}), plan=t["plan"],
-                facts=facts, skills=self.skills(), extra=extra, language=s.get("language", "zh"))}
+                facts=facts, skills=self.skills(), extra=extra, language=s.get("language", "zh"),
+                reply_lang=self.reply_lang(t, s))}
             transcript = self._compress(transcript)
             force_final = steps >= max_steps
             tools = None if force_final else self._tools(catalog, schedule=bool(t["schedule_id"]) and not goal, goal=bool(goal))
@@ -509,7 +537,8 @@ class Runtime:
             self.store.update_task(task_id, transcript=transcript, result=final, plan=plan, finished_at=now_ts())
             if force_final:
                 # ran out of steps: this is not a success — say so instead of quietly marking it completed
-                why = f"达到步数上限（{max_steps} 步），任务没有做完 (step limit of {max_steps} reached; unfinished)"
+                why = (f"Stopped at the step limit ({max_steps} steps) before finishing" if s.get("language") == "en"
+                       else f"达到步数上限（{max_steps} 步），任务没有做完")
                 await self.set_status(task_id, "FAILED", error=why)
             else:
                 await self.set_status(task_id, "COMPLETED")
@@ -517,7 +546,7 @@ class Runtime:
             self.store.add_msg(t["conv_id"], "assistant", final, task_id)
             await self.publish({"kind": "conv_update", "conv_id": t["conv_id"]})
             if force_final:
-                await self._warn_unattended(t, f"达到 {max_steps} 步上限，没有做完", final)
+                await self._warn_unattended(t, (f"达到 {max_steps} 步上限，没有做完", f"hit the {max_steps}-step limit and didn't finish"), final)
                 return
             self.store.add_episode(task_id, f"{t['goal'][:200]} → {final[:600]}")
             if t["source"] == "schedule":
@@ -642,6 +671,35 @@ class Runtime:
             raise ValueError("路径必须在工作区内 (path must be inside the workspace)")
         return full
 
+    async def _send_file(self, t: dict, a: dict) -> str:
+        """Post a workspace file into the conversation as a download card (+ Telegram when the chat came from there)."""
+        p = self._path(a.get("path", ""))
+        if os.sep + ".quarantine" in p:
+            return "ERROR: 隔离区里的文件不能发送（可能不安全）Files in quarantine can't be sent."
+        if not os.path.isfile(p):
+            return f"ERROR: 文件不存在 file not found: {a.get('path', '')}. 用 files_list 确认路径 Check the path with files_list."
+        size = os.path.getsize(p)
+        if size > SEND_FILE_MAX:
+            return f"ERROR: 文件太大 ({size // 1_000_000} MB > {SEND_FILE_MAX // 1_000_000} MB) file too large to send."
+        rel = os.path.relpath(p, WORKSPACE)
+        note = truncate(str(a.get("note") or ""), 300)
+        info = {"type": "file", "path": rel, "name": os.path.basename(p), "size": size,
+                "mime": mimetypes.guess_type(p)[0] or "application/octet-stream", "note": note, "task_id": t["id"]}
+        self.store.add_msg(t["conv_id"], "system", dumps(info), t["id"])
+        await self.publish({"kind": "conv_update", "conv_id": t["conv_id"]})
+        extra = ""
+        try:
+            r = await self.sentinel("POST", "/internal/send_file", {"task_id": t["id"], "conv_id": t["conv_id"], "path": rel,
+                                                                    "name": info["name"], "caption": note}, timeout=120)
+            if r.get("sent"):
+                extra = " 也已发到 Telegram (also sent to Telegram)."
+            elif r.get("error"):
+                extra = f" Telegram 没有发出 (not sent to Telegram): {r['error']}"
+        except Exception:
+            pass
+        return (f"已发送到对话，用户可以直接点击下载 Sent to the chat as a download: {rel} ({size} bytes).{extra} "
+                "不需要再告诉用户去 Files 里找 No need to tell the user where to find it.")
+
     async def _local(self, t: dict, name: str, a: dict) -> str:
         tid = t["id"]
         if name == "update_plan":
@@ -709,6 +767,18 @@ class Runtime:
             with open(p, "a" if a.get("append") else "w", encoding="utf-8") as f:
                 f.write(str(a.get("content", "")))
             return f"已写入 written: {os.path.relpath(p, WORKSPACE)} ({os.path.getsize(p)} bytes)"
+        if name == "send_file":
+            return await self._send_file(t, a)
+        if name == "make_pdf":
+            if not (a.get("source") or a.get("markdown")):
+                return "ERROR: 需要 source（工作区文件）或 markdown（内容）Give either source or markdown."
+            r = await self.sentinel("POST", "/internal/render_pdf", {"task_id": tid, **{k: a.get(k) or "" for k in
+                                                                                    ("source", "markdown", "output", "title")}},
+                                    timeout=180)
+            if r.get("error") or not r.get("path"):
+                return f"ERROR: PDF 生成失败 (PDF export failed): {r.get('error') or r}"
+            return (f"PDF 已在本机生成 created locally: {r['path']} ({r.get('size', 0) // 1024} KB)。"
+                    "如果用户要这个文件，用 send_file 发给他 Use send_file to give it to the user.")
         if name == "files_search":
             q = str(a.get("query", "")).lower()
             hits = []

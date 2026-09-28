@@ -154,7 +154,7 @@ async function viewChat(root) {
   const wrap = h('div', { class: 'chat' });
   const list = h('div', { class: 'convlist' });
   const thread = h('div', { class: 'thread' });
-  wrap.append(list, thread); root.append(wrap);
+  wrap.append(list, thread, convResizer(wrap)); root.append(wrap);
   await loadConvs();
   if (S.conv && !S.convs.some(c => c.id === S.conv)) { S.conv = null; S.convData = null; }
   renderConvList(list);
@@ -167,6 +167,39 @@ async function viewChat(root) {
       if (!S.gmailReady && !S.conv) renderThread();
     }).catch(() => {});
   }
+}
+
+// Drag the divider to make the chat list wider (long titles) or narrower; double-click resets; arrow keys work too.
+const CONV_W = { min: 180, max: 560, def: 240 };
+function convResizer(wrap) {
+  let saved = 0;
+  try { saved = parseInt(localStorage.getItem('locius.convW') || '0', 10); } catch (e) {}
+  const set = (w, save) => {
+    const max = Math.min(CONV_W.max, Math.max(CONV_W.min, (wrap.clientWidth || 1200) * 0.6));
+    w = Math.round(Math.min(max, Math.max(CONV_W.min, w)));
+    wrap.style.setProperty('--conv-w', w + 'px');
+    bar.setAttribute('aria-valuenow', w);
+    if (save) { try { localStorage.setItem('locius.convW', String(w)); } catch (e) {} }
+    return w;
+  };
+  const cur = () => parseInt(getComputedStyle(wrap).getPropertyValue('--conv-w')) || CONV_W.def;
+  const bar = h('div', { class: 'conv-resizer', role: 'separator', tabindex: '0', 'aria-orientation': 'vertical',
+    'aria-valuemin': CONV_W.min, 'aria-valuemax': CONV_W.max, 'aria-label': T('调整对话列表宽度 Resize chat list'),
+    title: T('拖动调整宽度，双击恢复 Drag to resize, double-click to reset') });
+  bar.addEventListener('pointerdown', e => {
+    e.preventDefault(); bar.setPointerCapture(e.pointerId); wrap.classList.add('resizing');
+    const left = wrap.getBoundingClientRect().left;
+    const move = ev => set(ev.clientX - left, false);
+    const up = ev => { bar.removeEventListener('pointermove', move); bar.removeEventListener('pointerup', up);
+      bar.removeEventListener('pointercancel', up); wrap.classList.remove('resizing'); set(cur(), true); };
+    bar.addEventListener('pointermove', move); bar.addEventListener('pointerup', up); bar.addEventListener('pointercancel', up);
+  });
+  bar.addEventListener('dblclick', () => set(CONV_W.def, true));
+  bar.addEventListener('keydown', e => {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); set(cur() + (e.key === 'ArrowRight' ? 24 : -24), true); }
+  });
+  if (saved) requestAnimationFrame(() => set(saved, false));
+  return bar;
 }
 
 // start a fresh conversation: its own context, its own tasks
@@ -307,6 +340,8 @@ function renderThread(thread) {
             h('span', null, Tf("Sentinel 请求审批：{0}", (j.title || ''))),
             pending ? h('button', { class: 'btn approve small', onclick: () => openApproval(j.approval_id) }, T('去审批 Review')) :
               h('span', { class: 'small muted' }, T('已处理 resolved')))));
+        } else if (j.type === 'file') {
+          msgs.append(fileCard(j));
         } else if (j.type === 'takeover') {
           const active = t && t.status === 'WAITING_EXTERNAL';
           msgs.append(h('div', { class: 'msg' }, h('div', { class: 'sys-card takeover' }, '🖐',
@@ -355,6 +390,28 @@ function renderThread(thread) {
   }
   if (atBottom) { msgs.scrollTop = msgs.scrollHeight; requestAnimationFrame(() => { msgs.scrollTop = msgs.scrollHeight; }); }
   else if (keepScroll) msgs.scrollTop = keepScroll.scrollTop;
+}
+
+const fmtSize = n => n == null ? '' : n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(0) + ' KB' : (n / 1048576).toFixed(1) + ' MB';
+const FILE_ICON = m => /pdf/.test(m) ? '📕' : /^image\//.test(m) ? '🖼' : /sheet|excel|csv/.test(m) ? '📊' : /word|document/.test(m) ? '📘'
+  : /presentation|powerpoint/.test(m) ? '📙' : /zip|compressed|tar/.test(m) ? '🗜' : '📄';
+// a file the agent sent to the chat (send_file): download it, open it in a new tab, or see an image preview
+function fileCard(j) {
+  const url = 'api/files/raw?path=' + encodeURIComponent(j.path);
+  const mime = j.mime || '';
+  const canOpen = /^(application\/pdf|image\/(png|jpe?g|gif|webp)|text\/plain|text\/markdown|text\/csv|audio\/|video\/)/.test(mime);
+  return h('div', { class: 'msg assistant' }, h('div', { class: 'bubble filecard', style: 'max-width:420px' },
+    h('div', { class: 'row', style: 'gap:10px;align-items:center' },
+      h('span', { style: 'font-size:28px;line-height:1' }, FILE_ICON(mime)),
+      h('div', { style: 'flex:1;min-width:0' },
+        h('div', { style: 'font-weight:600;overflow-wrap:anywhere' }, j.name),
+        h('div', { class: 'small muted' }, [fmtSize(j.size), j.path].filter(Boolean).join(' · ')))),
+    j.note ? h('div', { class: 'small', style: 'margin-top:6px' }, j.note) : null,
+    /^image\/(png|jpe?g|gif|webp)/.test(mime) ? h('img', { src: url, alt: j.name, loading: 'lazy',
+      style: 'display:block;max-width:100%;max-height:260px;margin-top:8px;border-radius:8px' }) : null,
+    h('div', { class: 'row', style: 'gap:8px;margin-top:8px' },
+      h('a', { class: 'btn small primary', href: url + '&download=1', download: j.name, style: 'text-decoration:none' }, T('⬇ 下载 Download')),
+      canOpen ? h('a', { class: 'btn small', href: url, target: '_blank', rel: 'noopener', style: 'text-decoration:none' }, T('打开 Open')) : null)));
 }
 
 function planList(plan) {

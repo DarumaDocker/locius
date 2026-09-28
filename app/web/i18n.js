@@ -476,5 +476,9 @@ window.LOCIUS_EN = {
 "❌ 已拒绝": "❌ Denied",
 "最近已处理 Recent decisions": "Recent decisions",
 "范围 {0}": "Scope {0}",
-"还没有处理过的审批": "No decisions yet"
+"还没有处理过的审批": "No decisions yet",
+"⬇ 下载 Download": "⬇ Download",
+"打开 Open": "Open",
+"调整对话列表宽度 Resize chat list": "Resize chat list",
+"拖动调整宽度，双击恢复 Drag to resize, double-click to reset": "Drag to resize, double-click to reset"
 };
