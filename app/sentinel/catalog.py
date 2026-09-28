@@ -228,6 +228,48 @@ TOOLS: dict[str, dict] = {
                        "Always requires the user's approval — do not ask in chat, just call it. Slack mrkdwn: *bold*, _italic_, `code`.",
         "parameters": _obj({"channel": {"type": S}, "text": {"type": S}, "thread_ts": {"type": S}}, ["channel", "text"]),
     },
+    # ------------------------------------------------------------------ Google Calendar
+    "calendar_list_events": {
+        "connector": "calendar", "capability": "read", "operation": "read", "risk": "low", "data_class": "CONFIDENTIAL",
+        "description": "查看 Google 日历里的日程。List events on the user's Google Calendar between time_min and time_max "
+                       "(default: now → 7 days). Times like '2026-10-03 09:00' are in the calendar's time zone. Optional query "
+                       "filters by text (title, location, attendees). Returns id, title, start, end, location, attendees, meeting link.",
+        "parameters": _obj({"time_min": {"type": S}, "time_max": {"type": S}, "query": {"type": S},
+                            "calendar_id": {"type": S, "description": "default primary"},
+                            "max_results": {"type": "integer", "description": "1-100, default 25"}}),
+    },
+    "calendar_free_slots": {
+        "connector": "calendar", "capability": "read", "operation": "read", "risk": "low", "data_class": "CONFIDENTIAL",
+        "description": "找空闲时间。Find free time slots of at least duration_minutes between time_min and time_max within "
+                       "working hours (default 09:00–18:00, calendar time zone). Use it before proposing meeting times or bookings.",
+        "parameters": _obj({"time_min": {"type": S}, "time_max": {"type": S}, "duration_minutes": {"type": "integer"},
+                            "day_start": {"type": S, "description": "HH:MM, default 09:00"},
+                            "day_end": {"type": S, "description": "HH:MM, default 18:00"}}, ["time_min", "time_max"]),
+    },
+    "calendar_create_event": {
+        "connector": "calendar", "capability": "write", "operation": "create", "risk": "medium", "data_class": "CONFIDENTIAL",
+        "description": "在 Google 日历里新建日程（有参会人时会发邀请，需要审批）。Create an event. start/end like "
+                       "'2026-10-03 19:00' (calendar time zone) or all_day=true with dates. attendees = emails to invite "
+                       "(invites are sent — this needs the user's approval; just call it). reminder_minutes = popup reminder.",
+        "parameters": _obj({"title": {"type": S}, "start": {"type": S}, "end": {"type": S}, "all_day": {"type": "boolean"},
+                            "location": {"type": S}, "description": {"type": S},
+                            "attendees": {"type": "array", "items": {"type": S}},
+                            "reminder_minutes": {"type": "integer"}, "time_zone": {"type": S, "description": "IANA zone, optional"},
+                            "calendar_id": {"type": S}}, ["title", "start"]),
+    },
+    "calendar_update_event": {
+        "connector": "calendar", "capability": "write", "operation": "update", "risk": "high", "data_class": "CONFIDENTIAL",
+        "description": "修改日程（需要审批）。Change an existing event's title/time/location/description/attendees by event_id "
+                       "(from calendar_list_events). Giving only a new start keeps the duration. Attendees are notified.",
+        "parameters": _obj({"event_id": {"type": S}, "title": {"type": S}, "start": {"type": S}, "end": {"type": S},
+                            "location": {"type": S}, "description": {"type": S},
+                            "attendees": {"type": "array", "items": {"type": S}}, "calendar_id": {"type": S}}, ["event_id"]),
+    },
+    "calendar_delete_event": {
+        "connector": "calendar", "capability": "write", "operation": "delete", "risk": "high", "data_class": "CONFIDENTIAL",
+        "description": "删除/取消日程（需要审批）。Delete (cancel) an event by event_id; attendees get a cancellation.",
+        "parameters": _obj({"event_id": {"type": S}, "calendar_id": {"type": S}}, ["event_id"]),
+    },
     # ------------------------------------------------------------------ Notify
     "notify_telegram": {
         "connector": "telegram", "capability": "notify", "operation": "send", "risk": "low", "data_class": "PERSONAL",

@@ -1,16 +1,54 @@
 ---
 name: customer-support-chat
-description: 在网站上联系客服（网页聊天）Contact a company's customer support via its website chat and get an answer.
+description: 通过网页在线客服处理售后：退货退款、取消订阅、账单/费用、订单和物流问题 Handle customer service over web chat — returns & refunds, cancelling subscriptions, billing, order and delivery issues.
 ---
-# Contact customer support via web chat / 网页客服
+# Customer service via web chat / 在线客服
 
-1. Open the company's help/contact page (search `<company> contact support chat` on https://duckduckgo.com/html/?q=... if the URL is unknown).
-2. If a login is required, call browser_request_takeover("请登录 <site>") and wait. Never type passwords.
-3. Open the chat widget (look for buttons like Chat / Live chat / Contact us / Help / 在线客服). Widgets are often inside an iframe;
-   refs from iframes look like [f1e3].
-4. Write short, polite messages that state the user's case (order number, dates) exactly as the user gave them.
-   Each message you send may require approval from the user; that is expected.
-5. After sending, use browser_wait (20–60 s) and browser_snapshot to read replies. Repeat up to ~10 rounds.
-   If the agent asks for identity verification, card numbers or passwords → request takeover.
-6. Never agree to refunds, cancellations, account changes or payments the user didn't explicitly ask for.
-7. Final answer: what support said (quote key sentences), case/ticket number, promised dates, next steps.
+Locius can't make phone calls. It works through the company's website — self-service account pages, live chat, chat bots,
+help-center forms — or by email. Try them in that order unless the user says otherwise.
+
+## 1. Prepare the case (before contacting anyone)
+- Collect the facts from Gmail: gmail_search e.g. `from:<company> (order OR receipt OR invoice OR subscription) newer_than:1y`
+  and read the relevant emails: order / account number, dates, amounts, items, delivery status, earlier tickets.
+- Write down the goal and what outcomes are acceptable, from the user's words (e.g. "full refund, store credit NOT ok";
+  "cancel, not pause"; "lower the bill to ≤ S$50, otherwise cancel").
+- A key fact is missing (which order? which outcome?) → ask the user one short question first.
+
+## 2. Find the channel
+- Search `https://duckduckgo.com/html/?q=<company>+contact+live+chat` (or `+cancel+subscription`, `+return+refund`).
+- Self-service first: Account → Subscriptions / Orders → Return or Cancel is usually faster than chat.
+- Login needed → browser_request_takeover("请登录 <site>"). Never type passwords or one-time codes.
+- Chat widgets usually live in an iframe (refs look like [f1e3]). Look for Chat / Live chat / Messaging / Contact us /
+  Help / 在线客服.
+
+## 3. Chat
+- First message: one short paragraph — name on the account, order/account number, what happened, the outcome wanted.
+- Every message goes through Sentinel's approval dialog (the user can edit it, or choose "本任务 This task" to allow the
+  rest of this chat). Just send it; don't ask in chat.
+- After sending: browser_wait 15–45 s, then browser_snapshot to read the reply. Up to ~15 rounds.
+  With bots, use their menu words ("Talk to an agent", "Cancel subscription", "Return an item").
+- Be polite, factual and brief. Use only facts from the user or their emails — never invent order details.
+- Retention offers ("50% off for 3 months", "pause instead"): don't accept or refuse on your own unless the user already
+  said what they want — report the offer and ask.
+- Anything that commits money or changes the account (accepting an offer, confirming a cancellation, choosing a refund
+  method, agreeing to a fee) must match what the user asked for; the final confirm click goes through approval.
+- Asked for card numbers, passwords, OTP codes or ID numbers → browser_request_takeover so the user answers directly.
+- Chat closed or not offered → the help-center form, or an email to the support address (gmail_send, approval).
+
+## 4. Common cases
+- **Cancel subscriptions** — find what the user pays for: gmail_search
+  `(subscription OR receipt OR renewal OR membership OR "your plan") newer_than:6m`; list service · price · cycle ·
+  next renewal. Cancel only the ones the user picked; get the confirmation (page or email) and the date access ends.
+  (Unwanted newsletters are different — use gmail_unsubscribe for those.)
+- **Returns / refunds** — check the return window and conditions (order email, policy page); get the return label / RMA,
+  drop-off or pickup instructions, refund amount and timing.
+- **Bills / lowering a price** — note the current plan and price; look up the company's current public offers (web search)
+  to mention; ask politely for a better rate; report any offer before accepting.
+- **Delivery problems** — tracking number and status; ask for a resend or refund as the user prefers.
+
+## 5. Finish
+- Save a record: files_write `support/<company>-<YYYY-MM-DD>.md` with the key messages (short quotes), case/ticket
+  number, agent name, promises and dates.
+- A follow-up date (e.g. "refund in 5–7 days") → offer a goal that checks for it (goal_create), or create it if the user
+  asked for follow-up.
+- Final answer: the outcome, case/ticket number, what they promised and by when, what the user still needs to do.

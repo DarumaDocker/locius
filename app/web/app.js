@@ -556,7 +556,7 @@ function approvalForm(a, onDone) {
   if (s.warning) box.append(h('div', { class: 'why' }, B(s.warning)));
   const kv = h('dl', { class: 'kv' });
   for (const [k, v] of s.fields || []) {
-    const key = { '收件人 To': 'to', '抄送 Cc': 'cc', '主题 Subject': 'subject', '转发给 To': 'to' }[k];  // i18n-ok: server field ids
+    const key = { '收件人 To': 'to', '抄送 Cc': 'cc', '主题 Subject': 'subject', '转发给 To': 'to', '标题 Title': 'title', '开始 Start': 'start', '结束 End': 'end', '地点 Location': 'location' }[k];  // i18n-ok: server field ids
     kv.append(h('dt', null, B(k)));
     if (key && editable.has(key)) { const inp = h('input', { type: 'text', value: v || '' }); inputs[key] = inp; kv.append(h('dd', null, inp)); }
     else kv.append(h('dd', null, v || '—'));
@@ -583,7 +583,7 @@ function approvalForm(a, onDone) {
     if (editable.has('message_ids')) inputs.message_ids = { get value() { return checks.filter(c => c.checked).map(c => c.dataset.id); } };
   }
   if (s.body !== undefined && s.body !== null) {
-    const bodyKey = a.tool === 'gmail_forward' ? 'note' : a.tool === 'browser_type' ? 'text' : 'body';
+    const bodyKey = a.tool === 'gmail_forward' ? 'note' : a.tool === 'browser_type' ? 'text' : (a.tool || '').startsWith('calendar_') ? 'description' : (a.tool || '').startsWith('notion_') ? 'content' : 'body';
     if (editable.has(bodyKey)) { const ta = h('textarea', { rows: 8 }); ta.value = s.body || ''; inputs[bodyKey] = ta; box.append(h('label', { class: 'field' }, h('span', null, T('内容（可修改后批准）Content — editable')), ta)); }
     else box.append(h('pre', { class: 'md', style: 'white-space:pre-wrap' }, s.body));
   }
@@ -1086,10 +1086,50 @@ async function viewConnections(root) {
       T('在要让 Locius 读取的频道里输入 /invite @你的应用名')],
     ok: r => Tf("Slack 已连接 ✓ {0}，已加入 {1} 个频道", (r.team), (r.member_of.length)),
     perms: [['read', T('读取频道 / 讨论串 / 搜索'), 'read', 'low'], ['send', T('发送消息（每次需审批）'), 'send — approval', 'high']] });
+  const calendar = calendarCard(byName.calendar, permRow);
   const mcp = await mcpCard();
   root.append(h('div', { class: 'grid2' }, gmail, h('div', { class: 'stack' }, browser, telegram)), h('div', { style: 'height:16px' }),
-    h('div', { class: 'grid2' }, notion, slack), h('div', { style: 'height:16px' }), mcp,
+    h('div', { class: 'grid2' }, notion, slack), h('div', { style: 'height:16px' }), calendar, h('div', { style: 'height:16px' }), mcp,
     h('div', { style: 'height:16px' }), grants);
+}
+
+// --- Google Calendar (OAuth with the user's own Google Cloud client; tokens stay in Sentinel's vault)
+function calendarCard(c, permRow) {
+  c = c || { name: 'calendar', config: {}, permissions: {}, enabled: false, has_credential: false };
+  const connected = c.has_credential && c.enabled;
+  const redirect = location.origin + '/sentinel/api/connections/calendar/callback';
+  const cid = h('input', { type: 'text', placeholder: '1234567890-abc….apps.googleusercontent.com', autocomplete: 'off' });
+  const csec = h('input', { type: 'password', placeholder: c.has_credential ? T('已保存 saved（同一个客户端可留空）') : 'GOCSPX-…', autocomplete: 'new-password' });
+  const copyBtn = h('button', { class: 'btn small', onclick: safe(async () => { await navigator.clipboard.writeText(redirect); toast(T('已复制 Copied')); }) }, T('复制 Copy'));
+  return h('div', { class: 'card stack' },
+    h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, T('📅 Google 日历 Google Calendar')),
+      h('span', { class: 'chip ' + (connected ? 'ok' : '') }, connected ? Tf("已连接 {0}", (c.config.email || '')) : T('未连接 Not connected'))),
+    h('p', { class: 'sub' }, T('查看日程、找空闲时间、帮你建日程和改期（有参会人、修改或删除时每次需审批）。用你自己的 Google Cloud 授权，令牌加密保存在本机 Sentinel 保险箱里，Agent 和模型看不到。')),
+    connected ? h('div', { class: 'small muted' }, Tf("时区 {0}", (c.config.time_zone || '—'))) : null,
+    h('details', { open: !c.has_credential },
+      h('summary', null, h('b', null, c.has_credential ? T('重新连接 Reconnect') : T('连接 Connect'))),
+      h('div', { class: 'stack', style: 'margin-top:10px' },
+        h('ol', { class: 'steps-help' },
+          h('li', null, T('打开 '), h('a', { href: 'https://console.cloud.google.com/projectcreate', target: '_blank', rel: 'noopener' }, 'Google Cloud Console'), T('，新建一个项目（名字随意，如 Locius）')),
+          h('li', null, T('在「API 和服务 → 库」里搜索并启用 '), h('a', { href: 'https://console.cloud.google.com/apis/library/calendar-json.googleapis.com', target: '_blank', rel: 'noopener' }, 'Google Calendar API')),
+          h('li', null, T('「OAuth 同意屏幕 OAuth consent screen」：用户类型选「外部 External」，把你自己的 Gmail 加为测试用户；建议最后点「发布应用 Publish app」，否则授权 7 天就会过期')),
+          h('li', null, T('「凭据 Credentials → 创建凭据 → OAuth 客户端 ID」：应用类型选「Web 应用 Web application」，在「已获授权的重定向 URI」里填下面这个地址：'),
+            h('div', { class: 'row', style: 'flex-wrap:nowrap;margin-top:4px' }, h('code', { class: 'mono small', style: 'word-break:break-all' }, redirect), copyBtn)),
+          h('li', null, T('把生成的「客户端 ID」和「客户端密钥」粘贴到下面，点「连接 Google 日历」，在 Google 页面里同意授权'))),
+        h('label', { class: 'field' }, h('span', null, T('客户端 ID Client ID')), cid),
+        h('label', { class: 'field' }, h('span', null, T('客户端密钥 Client secret')), csec),
+        h('div', null, h('button', { class: 'btn primary', onclick: safe(async e => {
+          e.target.disabled = true;
+          try { const r = await sapi('connections/calendar/start', { method: 'POST', body: { client_id: cid.value.trim(), client_secret: csec.value.trim(), origin: location.origin } }); location.href = r.auth_url; }
+          finally { e.target.disabled = false; }
+        }) }, T('连接 Google 日历 Connect with Google'))))),
+    h('div', null, h('b', null, T('权限 Permissions')),
+      permRow(c, 'read', T('查看日程与空闲时间'), 'read', 'low'),
+      permRow(c, 'write', T('新建 / 修改 / 删除日程（邀请他人、修改、删除需审批）'), 'write', 'medium')),
+    c.has_credential ? h('div', { class: 'row' },
+      h('button', { class: 'btn small', onclick: safe(async () => { const t = await sapi('connections/calendar/test', { method: 'POST', body: {} }); toast(t.ok ? Tf("正常 ✓ 未来 7 天有 {0} 个日程", (t.upcoming)) : t.error, !t.ok); }) }, T('测试')),
+      h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: c.enabled, onchange: safe(async e => { await sapi('connections/calendar', { method: 'PUT', body: { enabled: e.target.checked } }); }) }), T('启用')),
+      h('button', { class: 'btn danger small', onclick: safe(async () => { if (!confirmInline(T('断开 Google 日历？授权会被删除。'))) return; await sapi('connections/calendar/credential', { method: 'DELETE' }); route(); }) }, T('断开 Disconnect'))) : null);
 }
 
 // --- MCP connectors (Model Context Protocol)

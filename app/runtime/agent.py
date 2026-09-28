@@ -111,6 +111,17 @@ LOCAL_TOOLS = [
          "markdown": {"type": "string", "description": "或者直接给 Markdown 内容 or Markdown text instead of a file"},
          "output": {"type": "string", "description": "输出路径，默认与源文件同名 .pdf output path (default: next to source)"},
          "title": S}),
+    _fn("make_xlsx", "在本机生成 Excel 表格（.xlsx）：表头加粗、首行冻结、可筛选、数字按数字存。可以有多个工作表。"
+        "数据用 sheets 给出，或者用 source 指定工作区里的 CSV / 含 Markdown 表格的文件。生成后用 send_file 发给用户。"
+        " Make an Excel workbook locally. Give sheets=[{name, columns:[...], rows:[[...], ...]}] or source (a workspace .csv, "
+        "or a .md file containing a Markdown table). Then use send_file if the user wants the file.",
+        {"output": {"type": "string", "description": "工作区里的输出路径 output path ending in .xlsx"},
+         "sheets": {"type": "array", "items": {"type": "object", "properties": {
+             "name": S, "columns": {"type": "array", "items": S},
+             "rows": {"type": "array", "items": {"type": "array", "items": {}}}}}},
+         "source": {"type": "string", "description": "或者：工作区里的 .csv / .md 文件 or a workspace .csv/.md file"},
+         "formulas": {"type": "boolean", "description": "保留以 = 开头的公式（如 =SUM(B2:B9)）keep simple formulas; default false"}},
+        ["output"]),
     _fn("memory_search", "搜索长期记忆 Search long-term memory about the user.", {"query": S}, ["query"]),
     _fn("memory_remember", "记住用户明确要求记住的事实 Save a durable fact the user explicitly asked to remember.",
         {"fact": S, "category": S, "entity": S}, ["fact"]),
@@ -147,6 +158,15 @@ LOCAL_TOOLS = [
     _fn("load_skill", "加载技能说明 Load a skill's detailed instructions by name.", {"name": S}, ["name"]),
 ]
 LOCAL_NAMES = {t["function"]["name"] for t in LOCAL_TOOLS}
+
+# step budget: keep the last steps for producing / sending what the user asked for
+BUDGET_RESERVE = 5
+RESEARCH_NUDGE_PAGES = 10
+BUDGET_MARK = "步数预算 step budget"
+BUDGET_MARK_PAGES = "调研提醒 research check"
+FINISH_TOOLS = {"update_plan", "files_write", "files_read", "files_list", "make_pdf", "make_xlsx", "send_file", "notify_user",
+                "memory_remember", "goal_update", "schedule_state_set", "gmail_send", "gmail_reply", "gmail_create_draft",
+                "slack_send_message", "notion_create_page", "notion_append", "calendar_create_event"}
 
 
 class Suspend(Exception):
@@ -400,6 +420,31 @@ class Runtime:
             tools = [t for t in tools if t["function"]["name"] in allow]
         return tools
 
+    @staticmethod
+    def _budget(transcript: list[dict], tools: list[dict], remaining: int) -> list[dict]:
+        """Keep the last steps for delivering what the user asked for.
+
+        A research-heavy task used to spend every step reading pages and hit the limit before writing the PDF / sending
+        the email. Now: (1) after many page visits, one nudge to start writing; (2) with BUDGET_RESERVE steps left, a note
+        to stop gathering and deliver; (3) in the last 2 steps only delivery tools remain."""
+        said = "\n".join(str(m.get("content") or "") for m in transcript if m.get("role") == "user")
+        pages = sum(1 for m in transcript if m.get("role") == "assistant"
+                    for c in m.get("tool_calls") or [] if c.get("function", {}).get("name") == "browser_navigate")
+        if pages >= RESEARCH_NUDGE_PAGES and BUDGET_MARK_PAGES not in said and remaining > BUDGET_RESERVE:
+            transcript.append({"role": "user", "content": f"（系统）[{BUDGET_MARK_PAGES}] 你已经打开了 {pages} 个网页。如果信息已经够用，"
+                               "现在就开始写结果/交付物；还缺的话最多再看 2–3 个页面，或者用 delegate 交给子 Agent 去查。"
+                               f" You have opened {pages} pages. If you have enough, start writing the result now; otherwise read at most "
+                               "2–3 more pages or delegate the rest to a sub-agent."})
+        if remaining <= BUDGET_RESERVE and BUDGET_MARK not in said:
+            transcript.append({"role": "user", "content": f"（系统）[{BUDGET_MARK}] 只剩 {remaining} 步了。停止继续搜集资料，用已有的信息马上完成"
+                               "用户要的交付物（写文件、生成 PDF/Excel、send_file、发邮件等），然后给出最终回答，并说明哪些没来得及核实。"
+                               f" Only {remaining} steps left: stop gathering, produce the deliverable the user asked for with what you "
+                               "have (write the file, make_pdf/make_xlsx, send_file, send the email…), then give the final answer and note "
+                               "anything left unverified."})
+        if remaining <= 2:
+            tools = [x for x in tools if x["function"]["name"] in FINISH_TOOLS] or tools
+        return tools
+
     def _compress(self, transcript: list[dict]) -> list[dict]:
         """Keep the context small: shrink old tool results, keep the last few intact."""
         total = sum(len(str(m.get("content") or "")) for m in transcript)
@@ -490,6 +535,8 @@ class Runtime:
             transcript = self._compress(transcript)
             force_final = steps >= max_steps
             tools = None if force_final else self._tools(catalog, schedule=bool(t["schedule_id"]) and not goal, goal=bool(goal))
+            if not force_final:
+                tools = self._budget(transcript, tools, max_steps - steps)
             if force_final:
                 transcript.append({"role": "user", "content": "（系统）已达到步数上限。请停止调用工具，总结目前完成的内容、结果和未完成的部分。"
                                                               " Step limit reached: summarize progress now without tools."})
@@ -635,6 +682,13 @@ class Runtime:
                 ok = False
             await self.audit("executor", name, task_id, resource="local", risk="low", decision="ALLOW",
                              result="success" if ok else "error", detail={"args": _preview_args(args)})
+        elif name == "browser_navigate" and (blocked := site_blocked(transcript, str(args.get("url", "")))):
+            content = (f"ERROR: [SITE BLOCKED site={blocked}] 这个网站之前已经拦截了自动浏览器，换网址也一样，不再重试。"
+                       "请换一个有同样信息的来源（例如订餐厅：Google 地图、Chope、TableCheck、餐厅官网），"
+                       "或者如果一定要用这个网站，调用 browser_request_takeover 请用户自己通过验证。"
+                       f" {blocked} already blocked automated browsing in this task; other URLs on it will be blocked too. "
+                       "Use another source, or browser_request_takeover if this exact site is essential.")
+            ok = False
         elif name in ext_names:
             try:
                 res = await self.sentinel("POST", "/internal/act", {"task_id": task_id, "call_id": call["id"], "tool": name,
@@ -655,6 +709,16 @@ class Runtime:
                                                    "_pending": {"call_id": call["id"], "calls": [call] + list(remaining or [])}})
             content = self._format_external(name, res)
             ok = st == "ok"
+            blk = (res.get("result") or {}).get("blocked") if st == "ok" and isinstance(res.get("result"), dict) else None
+            if blk:
+                site = site_brand((res.get("result") or {}).get("url") or args.get("url", ""))
+                content = (f"[SITE BLOCKED site={site}] 这个页面是反机器人拦截页（{blk.get('detail')}），不是网站的真实内容。"
+                           "整个网站都会拦截自动浏览器：不要再换网址重试。改用其他有同样信息的来源；"
+                           "如果一定要用这个网站，调用 browser_request_takeover，请用户自己完成验证后再继续。不要尝试破解验证码。"
+                           f" This is a bot-protection wall ({blk.get('detail')}), not the site's content. Do not retry other URLs "
+                           "on this site; switch to another source, or request a takeover if this site is essential.\n" + content)
+                ok = False
+                await self.event(task_id, "site_blocked", {"site": site, "kind": blk.get("kind"), "detail": blk.get("detail")})
         else:
             content = f"ERROR: 未知工具 unknown tool '{name}'. Available tools are listed in the tool schema."
             ok = False
@@ -699,6 +763,37 @@ class Runtime:
             pass
         return (f"已发送到对话，用户可以直接点击下载 Sent to the chat as a download: {rel} ({size} bytes).{extra} "
                 "不需要再告诉用户去 Files 里找 No need to tell the user where to find it.")
+
+    def _make_xlsx(self, a: dict) -> str:
+        from app.common import xlsx
+        out = str(a.get("output") or "").strip()
+        if not out:
+            return "ERROR: 需要 output（.xlsx 路径）Give an output path ending in .xlsx"
+        if not out.lower().endswith(".xlsx"):
+            out += ".xlsx"
+        p = self._path(out)
+        if os.sep + ".quarantine" in p:
+            return "ERROR: 不能写入隔离区"
+        sheets = a.get("sheets") or []
+        if not sheets and a.get("source"):
+            src = self._path(str(a["source"]))
+            if not os.path.isfile(src):
+                return f"ERROR: 文件不存在 file not found: {a['source']}"
+            text = open(src, encoding="utf-8", errors="replace").read()
+            rows = xlsx.rows_from_csv(text) if src.lower().endswith((".csv", ".tsv")) else xlsx.rows_from_markdown(text)
+            if not rows:
+                return "ERROR: 源文件里没有找到表格 no CSV rows / Markdown table found in source"
+            sheets = [{"name": os.path.splitext(os.path.basename(src))[0], "columns": rows[0], "rows": rows[1:]}]
+        if not isinstance(sheets, list) or not sheets:
+            return "ERROR: 需要 sheets 或 source Give sheets=[{name, columns, rows}] or a source file."
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        try:
+            info = xlsx.make(p, [x for x in sheets if isinstance(x, dict)], formulas=bool(a.get("formulas")))
+        except Exception as e:
+            return f"ERROR: Excel 生成失败 (xlsx export failed): {e}"
+        rel = os.path.relpath(p, WORKSPACE)
+        return (f"Excel 已在本机生成 created locally: {rel} ({os.path.getsize(p) // 1024 or 1} KB, sheets: "
+                f"{', '.join(info['sheets'])}, {info['rows']} rows)。如果用户要这个文件，用 send_file 发给他 Use send_file to give it to the user.")
 
     async def _local(self, t: dict, name: str, a: dict) -> str:
         tid = t["id"]
@@ -746,7 +841,13 @@ class Runtime:
             if os.sep + ".quarantine" + os.sep in p:
                 return "ERROR: 隔离区文件不可读取 (quarantined file)"
             limit = max(1000, min(int(a.get("max_chars") or 12000), 40000))
-            if p.lower().endswith(".pdf"):
+            if p.lower().endswith((".xlsx", ".xlsm")):
+                try:
+                    from app.common import xlsx
+                    txt = xlsx.read_text(p, limit)
+                except Exception as e:
+                    return f"ERROR: 无法读取 Excel 文件 (cannot read workbook): {e}"
+            elif p.lower().endswith(".pdf"):
                 try:
                     from pypdf import PdfReader
                     txt = "\n".join((pg.extract_text() or "") for pg in PdfReader(p).pages[:60])
@@ -779,6 +880,8 @@ class Runtime:
                 return f"ERROR: PDF 生成失败 (PDF export failed): {r.get('error') or r}"
             return (f"PDF 已在本机生成 created locally: {r['path']} ({r.get('size', 0) // 1024} KB)。"
                     "如果用户要这个文件，用 send_file 发给他 Use send_file to give it to the user.")
+        if name == "make_xlsx":
+            return self._make_xlsx(a)
         if name == "files_search":
             q = str(a.get("query", "")).lower()
             hits = []
@@ -789,7 +892,7 @@ class Runtime:
                     rel = os.path.relpath(fp, WORKSPACE)
                     if q in fn.lower():
                         hits.append(f"{rel} (文件名匹配 name match)")
-                    if fnmatch.fnmatch(fn.lower(), "*.pdf") or os.path.getsize(fp) > 5_000_000:
+                    if fn.lower().endswith((".pdf", ".xlsx", ".xlsm", ".png", ".jpg", ".zip")) or os.path.getsize(fp) > 5_000_000:
                         continue
                     try:
                         with open(fp, encoding="utf-8", errors="ignore") as f:
@@ -952,6 +1055,36 @@ class Runtime:
             await self.event(t["id"], "memory_saved", {"facts": added})
             await self.audit("memory", "memory.extract", t["id"], result="success", detail={"facts": added})
             await self.publish({"kind": "memory_update"})
+
+
+_CC_SLD = {"co", "com", "net", "org", "gov", "ac", "edu", "or", "ne", "go"}
+TAKEOVER_DONE_MARK = "用户已完成接管"
+
+
+def site_brand(url: str) -> str:
+    """opentable.com / opentable.sg / m.opentable.sg → 'opentable' (one site, many domains)."""
+    from urllib.parse import urlparse
+    u = url if "://" in (url or "") else "https://" + (url or "")
+    host = (urlparse(u).hostname or "").lower().strip(".")
+    parts = [p for p in host.split(".") if p]
+    if len(parts) >= 3 and len(parts[-1]) == 2 and parts[-2] in _CC_SLD:
+        return parts[-3]
+    return parts[-2] if len(parts) >= 2 else host
+
+
+def site_blocked(transcript: list[dict], url: str) -> str:
+    """The site of `url` showed a bot wall earlier in this task and the user hasn't taken over since → its brand."""
+    brand = site_brand(url)
+    if not brand:
+        return ""
+    mark = f"[SITE BLOCKED site={brand}]"
+    for m in reversed(transcript):
+        c = str(m.get("content") or "")
+        if m.get("role") == "tool" and TAKEOVER_DONE_MARK in c:
+            return ""
+        if m.get("role") == "tool" and c.startswith(mark):
+            return brand
+    return ""
 
 
 def _preview_args(a: dict) -> dict:

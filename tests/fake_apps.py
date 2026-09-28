@@ -226,3 +226,96 @@ async def slack(method: str, req: Request):
             return {"ok": False, "error": "not_allowed_token_type"}
         return {"ok": True, "messages": {"total": 1, "matches": [{"ts": "1.0", "user": "U2", "text": "found it", "channel": {"id": "C1", "name": "general"}, "permalink": "https://x"}]}}
     return {"ok": False, "error": "unknown_method"}
+
+
+# ------------------------------------------------------------------ Google OAuth + Calendar (0.2.7)
+from fastapi.responses import HTMLResponse, RedirectResponse  # noqa: E402
+from urllib.parse import urlencode  # noqa: E402
+
+G = {"codes": {}, "events": [], "log": [], "refresh_ok": True}
+
+
+@app.get("/g/auth")
+async def g_auth(client_id: str, redirect_uri: str, state: str, scope: str = "", access_type: str = ""):
+    code = "code-" + uuid.uuid4().hex[:8]
+    G["codes"][code] = {"client_id": client_id, "redirect_uri": redirect_uri, "scope": scope, "offline": access_type}
+    return RedirectResponse(redirect_uri + "?" + urlencode({"code": code, "state": state}), status_code=302)
+
+
+@app.post("/g/token")
+async def g_token(req: Request):
+    f = dict(await req.form())
+    G["log"].append({"token": {k: v for k, v in f.items() if k != "client_secret"}})
+    if f.get("client_secret") != "GOCSPX-test-secret-123":
+        return JSONResponse({"error": "invalid_client"}, status_code=401)
+    if f.get("grant_type") == "authorization_code":
+        c = G["codes"].pop(f.get("code", ""), None)
+        if not c or c["redirect_uri"] != f.get("redirect_uri"):
+            return JSONResponse({"error": "invalid_grant"}, status_code=400)
+        return {"access_token": "gat-1", "refresh_token": "grt-1", "expires_in": 3600}
+    if f.get("grant_type") == "refresh_token":
+        if not G["refresh_ok"] or f.get("refresh_token") != "grt-1":
+            return JSONResponse({"error": "invalid_grant"}, status_code=400)
+        return {"access_token": "gat-1", "expires_in": 3600}
+    return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
+
+
+def gauth(req: Request):
+    return req.headers.get("authorization") == "Bearer gat-1"
+
+
+@app.get("/g/userinfo")
+async def g_userinfo(req: Request):
+    return {"email": "lucas@example.com"} if gauth(req) else JSONResponse({}, status_code=401)
+
+
+@app.get("/cal/users/me/settings/timezone")
+async def g_tz(req: Request):
+    return {"value": "Asia/Singapore"} if gauth(req) else JSONResponse({}, status_code=401)
+
+
+@app.post("/cal/freeBusy")
+async def g_fb(req: Request):
+    if not gauth(req):
+        return JSONResponse({"error": {"message": "auth"}}, status_code=401)
+    busy = [{"start": e["start"]["dateTime"], "end": e["end"]["dateTime"]} for e in G["events"] if "dateTime" in e["start"]]
+    return {"calendars": {"primary": {"busy": busy}}}
+
+
+@app.get("/cal/calendars/{cid}/events")
+async def g_list(cid: str, req: Request):
+    if not gauth(req):
+        return JSONResponse({"error": {"message": "auth"}}, status_code=401)
+    return {"items": G["events"]}
+
+
+@app.post("/cal/calendars/{cid}/events")
+async def g_create(cid: str, req: Request):
+    if not gauth(req):
+        return JSONResponse({"error": {"message": "auth"}}, status_code=401)
+    b = await req.json()
+    ev = {"id": "ev" + uuid.uuid4().hex[:6], "status": "confirmed", "htmlLink": "https://calendar.google.com/e", **b}
+    G["events"].append(ev)
+    G["log"].append({"create": b, "sendUpdates": req.query_params.get("sendUpdates")})
+    return ev
+
+
+@app.get("/_g")
+async def g_state():
+    return {"events": G["events"], "log": G["log"]}
+
+
+@app.post("/_g/reset")
+async def g_reset():
+    G.update({"codes": {}, "events": [{"id": "busy1", "summary": "Board meeting", "status": "confirmed",
+                                        "start": {"dateTime": "2026-10-03T18:00:00+08:00"}, "end": {"dateTime": "2026-10-03T18:45:00+08:00"}}],
+              "log": [], "refresh_ok": True})
+    return {"ok": True}
+
+
+# a bot wall that answers 403 (like Akamai on OpenTable)
+@app.get("/wall")
+async def wall():
+    return HTMLResponse("<html><head><title>Access Denied</title></head><body><h1>Access Denied</h1>"
+                        "You don't have permission to access \"http://www.opentable.test/\" on this server.<p>"
+                        "Reference #18.4f2d3e17.1790590000.1a2b3c</body></html>", status_code=403)

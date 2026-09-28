@@ -66,6 +66,11 @@ DEFAULT_CONNECTIONS = {
         "permissions": {"read": True, "send": True},
         "enabled": 0,
     },
+    "calendar": {
+        "config": {"email": "", "time_zone": "", "client_id": ""},
+        "permissions": {"read": True, "write": True},
+        "enabled": 0,
+    },
 }
 
 

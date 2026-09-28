@@ -66,6 +66,41 @@ async def chat(req: Request):
     tools_done = [m for m in msgs if m["role"] == "tool"]
     n = len(tools_done)
     last_tool = tools_done[-1]["content"] if tools_done else ""
+    allu = "\n".join(str(m["content"]) for m in msgs if m["role"] == "user")
+    tnames = [t["function"]["name"] for t in (b.get("tools") or [])]
+    if "BUDGETPDF" in goal:   # a research task that keeps reading pages until the step budget says: deliver now
+        done = [m for m in msgs if m["role"] == "tool"]
+        if "step budget" not in allu and "browser_navigate" in tnames:
+            return reply("", [tc("browser_navigate", {"url": f"http://shop.test:8099/restaurants.html?p={n}"})])
+        if not any("PDF 已在本机生成" in str(m["content"]) for m in done):
+            return reply("", [tc("make_pdf", {"markdown": "# 调研简报\n\n- Kuriya Dining 19:00\n- Shinzo 19:30", "output": "reports/brief.pdf"})])
+        if not any("已发送到对话" in str(m["content"]) for m in done):
+            return reply("", [tc("send_file", {"path": "reports/brief.pdf", "note": "简报"})])
+        return reply(f"BUDGET DONE after {n} tool results; tools offered at the end: {','.join(sorted(tnames))}")
+    if "BLOCKSITE" in goal:
+        seq = [("browser_navigate", {"url": "http://opentable.test:8094/wall"}),
+               ("browser_navigate", {"url": "http://opentable.test:8094/wall?page=2"}),
+               ("browser_navigate", {"url": "http://shop.test:8099/restaurants.html"})]
+        if n < len(seq):
+            return reply("", [tc(*seq[n])])
+        return reply("BLOCK RESULTS:\n" + "\n=====\n".join(str(m["content"])[:300] for m in tools_done))
+    if "XLSXOUT" in goal:
+        if n == 0:
+            return reply("", [tc("make_xlsx", {"output": "reports/flights", "sheets": [
+                {"name": "直飞航班", "columns": ["航空公司", "起飞", "价格 SGD"],
+                 "rows": [["Scoot", "23:30", "600"], ["ZIPAIR", "00:40", "805"], ["ANA", "06:35", "1,085"]]}]})])
+        if n == 1:
+            return reply("", [tc("send_file", {"path": "reports/flights.xlsx", "note": "航班对比"})])
+        return reply("XLSX " + last_tool[:200])
+    if "CALBOOK" in goal:
+        if n == 0:
+            return reply("", [tc("calendar_free_slots", {"time_min": "2026-10-03 17:00", "time_max": "2026-10-03 22:00",
+                                                          "duration_minutes": 90, "day_start": "17:00", "day_end": "22:00"})])
+        if n == 1:
+            return reply("", [tc("calendar_create_event", {"title": "🍽 Kuriya Dining", "start": "2026-10-03 19:00", "end": "2026-10-03 21:00",
+                                                            "location": "Orchard", "description": "Ref ABC123, 2 people",
+                                                            "attendees": ["eva@example.com"], "reminder_minutes": 120})])
+        return reply("CAL " + "\n".join(str(m["content"])[:400] for m in tools_done))
     if "MAKEPDF" in goal:   # write a Chinese report, print it to PDF locally, hand it over
         if n == 0:
             return reply("", [tc("files_write", {"path": "reports/cn.md", "content":

@@ -37,6 +37,7 @@ BLOCKED_EXT = {".exe", ".msi", ".dmg", ".pkg", ".app", ".bat", ".cmd", ".com", "
 MAX_DOWNLOAD = 200 * 1024 * 1024
 SNAPSHOT_JS = open(os.path.join(os.path.dirname(__file__), "snapshot.js"), encoding="utf-8").read()
 FEED_JS = open(os.path.join(os.path.dirname(__file__), "feed.js"), encoding="utf-8").read()
+BLOCK_JS = open(os.path.join(os.path.dirname(__file__), "block.js"), encoding="utf-8").read()
 
 
 def format_feed(feed: dict, url: str) -> str:
@@ -58,6 +59,7 @@ class Broker:
         self.ctx = None
         self.pages: dict[str, object] = {}       # task_id -> page
         self.frame_maps: dict[str, dict] = {}    # task_id -> {prefix: frame}
+        self.nav_status: dict[str, int] = {}     # task_id -> HTTP status of the last navigation
         self.view_task: str = ""
         self.mode = "agent"                      # agent | user
         self.takeover_reason = ""
@@ -474,7 +476,8 @@ async def agent_action(action: str, req: Request):
                 if not ok:
                     raise HTTPException(403, why)
                 try:
-                    await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                    resp = await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                    broker.nav_status[task_id] = resp.status if resp else 0
                 except Exception as e:
                     if "ERR_BLOCKED_BY_CLIENT" in str(e):
                         raise HTTPException(403, "该地址被安全策略拦截 (blocked by egress policy)")
@@ -552,6 +555,13 @@ async def agent_action(action: str, req: Request):
         except Exception as e:
             raise HTTPException(500, f"浏览器错误 browser error: {str(e)[:300]}")
         snap = await broker.snapshot(task_id, body.get("max_chars", 12000))
+        if action in ("navigate", "click", "snapshot", "back", "wait", "press"):
+            try:
+                blk = await page.main_frame.evaluate(BLOCK_JS, broker.nav_status.get(task_id, 0) if action == "navigate" else 0)
+            except Exception:
+                blk = None
+            if blk:
+                snap["blocked"] = blk
         return snap
 
 

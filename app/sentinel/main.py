@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 import re
+import secrets
 import time
 from contextlib import asynccontextmanager
 
@@ -35,8 +36,10 @@ SHOTS = os.path.join(SDATA, "shots")
 EDITABLE = {"gmail_send": ["to", "cc", "subject", "body"], "gmail_reply": ["to", "cc", "subject", "body"],
             "gmail_create_draft": ["to", "cc", "subject", "body"], "gmail_forward": ["to", "note"],
             "browser_type": ["text"], "gmail_unsubscribe": ["message_ids"], "slack_send_message": ["text"],
-            "notion_create_page": ["title", "content"], "notion_append": ["content"]}
-CONNECTORS = ("gmail", "browser", "telegram", "notion", "slack")
+            "notion_create_page": ["title", "content"], "notion_append": ["content"],
+            "calendar_create_event": ["title", "start", "end", "location", "description"],
+            "calendar_update_event": ["title", "start", "end", "location", "description"]}
+CONNECTORS = ("gmail", "browser", "telegram", "notion", "slack", "calendar")
 SCOPE_TTL = {"SESSION": 8 * 3600, "PERMANENT": None, "TASK": None}
 
 store: Store = None  # type: ignore
@@ -144,7 +147,7 @@ async def catalog():
     for name in CONNECTORS:
         c = store.connection(name)
         ready = c["enabled"]
-        if name in ("notion", "slack"):
+        if name in ("notion", "slack", "calendar"):
             ready = ready and store.has_secret(f"cred_{name}_1")
         if name == "gmail":
             ready = ready and gmail_ready()
@@ -154,7 +157,8 @@ async def catalog():
             enabled.add(name)
         status[name] = {"ready": bool(ready), "permissions": c["permissions"],
                         "workspace": c["config"].get("workspace") or c["config"].get("team") or "" if name in ("notion", "slack") else "",
-                        "account": c["config"].get("email", "") if name == "gmail" else "",
+                        "account": c["config"].get("email", "") if name in ("gmail", "calendar") else "",
+                        "time_zone": c["config"].get("time_zone", "") if name == "calendar" else "",
                         "accounts": [a["email"] for a in sorted(mailboxes.ready_accounts(store), key=lambda a: a["id"] != mailboxes.default_id(store))] if name == "gmail" else []}
     status["mcp"] = mcp_hub.status(store)
     enabled |= {f"mcp:{x['id']}" for x in status["mcp"]["servers"] if x["enabled"]}
@@ -353,6 +357,30 @@ async def _summary(tool: str, args: dict, elem: dict | None, page: dict | None) 
         for k, v in (args.get("properties") or {}).items():
             s["fields"].append([f"属性 {k}", str(v)[:200]])
         s["body"] = args.get("content", "")
+    elif tool.startswith("calendar_"):
+        conf = store.connection("calendar")["config"]
+        s["title"] = {"calendar_create_event": "新建日程 Create event", "calendar_update_event": "修改日程 Update event",
+                      "calendar_delete_event": "删除日程 Delete event"}.get(tool, tool)
+        s["fields"] = [["日历 Calendar", f"{conf.get('email', '')} ({args.get('calendar_id') or 'primary'})"]]
+        if tool != "calendar_create_event":
+            try:
+                ev = await asyncio.to_thread(actions.calendar_event, store, str(args.get("event_id", "")), args.get("calendar_id"))
+                s["fields"].append(["原日程 Event", f"{ev['title']} · {ev['start']} → {ev['end']}"])
+                if ev.get("attendees"):
+                    s["fields"].append(["参会人 Attendees", ", ".join(ev["attendees"][:10])])
+            except Exception as e:
+                s["warning"] = f"无法读取原日程: {e}"
+        for label, k in (("标题 Title", "title"), ("开始 Start", "start"), ("结束 End", "end"), ("地点 Location", "location")):
+            if args.get(k) or (tool == "calendar_create_event" and k in ("title", "start")):
+                s["fields"].append([label, str(args.get(k, ""))])
+        if args.get("all_day"):
+            s["fields"].append(["全天 All day", "是 Yes"])
+        if args.get("attendees"):
+            from app.sentinel.gcal import attendees as _att
+            s["fields"].append(["邀请 Invite (会发邮件 sends email)", ", ".join(_att(args.get("attendees")))])
+        s["fields"].append(["时区 Time zone", args.get("time_zone") or conf.get("time_zone", "")])
+        if tool != "calendar_delete_event":
+            s["body"] = args.get("description", "")
     elif str(t["connector"]).startswith("mcp:"):
         srv, rec = mcp_hub.tool_info(store, tool)
         sname = srv["name"] if srv else t["connector"][4:]
@@ -593,6 +621,8 @@ async def save_conn(name: str, req: Request):
     if cfg is not None:
         cfg = {k: v for k, v in cfg.items() if k not in ("app_password", "bot_token", "password", "token", "workspace", "bot_id",
                                                           "team", "user", "user_id", "token_type")}
+        if name == "calendar":
+            cfg = {k: v for k, v in cfg.items() if k == "time_zone"}
         if name == "browser":
             for k in ("blocked_domains", "allowed_domains"):
                 if k in cfg and isinstance(cfg[k], str):
@@ -738,6 +768,93 @@ async def notion_cred(req: Request):
     store.save_connection("notion", {"workspace": ws, "bot_id": me.get("id", "")}, enabled=True)
     store.audit("user", "credential.notion.set", resource="notion", result="success", detail={"workspace": ws})
     return {"ok": True, "workspace": ws, "bot": me.get("name", ""), "visible": [f["title"] for f in found]}
+
+
+# ------------------------------------------------------------------ Google Calendar (OAuth, the user's own Google Cloud client)
+CAL_CALLBACK = "/sentinel/api/connections/calendar/callback"
+
+
+def _req_origin(req: Request) -> str:
+    host = (req.headers.get("x-forwarded-host") or req.headers.get("host", "")).split(",")[0].strip()
+    proto = (req.headers.get("x-forwarded-proto") or req.url.scheme or "https").split(",")[0].strip()
+    return f"{proto}://{host}"
+
+
+@app.post("/sentinel/api/connections/calendar/start", dependencies=[Depends(ui_auth)])
+async def calendar_start(req: Request):
+    """Step 1: save the OAuth client (vault) and return Google's consent URL."""
+    from app.sentinel import gcal
+    b = await req.json()
+    cid = str(b.get("client_id", "")).strip()
+    secret = str(b.get("client_secret", "")).strip()
+    old = store.get_secret("cred_calendar_client") or {}
+    if not secret and old.get("client_id") == cid:
+        secret = old.get("client_secret", "")
+    if not re.fullmatch(r"[0-9]+-[A-Za-z0-9_]+\.apps\.googleusercontent\.com", cid):
+        raise HTTPException(400, "请粘贴 OAuth 客户端 ID（形如 1234-abc.apps.googleusercontent.com）(Client ID)")
+    if not re.fullmatch(r"[A-Za-z0-9_\-]{10,100}", secret):
+        raise HTTPException(400, "请粘贴客户端密钥 Client secret（GOCSPX- 开头）")
+    origin = _req_origin(req)
+    given = str(b.get("origin", "")).strip().rstrip("/")
+    if re.fullmatch(r"https?://[^/\s]+", given) and given.split("://", 1)[1] == origin.split("://", 1)[1]:
+        origin = given          # the address the user's browser really uses (scheme as seen behind the proxy)
+    redirect = origin + CAL_CALLBACK
+    state = secrets.token_urlsafe(24)
+    store.put_secret("calendar", {"client_id": cid, "client_secret": secret}, handle="cred_calendar_client")
+    store.kv_set("calendar_oauth", {"state": state, "ts": time.time(), "redirect": redirect})
+    store.audit("user", "credential.calendar.start", resource="calendar", result="success", detail={"client_id": cid[:24]})
+    return {"auth_url": gcal.auth_url(cid, redirect, state), "redirect_uri": redirect}
+
+
+def _cal_page(ok: bool, msg: str) -> Response:
+    from html import escape
+    color = "#1F6F5C" if ok else "#B42318"
+    body = (f"<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'><title>Locius</title>"
+            f"<body style='font-family:system-ui;padding:40px;max-width:560px;margin:auto'><h2 style='color:{color}'>"
+            f"{'✓' if ok else '✗'} Google Calendar</h2><p>{escape(msg)}</p><p><a href='../../../../#connections'>"
+            f"返回 Locius 连接页 Back to Connections</a></p>"
+            + ("<script>setTimeout(()=>location.href='../../../../#connections',1500)</script>" if ok else "") + "</body>")
+    return Response(body, media_type="text/html", headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
+
+
+@app.get(CAL_CALLBACK)
+async def calendar_callback(req: Request, code: str = "", state: str = "", error: str = ""):
+    """Step 2: Google redirects back here; swap the one-time code for a refresh token (kept in the vault)."""
+    from app.sentinel import gcal
+    pend = store.kv_get("calendar_oauth", {}) or {}
+    if error:
+        return _cal_page(False, f"Google 返回错误 (error): {error}")
+    if not state or not pend.get("state") or not secrets.compare_digest(state, pend["state"]) or time.time() - pend.get("ts", 0) > 900:
+        return _cal_page(False, "授权链接已失效或不匹配，请回到连接页重新点「连接 Google 日历」(state mismatch / expired)")
+    store.kv_set("calendar_oauth", {})
+    cl = store.get_secret("cred_calendar_client") or {}
+    try:
+        tok = await asyncio.to_thread(gcal.exchange_code, cl.get("client_id", ""), cl.get("client_secret", ""), code, pend["redirect"])
+        g = gcal.GCal(cl["client_id"], cl["client_secret"], tok["refresh_token"], access_token=tok["access_token"],
+                      expires_at=time.time() + int(tok.get("expires_in") or 3600))
+        try:
+            who = await asyncio.to_thread(g.userinfo)
+            tz = await asyncio.to_thread(g.settings_tz)
+            await asyncio.to_thread(g.list_events, None, None, "", "primary", 1)
+        finally:
+            g.close()
+    except gcal.GCalError as e:
+        store.audit("user", "credential.calendar.set", resource="calendar", result="failed", detail={"error": str(e)[:300]})
+        return _cal_page(False, str(e))
+    store.put_secret("calendar", {"client_id": cl["client_id"], "client_secret": cl["client_secret"],
+                                  "refresh_token": tok["refresh_token"]})
+    store.save_connection("calendar", {"email": who.get("email", ""), "time_zone": tz, "client_id": cl["client_id"]}, enabled=True)
+    store.audit("user", "credential.calendar.set", resource="calendar", result="success", detail={"email": who.get("email", ""), "tz": tz})
+    return _cal_page(True, f"已连接 {who.get('email', '')}（时区 {tz}）。Connected.")
+
+
+@app.post("/sentinel/api/connections/calendar/test", dependencies=[Depends(ui_auth)])
+async def calendar_test():
+    try:
+        r = await asyncio.to_thread(actions.calendar_call, store, "calendar_list_events", {}, "")
+    except actions.ActionError as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "upcoming": len(r.get("content", {}).get("events", []))}
 
 
 @app.post("/sentinel/api/connections/slack/credential", dependencies=[Depends(ui_auth)])
@@ -902,7 +1019,10 @@ async def delete_cred(name: str):
         for a in mailboxes.accounts(store):
             mailboxes.remove_account(store, a["id"])
     store.delete_secret(f"cred_{name}_1")
-    if name in ("notion", "slack"):
+    if name == "calendar":
+        store.delete_secret("cred_calendar_access")
+        store.delete_secret("cred_calendar_client")
+    if name in ("notion", "slack", "calendar"):
         store.save_connection(name, enabled=False)
     store.audit("user", f"credential.{name}.delete", resource=name, result="success")
     return {"ok": True}

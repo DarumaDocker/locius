@@ -124,6 +124,21 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
         risk = _bump(risk, "high")
         reasons.append("将归档（删除）一个 Notion 页面 (archives a Notion page)")
 
+    # ---------------------------------------------------------------- calendar rules
+    if t["connector"] == "calendar":
+        if not store.has_secret("cred_calendar_1"):
+            return Decision(DENY, t["risk"], "Google 日历尚未连接：请在「连接 Connections」页设置 (not connected)")
+        if tool == "calendar_create_event" and args.get("attendees"):
+            risk = _bump(risk, "high")
+            reasons.append("会给参会人发送日历邀请邮件 (sends calendar invitations)")
+        elif tool == "calendar_create_event" and tainted and len(str(args.get("description") or "")) > 300:
+            risk = _bump(risk, "high")
+            reasons.append("本任务读取过机密数据，这次要把较长的内容写进日程 (possible data egress)")
+        if tool == "calendar_update_event":
+            reasons.append("修改已有日程，参会人会收到更新 (changes an existing event)")
+        if tool == "calendar_delete_event":
+            reasons.append("删除日程，参会人会收到取消通知 (deletes an event)")
+
     # ---------------------------------------------------------------- prompt-injection escalation
     if ctx["injection"] and RISK_ORDER[risk] >= RISK_ORDER["medium"]:
         risk = _bump(risk, "high")

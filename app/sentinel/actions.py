@@ -118,6 +118,11 @@ async def execute(store, tool: str, args: dict, task_id: str) -> dict:
         if t["capability"] == "read":
             store.update_task_ctx(task_id, taint=t["data_class"])
         return res
+    if t["connector"] == "calendar":
+        res = await asyncio.to_thread(calendar_call, store, tool, args, task_id)
+        if t["capability"] == "read":
+            store.update_task_ctx(task_id, taint=t["data_class"])
+        return res
     if str(t["connector"]).startswith("mcp:"):
         from app.sentinel import mcp_hub
         return await mcp_hub.call(store, tool, args, task_id)
@@ -241,6 +246,10 @@ def _snap_envelope(store, task_id: str, snap: dict) -> dict:
            "title": snap.get("title"), "tabs": snap.get("tabs"), "snapshot": text}
     if flags:
         out["injection_warning"] = flags
+    blk = snap.get("blocked")
+    if isinstance(blk, dict):
+        out["blocked"] = {"kind": str(blk.get("kind", ""))[:40], "detail": str(blk.get("detail", ""))[:120],
+                          "status": int(blk.get("status") or 0)}
     return out
 
 
@@ -353,3 +362,54 @@ def _slack_sync(store, tool: str, args: dict, task_id: str) -> dict:
     finally:
         s.close()
     raise ActionError(f"no executor for {tool}")
+
+
+# ------------------------------------------------------------------ Google Calendar
+def calendar_client(store):
+    from app.sentinel.gcal import GCal
+    sec = store.get_secret("cred_calendar_1") or {}
+    if not sec.get("refresh_token"):
+        raise ActionError("Google 日历尚未连接：请在「连接 Connections」页连接 Google Calendar (not connected)")
+    conf = store.connection("calendar")["config"]
+    cache = store.get_secret("cred_calendar_access") or {}
+
+    def keep(tok: str, exp: float):
+        store.put_secret("calendar", {"access_token": tok, "expires_at": exp}, handle="cred_calendar_access")
+    return GCal(sec["client_id"], sec["client_secret"], sec["refresh_token"], conf.get("time_zone") or "UTC", on_token=keep,
+                access_token=cache.get("access_token", ""), expires_at=float(cache.get("expires_at") or 0))
+
+
+def calendar_event(store, event_id: str, calendar_id=None) -> dict:
+    from app.sentinel.gcal import GCalError
+    g = calendar_client(store)
+    try:
+        return g.get_event(event_id, calendar_id or "primary")
+    except GCalError as e:
+        raise ActionError(str(e))
+    finally:
+        g.close()
+
+
+def calendar_call(store, tool: str, args: dict, task_id: str) -> dict:
+    from app.sentinel.gcal import GCalError
+    g = calendar_client(store)
+    try:
+        if tool == "calendar_list_events":
+            r = g.list_events(args.get("time_min"), args.get("time_max"), str(args.get("query") or ""),
+                              str(args.get("calendar_id") or "primary"), int(args.get("max_results") or 25))
+            return _untrusted(store, task_id, "Google Calendar", r,
+                              "\n".join(f"{e['title']} {e.get('location', '')} {e.get('description', '')}" for e in r["events"]))
+        if tool == "calendar_free_slots":
+            return g.free_slots(args.get("time_min"), args.get("time_max"), int(args.get("duration_minutes") or 30),
+                                str(args.get("day_start") or "09:00"), str(args.get("day_end") or "18:00"))
+        if tool == "calendar_create_event":
+            return g.create_event(args)
+        if tool == "calendar_update_event":
+            return g.update_event(args)
+        if tool == "calendar_delete_event":
+            return g.delete_event(args)
+    except GCalError as e:
+        raise ActionError(str(e))
+    finally:
+        g.close()
+    raise ActionError(f"unknown calendar tool {tool}")

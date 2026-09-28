@@ -49,7 +49,7 @@ DEFAULT_SETTINGS = {
     "model_name": os.environ.get("PERSONA_MODEL", "Olares/unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL"),
     "planner_model": "",
     "temperature": 0.3,
-    "max_steps": 30,
+    "max_steps": 40,
     "max_tokens": 4096,
     "timezone": os.environ.get("TZ", "Asia/Singapore"),
     "user_name": "",
