@@ -53,7 +53,7 @@ DEFAULT_SETTINGS = {
     "max_tokens": 4096,
     "timezone": os.environ.get("TZ", "Asia/Singapore"),
     "user_name": "",
-    "language": "zh",
+    "language": "",          # "" = not chosen yet: the web UI fills it from the browser language on first visit
     "memory_extraction": True,
     "disable_thinking": False,
     "extra_body": "",

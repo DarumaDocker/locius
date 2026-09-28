@@ -57,17 +57,32 @@ async def chat(req: Request):
         return reply(json.dumps({"objective": "Share the Q4 plan with the team on Slack", "steps": [
             {"id": "s1", "description": "Read the Q4 plan page in Notion", "tool_hint": "notion", "risk": "read"},
             {"id": "s2", "description": "Post a short summary to #general (needs approval)", "tool_hint": "slack", "risk": "send"}]}))
+    if "planning module" in sys and "LANGCHECK" in msgs[-1]["content"]:
+        first = sys.split("\n", 1)[0][:40]
+        return reply(json.dumps({"objective": "PLANRULE=" + first, "steps": []}))
     if "planning module" in sys:
         return reply('```json\n{"objective": "test objective", "steps": [{"id":"s1","description":"do the thing","tool_hint":"x","risk":"read"}, {"id":"s2","description":"report","tool_hint":"x","risk":"read"}]}\n```')
     if msgs and "Extract durable facts" in msgs[-1]["content"]:
         return reply('{"facts": [{"fact": "Lucas prefers direct flights.", "category": "preference", "entity": ""}]}')
-    users = [m["content"] for m in msgs if m["role"] == "user" and not str(m["content"]).startswith("（系统）")]
+    users = [m["content"] for m in msgs if m["role"] == "user" and not str(m["content"]).startswith(("（系统）", "(System)"))]
     goal = users[-1] if users else ""
     tools_done = [m for m in msgs if m["role"] == "tool"]
     n = len(tools_done)
     last_tool = tools_done[-1]["content"] if tools_done else ""
     allu = "\n".join(str(m["content"]) for m in msgs if m["role"] == "user")
     tnames = [t["function"]["name"] for t in (b.get("tools") or [])]
+    if "ZHANSWER" in goal:   # a model that answers in Chinese although the setting is English
+        last = str(msgs[-1]["content"])
+        if last.startswith("(System) Settings → Language is English"):
+            return reply("Here is the most important email: the security alert from Google Workspace about a suspicious login.")
+        return reply("最重要的邮件是 Google Workspace 发来的可疑登录安全告警，建议尽快检查。")
+    if "LANGCHECK" in goal:   # report what language the agent's instructions are in
+        import re as _re
+        cjk = _re.compile(r"[\u3400-\u9fff]")
+        sysm = msgs[0]["content"] if msgs and msgs[0]["role"] == "system" else ""
+        tools_txt = json.dumps(b.get("tools") or [], ensure_ascii=False)
+        rule = sysm.split("\n", 1)[0][:40]
+        return reply(f"RULE={rule} | SYS_CJK={len(cjk.findall(sysm))} | TOOLS_CJK={len(cjk.findall(tools_txt))} | NTOOLS={len(tnames)}")
     if "BUDGETPDF" in goal:   # a research task that keeps reading pages until the step budget says: deliver now
         done = [m for m in msgs if m["role"] == "tool"]
         if "step budget" not in allu and "browser_navigate" in tnames:

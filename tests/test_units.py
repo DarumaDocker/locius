@@ -489,22 +489,17 @@ def test_feed_formatting():
     assert "Robotics" in txt and "1. A  [d]" in txt and "https://a" in txt and "不需要重复打开" in txt
 
 
-def test_reply_language_follows_the_request():
-    """English UI + English request must give an English plan even when memory/history are Chinese (2026-09-28 bug)."""
-    from app.runtime.prompts import request_language, planner_user, executor_system
+def test_agent_language_follows_the_setting():
+    """0.2.8: Settings → Language decides everything the agent writes (reasoning, plans, answers) — issue beclab/Olares#4201."""
+    from app.runtime.prompts import planner_user, executor_system
     from app.runtime.agent import Runtime
     en, zh = "English", "Simplified Chinese (简体中文)"
-    assert request_language("Can you check my Bytetrade inbox for emails that need a reply?", "en") == en
-    assert request_language("检查 clapper 邮箱，看看过去一周有没有重要邮件需要回复的？", "en") == zh
-    assert request_language("Email 张三 about the contract", "zh") == en          # a Chinese name doesn't flip it
-    assert request_language("帮我 check 一下 inbox", "en") == zh
-    assert request_language("https://example.com", "en") == en                   # nothing to go on: UI language
-    assert request_language("https://example.com", "zh") == zh
-    # trigger payloads (untrusted email text) don't decide the language
-    goal = "Summarize new emails for me\n\n---\n<untrusted_content source=\"trigger gmail\">你好，这是一封中文邮件</untrusted_content>"
-    assert Runtime.reply_lang({"goal": goal}, {"language": "zh"}) == en
+    goal = "检查 clapper 邮箱\n\n---\n<untrusted_content source=\"trigger gmail\">你好，这是一封中文邮件</untrusted_content>"
+    assert Runtime.reply_lang({"goal": goal}, {"language": "en"}) == en
+    assert Runtime.reply_lang({"goal": "Check my inbox"}, {"language": "zh"}) == zh
+    assert Runtime.reply_lang({"goal": "Check my inbox"}, {}) == zh           # unset = Chinese, as before
     p = planner_user("Check my inbox", "用户：你好", [{"fact": "Lucas 喜欢直飞"}], reply_lang=en)
-    assert p.rstrip().endswith("even if the context above is in another language.") and "in English" in p
+    assert p.rstrip().endswith("even if the request or the context above is in another language.") and "in English" in p
     s = executor_system(user_name="Lucas", tz="Asia/Singapore", connections={}, plan={}, facts=[], skills=[],
                         language="en", reply_lang=en)
-    assert "Write your final answer, plan updates (update_plan descriptions) and notifications in English" in s
+    assert s.startswith("LANGUAGE: ENGLISH.") and "notifications in English" in s

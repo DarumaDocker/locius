@@ -162,8 +162,8 @@ LOCAL_NAMES = {t["function"]["name"] for t in LOCAL_TOOLS}
 # step budget: keep the last steps for producing / sending what the user asked for
 BUDGET_RESERVE = 5
 RESEARCH_NUDGE_PAGES = 10
-BUDGET_MARK = "步数预算 step budget"
-BUDGET_MARK_PAGES = "调研提醒 research check"
+BUDGET_MARK = "step budget"
+BUDGET_MARK_PAGES = "research check"
 FINISH_TOOLS = {"update_plan", "files_write", "files_read", "files_list", "make_pdf", "make_xlsx", "send_file", "notify_user",
                 "memory_remember", "goal_update", "schedule_state_set", "gmail_send", "gmail_reply", "gmail_create_draft",
                 "slack_send_message", "notion_create_page", "notion_append", "calendar_create_event"}
@@ -326,8 +326,11 @@ class Runtime:
                 full = self.store.task(t["id"])
                 pend = full["pending"] or {}
                 pend["resolved"] = {"call_id": pend.get("call_id"), "decision": "takeover_ended",
-                                    "result": {"status": "ok", "result": "用户已完成接管并交还浏览器控制权。请先调用 browser_snapshot 查看当前页面状态再继续。"
-                                                                         " The user finished the takeover and handed control back; take a snapshot first."}}
+                                    "result": {"status": "ok", "result": prompts.L(
+                                        agent_lang(self.store.settings()),
+                                        "用户已完成接管并交还浏览器控制权。请先调用 browser_snapshot 查看当前页面状态再继续。",
+                                        f"{TAKEOVER_DONE_EN}: the user handed browser control back. Take a browser_snapshot first to see "
+                                        "the current page, then continue.")}}
                 self.store.update_task(t["id"], pending=pend)
                 await self.event(t["id"], "takeover_ended", {})
                 await self.set_status(t["id"], "RUNNING", waiting=None)
@@ -381,15 +384,15 @@ class Runtime:
 
     @staticmethod
     def reply_lang(task: dict, settings: dict) -> str:
-        # the user's own words only: trigger payloads (emails, messages) come after the untrusted_content marker
-        own = str(task.get("goal") or "").split("<untrusted_content")[0]
-        return prompts.request_language(own, settings.get("language", "zh"))
+        # one setting decides the agent's language (reasoning, plans, notes, answers) — see Settings → Language
+        return prompts.lang_name(agent_lang(settings))
 
     async def _plan(self, task: dict, facts: list[dict], history_txt: str, state: str = "") -> dict:
         s = self.store.settings()
         mcp = ((await self.catalog()).get("connections") or {}).get("mcp") or {}
         live = [f"{x['name']} (mcp:{x['id']})" for x in mcp.get("servers") or [] if x.get("enabled") and x.get("tools")]
-        sys_prompt = prompts.PLANNER_SYSTEM + (f"\nConnected MCP servers: {', '.join(live)}." if live else "")
+        sys_prompt = (prompts.language_rule(agent_lang(s)) + "\n\n" + prompts.PLANNER_SYSTEM
+                      + (f"\nConnected MCP servers: {', '.join(live)}." if live else ""))
         msgs = [{"role": "system", "content": sys_prompt},
                 {"role": "user", "content": prompts.planner_user(task["goal"], history_txt, facts, state,
                                                                  reply_lang=self.reply_lang(task, s))}]
@@ -421,7 +424,7 @@ class Runtime:
         return tools
 
     @staticmethod
-    def _budget(transcript: list[dict], tools: list[dict], remaining: int) -> list[dict]:
+    def _budget(transcript: list[dict], tools: list[dict], remaining: int, lang: str = "zh") -> list[dict]:
         """Keep the last steps for delivering what the user asked for.
 
         A research-heavy task used to spend every step reading pages and hit the limit before writing the PDF / sending
@@ -431,16 +434,18 @@ class Runtime:
         pages = sum(1 for m in transcript if m.get("role") == "assistant"
                     for c in m.get("tool_calls") or [] if c.get("function", {}).get("name") == "browser_navigate")
         if pages >= RESEARCH_NUDGE_PAGES and BUDGET_MARK_PAGES not in said and remaining > BUDGET_RESERVE:
-            transcript.append({"role": "user", "content": f"（系统）[{BUDGET_MARK_PAGES}] 你已经打开了 {pages} 个网页。如果信息已经够用，"
-                               "现在就开始写结果/交付物；还缺的话最多再看 2–3 个页面，或者用 delegate 交给子 Agent 去查。"
-                               f" You have opened {pages} pages. If you have enough, start writing the result now; otherwise read at most "
-                               "2–3 more pages or delegate the rest to a sub-agent."})
+            transcript.append({"role": "user", "content": prompts.L(
+                lang, f"（系统）[{BUDGET_MARK_PAGES}] 你已经打开了 {pages} 个网页。如果信息已经够用，"
+                      "现在就开始写结果/交付物；还缺的话最多再看 2–3 个页面，或者用 delegate 交给子 Agent 去查。",
+                f"(System) [{BUDGET_MARK_PAGES}] You have opened {pages} pages. If you have enough, start writing the result now; "
+                "otherwise read at most 2–3 more pages or delegate the rest to a sub-agent.")})
         if remaining <= BUDGET_RESERVE and BUDGET_MARK not in said:
-            transcript.append({"role": "user", "content": f"（系统）[{BUDGET_MARK}] 只剩 {remaining} 步了。停止继续搜集资料，用已有的信息马上完成"
-                               "用户要的交付物（写文件、生成 PDF/Excel、send_file、发邮件等），然后给出最终回答，并说明哪些没来得及核实。"
-                               f" Only {remaining} steps left: stop gathering, produce the deliverable the user asked for with what you "
-                               "have (write the file, make_pdf/make_xlsx, send_file, send the email…), then give the final answer and note "
-                               "anything left unverified."})
+            transcript.append({"role": "user", "content": prompts.L(
+                lang, f"（系统）[{BUDGET_MARK}] 只剩 {remaining} 步了。停止继续搜集资料，用已有的信息马上完成"
+                      "用户要的交付物（写文件、生成 PDF/Excel、send_file、发邮件等），然后给出最终回答，并说明哪些没来得及核实。",
+                f"(System) [{BUDGET_MARK}] Only {remaining} steps left: stop gathering, produce the deliverable the user asked for "
+                "with what you have (write the file, make_pdf/make_xlsx, send_file, send the email…), then give the final answer "
+                "and note anything left unverified.")})
         if remaining <= 2:
             tools = [x for x in tools if x["function"]["name"] in FINISH_TOOLS] or tools
         return tools
@@ -530,16 +535,20 @@ class Runtime:
             t = self.store.task(task_id)
             transcript[0] = {"role": "system", "content": prompts.executor_system(
                 user_name=s["user_name"], tz=s["timezone"], connections=catalog.get("connections", {}), plan=t["plan"],
-                facts=facts, skills=self.skills(), extra=extra, language=s.get("language", "zh"),
+                facts=facts, skills=self.skills(), extra=extra, language=agent_lang(s),
                 reply_lang=self.reply_lang(t, s))}
             transcript = self._compress(transcript)
             force_final = steps >= max_steps
             tools = None if force_final else self._tools(catalog, schedule=bool(t["schedule_id"]) and not goal, goal=bool(goal))
+            lg = agent_lang(s)
             if not force_final:
-                tools = self._budget(transcript, tools, max_steps - steps)
+                tools = self._budget(transcript, tools, max_steps - steps, lg)
+                if lg == "en":
+                    tools = prompts.strip_tools_en(tools)
             if force_final:
-                transcript.append({"role": "user", "content": "（系统）已达到步数上限。请停止调用工具，总结目前完成的内容、结果和未完成的部分。"
-                                                              " Step limit reached: summarize progress now without tools."})
+                transcript.append({"role": "user", "content": prompts.L(
+                    lg, "（系统）已达到步数上限。请停止调用工具，总结目前完成的内容、结果和未完成的部分。",
+                    "(System) Step limit reached: stop calling tools and summarize what is done, the results and what is left.")})
             await self.event(task_id, "thinking", {"step": steps + 1})
             try:
                 resp = await self.llm.chat(transcript, tools, purpose="executor", task_id=task_id)
@@ -573,9 +582,12 @@ class Runtime:
             final = resp["content"]
             if not final and not nudged:
                 nudged = True
-                transcript.append({"role": "user", "content": "（系统）请给出最终回答。Please write the final answer now."})
+                transcript.append({"role": "user", "content": prompts.L(agent_lang(s), "（系统）请给出最终回答。",
+                                                                        "(System) Please write the final answer now.")})
                 continue
             final = final or "（任务已结束，但模型没有返回文字说明。）"
+            if agent_lang(s) == "en" and prompts.cjk_share(final) > 0.5:
+                final = await self._rewrite_in_english(task_id, transcript, final)
             transcript.append({"role": "assistant", "content": final})
             plan = t["plan"]
             for st in plan.get("steps", []):
@@ -607,6 +619,22 @@ class Runtime:
                 asyncio.create_task(self._extract_memory(t))
             return
 
+    async def _rewrite_in_english(self, task_id: str, transcript: list[dict], final: str) -> str:
+        """English mode but the model answered in Chinese (e.g. memory says the user likes Chinese): ask once for English."""
+        msgs = transcript + [{"role": "assistant", "content": final},
+                             {"role": "user", "content": "(System) Settings → Language is English. Rewrite your complete final answer "
+                                                         "in English now — same content, same structure, no tool calls. Keep "
+                                                         "names, email subjects and quotes in their original language only where needed."}]
+        try:
+            r = await self.llm.chat(msgs, None, purpose="executor", task_id=task_id)
+        except LLMError:
+            return final
+        text = (r.get("content") or "").strip()
+        if text and prompts.cjk_share(text) < prompts.cjk_share(final):
+            await self.event(task_id, "language_fixed", {"from": "zh", "to": "en"})
+            return text
+        return final
+
     async def _replan(self, task_id: str, transcript: list[dict], facts, history_txt):
         t = self.store.task(task_id)
         recent = [m for m in transcript if m.get("role") == "tool"][-4:]
@@ -616,8 +644,9 @@ class Runtime:
         plan["version"] = int(t["plan"].get("version", 1)) + 1
         self.store.update_task(task_id, plan=plan)
         await self.event(task_id, "plan", plan)
-        transcript.append({"role": "user", "content": "（系统）多次失败后已重新规划，请按新计划换一种方法继续。"
-                                                      " Several steps failed; a new plan was made — try a different approach."})
+        transcript.append({"role": "user", "content": prompts.L(agent_lang(self.store.settings()),
+                                                                "（系统）多次失败后已重新规划，请按新计划换一种方法继续。",
+                                                                "(System) Several steps failed; a new plan was made — try a different approach.")})
 
     async def _suspend(self, task_id: str, sp: Suspend, transcript: list[dict]):
         self.store.update_task(task_id, transcript=transcript, pending=sp.waiting.pop("_pending"), waiting=sp.waiting)
@@ -722,6 +751,8 @@ class Runtime:
         else:
             content = f"ERROR: 未知工具 unknown tool '{name}'. Available tools are listed in the tool schema."
             ok = False
+        if not ok and agent_lang(self.store.settings()) == "en":
+            content = prompts.system_text_en(content)
         transcript.append({"role": "tool", "tool_call_id": call["id"], "content": content})
         await self.event(task_id, "tool_result", {"call_id": call["id"], "name": name, "ok": ok, "sub": sub,
                                                   "preview": truncate(content, 800)})
@@ -1010,9 +1041,13 @@ class Runtime:
         s = self.store.settings()
         catalog = await self.catalog()
         await self.event(parent["id"], "subagent_start", {"role": role, "task": truncate(task, 500)})
-        transcript = [{"role": "system", "content": prompts.SUBAGENT_SYSTEM.format(role=role, now=prompts.now_str(s["timezone"]))},
+        lg = agent_lang(s)
+        transcript = [{"role": "system", "content": prompts.SUBAGENT_SYSTEM.format(
+                          role=role, now=prompts.now_str(s["timezone"], lg), lang_rule=prompts.language_rule(lg))},
                       {"role": "user", "content": task}]
         tools = self._tools(catalog, allow=SUBAGENT_TOOLS)
+        if lg == "en":
+            tools = prompts.strip_tools_en(tools)
         for step in range(12):
             force = step == 11
             resp = await self.llm.chat(transcript, None if force else tools, purpose="subagent", task_id=parent["id"])
@@ -1057,8 +1092,14 @@ class Runtime:
             await self.publish({"kind": "memory_update"})
 
 
+def agent_lang(settings: dict) -> str:
+    """The agent's language: 'en' or 'zh' (Settings → Language; unset = Chinese, as before)."""
+    return "en" if (settings or {}).get("language") == "en" else "zh"
+
+
 _CC_SLD = {"co", "com", "net", "org", "gov", "ac", "edu", "or", "ne", "go"}
 TAKEOVER_DONE_MARK = "用户已完成接管"
+TAKEOVER_DONE_EN = "Takeover finished"
 
 
 def site_brand(url: str) -> str:
@@ -1080,7 +1121,7 @@ def site_blocked(transcript: list[dict], url: str) -> str:
     mark = f"[SITE BLOCKED site={brand}]"
     for m in reversed(transcript):
         c = str(m.get("content") or "")
-        if m.get("role") == "tool" and TAKEOVER_DONE_MARK in c:
+        if m.get("role") == "tool" and (TAKEOVER_DONE_MARK in c or TAKEOVER_DONE_EN in c):
             return ""
         if m.get("role") == "tool" and c.startswith(mark):
             return brand

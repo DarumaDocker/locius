@@ -4,6 +4,8 @@ B, F = "http://127.0.0.1:8080", "http://127.0.0.1:8094"
 H = {"X-Persona-UI": "1"}
 RT = {"X-Persona-Runtime": "rt-test"}
 c = httpx.Client(timeout=60, trust_env=False)
+# notices below are checked in Chinese; since 0.2.8 the language is a server setting (a UI test may have set English)
+c.put("http://127.0.0.1:8080/api/settings", json={"language": "zh"}, headers=H)
 fails = []
 def check(name, cond, info=""):
     print(("PASS " if cond else "FAIL ") + name, "" if cond else str(info)[:600]); (None if cond else fails.append(name))

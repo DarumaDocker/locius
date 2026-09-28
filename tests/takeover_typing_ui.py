@@ -5,6 +5,8 @@ from playwright.async_api import async_playwright
 B = "http://127.0.0.1:8080/"
 TEXT = "lucas.persona+test@example.com"
 async def main():
+    # this test reads the Chinese UI labels; the language is a server setting since 0.2.8
+    httpx.put(B + "api/settings", json={"language": "zh"}, headers={"X-Persona-UI": "1"}, trust_env=False)
     async with async_playwright() as p:
         br = await p.chromium.launch(); pg = await br.new_page(viewport={"width": 1400, "height": 900}, locale="zh-CN")
         await pg.goto(B + "#browser"); await pg.wait_for_timeout(1500)

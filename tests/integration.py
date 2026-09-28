@@ -89,7 +89,7 @@ r = c.post(B + "/sentinel/api/browser/input", json={"type": "navigate", "url": "
 check("user can drive during takeover", r.status_code == 200, r.text)
 c.post(B + "/sentinel/api/browser/release", json={}, headers=H)
 t = wait(tid, {"COMPLETED", "FAILED"})
-check("task resumes after hand-back", t["status"] == "COMPLETED" and "handed control back" in t["result"], t["result"][:200])
+check("task resumes after hand-back", t["status"] == "COMPLETED" and ("handed control back" in t["result"] or "用户已完成接管" in t["result"]), t["result"][:200])
 
 # 8 xml tool call fallback + file write
 t = wait(chat("XMLTOOL write"), {"COMPLETED", "FAILED"})

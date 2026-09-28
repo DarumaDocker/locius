@@ -33,8 +33,12 @@ Rules:
   time offered. Times on search/listing pages are often generic — mark them "未核实 unverified".
 - If several restaurants show exactly the same list of times, be suspicious and verify on one booking page.
 - Note deposits / prepayment, minimum spend, seating time limits (e.g. 90 min) and cancellation rules.
-- Checking more than 3 restaurants: delegate one sub-agent per 2–3 restaurants ("check availability for <restaurant> on
-  <date> <time> for <n> people via its Reserve with Google or booking page; report verified times, provider, deposit, link").
+- Verify each shortlisted restaurant (usually 3–5) with **delegate — one sub-agent per restaurant**. Their steps don't use
+  your budget, so every candidate gets checked instead of only the first one. Give each sub-agent everything it needs:
+  "Check real availability at <restaurant> (<address>) on <date> around <time> for <n> people. Open <Reserve with Google
+  link or booking page URL>, set party size and date, read the offered times. Do NOT book or press Continue/Confirm.
+  Report: verified times (or 'none near <time>'), booking provider, deposit/min spend, link."
+- If a sub-agent can't verify, keep that restaurant as "未核实 unverified" — never fill in times yourself.
 
 ## 3. Present the options
 Markdown table: restaurant · rating (reviews) · price · area · available times (✓ verified / unverified) · book via · notes.

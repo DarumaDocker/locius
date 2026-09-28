@@ -26,18 +26,21 @@ function biEn(s) {
 function T(s) { return LANG === 'en' ? (EN[s] ?? biEn(s)) : s; }
 function Tf(s, ...a) { return (LANG === 'en' ? (EN[s] ?? s) : s).replace(/\{(\d+)\}/g, (_, i) => (a[i] ?? '')); }
 const B = s => (LANG === 'en' ? biEn(String(s ?? '')) : s);   // server-provided bilingual text
-async function setLang(l) {
-  try { localStorage.setItem('locius_lang', l); } catch (e) { /* ignore */ }
-  try { await fetch('api/settings', { method: 'PUT', headers: { 'X-Persona-UI': '1', 'Content-Type': 'application/json' }, body: JSON.stringify({ language: l }) }); } catch (e) { /* ignore */ }
-  location.reload();
-}
 document.documentElement.lang = LANG === 'en' ? 'en' : 'zh-CN';
+// The language lives in Settings (server side) so the agent uses it too; localStorage only caches it for the first paint.
+// First visit (language never chosen): take the browser's language and save it, so an English Olares gets an English agent.
+async function syncLang() {
+  try {
+    const r = await api('settings');
+    const srv = (r.settings || {}).language;
+    if (srv === 'en' || srv === 'zh') {
+      if (srv !== LANG) { try { localStorage.setItem('locius_lang', srv); } catch (e) { /* ignore */ } location.reload(); }
+    } else {
+      await api('settings', { method: 'PUT', body: { language: LANG } });
+    }
+  } catch (e) { /* offline: keep the cached choice */ }
+}
 function i18nStatic() {
-  const lt = h('button', { class: 'chip lang-toggle',  // i18n-ok: shows the other language
-    title: LANG === 'en' ? '切换到中文' : 'Switch to English',  // i18n-ok
-    onclick: () => setLang(LANG === 'en' ? 'zh' : 'en') }, LANG === 'en' ? '中文' : 'EN');  // i18n-ok
-  const tr = document.querySelector('.top-right');
-  if (tr) tr.prepend(lt);
   if (LANG !== 'en') return;
   const set = (sel, text, attr) => { const el = document.querySelector(sel); if (el) { if (attr) el.setAttribute(attr, text); else el.textContent = text; } };
   set('.brand small', 'Olares One · Local Agent');
@@ -1301,6 +1304,7 @@ async function viewSettings(root) {
       h('div', { class: 'row' }, h('button', { class: 'btn small', onclick: safe(async () => { testOut.textContent = T('测试中…'); const t = await api('settings/test-model', { method: 'POST', body: {} });
         testOut.textContent = t.ok ? Tf("✓ {0}s：{1}", (t.latency_s), (t.reply)) : '✕ ' + t.error; }) }, T('测试模型 Test model')), testOut)),
     h('div', { class: 'card stack' }, h('h3', null, '🤖 Agent'),
+      langField(s, f),
       field('user_name', T('你的名字'), 'Your name'), field('timezone', T('时区（定时任务）'), 'Timezone'),
       field('max_steps', T('每个任务最多步数'), 'Max steps', 'number'),
       tog('memory_extraction', T('任务结束后自动提取长期记忆 Auto memory extraction')),
@@ -1309,7 +1313,18 @@ async function viewSettings(root) {
     const body = {};
     for (const [k, el] of Object.entries(f)) body[k] = el.type === 'checkbox' ? el.checked : el.type === 'number' ? Number(el.value) : el.value;
     await api('settings', { method: 'PUT', body }); toast(T('已保存 Saved')); refreshModelChip();
+    if (body.language && body.language !== LANG) { try { localStorage.setItem('locius_lang', body.language); } catch (e) { /* ignore */ } location.reload(); }
   }) }, T('保存设置 Save settings'))));
+}
+
+function langField(s, f) {
+  const sel = h('select', { 'aria-label': 'Language' },
+    h('option', { value: 'zh' }, '中文'),  // i18n-ok: language names are shown in their own language
+    h('option', { value: 'en' }, 'English'));
+  sel.value = s.language === 'en' || s.language === 'zh' ? s.language : LANG;
+  f.language = sel;
+  return h('label', { class: 'field' }, h('span', null, T('语言'), LANG === 'en' ? null : h('span', { class: 'muted' }, ' Language')), sel,
+    h('div', { class: 'small muted', style: 'font-weight:400' }, T('界面和 Agent 都用这个语言：思考过程、任务计划、回答、通知和定时任务的汇报。选 English 就全部用英文。')));
 }
 
 // ================================================================== live updates
@@ -1407,6 +1422,7 @@ document.addEventListener('click', e => { const p = $('#histPop'); if (p && !p.c
 window.addEventListener('hashchange', () => { route(); });
 i18nStatic();
 (async () => {
+  await syncLang();
   try { const hs = await sapi('health'); $('#navfoot').textContent = Tf("v{0} · 数据保存在本机 local-first", (hs.version)); } catch (e) {}
   // seed "seen" so old pending approvals don't all pop at once; open the newest one
   try { const r = await sapi('approvals?status=pending'); S.approvals = r.approvals; } catch (e) {}
