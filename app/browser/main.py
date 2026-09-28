@@ -36,6 +36,20 @@ BLOCKED_EXT = {".exe", ".msi", ".dmg", ".pkg", ".app", ".bat", ".cmd", ".com", "
                ".apk", ".deb", ".rpm", ".iso", ".dll", ".so"}
 MAX_DOWNLOAD = 200 * 1024 * 1024
 SNAPSHOT_JS = open(os.path.join(os.path.dirname(__file__), "snapshot.js"), encoding="utf-8").read()
+FEED_JS = open(os.path.join(os.path.dirname(__file__), "feed.js"), encoding="utf-8").read()
+
+
+def format_feed(feed: dict, url: str) -> str:
+    items = feed.get("items") or []
+    out = [f"📰 RSS/Atom feed「{feed.get('feed') or url}」— {len(items)} 条 items (newest first as published). "
+           "这就是完整内容，不需要重复打开 This is the whole feed; no need to open it again."]
+    for i, it in enumerate(items, 1):
+        out.append(f"{i}. {it.get('title') or '(no title)'}" + (f"  [{it['date']}]" if it.get("date") else ""))
+        if it.get("link"):
+            out.append(f"   {it['link']}")
+        if it.get("summary"):
+            out.append(f"   {it['summary']}")
+    return "\n".join(out)
 
 
 class Broker:
@@ -229,6 +243,15 @@ class Broker:
     async def snapshot(self, task_id: str, max_chars=12000) -> dict:
         page = await self.page_for(task_id)
         await self.settle(page, 200)
+        try:
+            feed = await page.main_frame.evaluate(FEED_JS)
+        except Exception:
+            feed = None
+        if feed and feed.get("items"):
+            tabs = len([p for p in self.ctx.pages if not p.is_closed()])
+            title = feed.get("feed") or ""
+            return {"url": page.url, "title": title, "snapshot": format_feed(feed, page.url), "truncated": False,
+                    "tabs": tabs, "feed": True}
         fmap = {}
         parts = []
         frames = [f for f in page.frames if not f.is_detached()]

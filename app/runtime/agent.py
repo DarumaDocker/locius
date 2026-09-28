@@ -31,6 +31,53 @@ RESULT_LIMIT = 9000
 SUBAGENT_TOOLS = {"gmail_search", "gmail_get_message", "gmail_get_thread", "browser_navigate", "browser_snapshot",
                   "browser_click", "browser_type", "browser_press", "browser_scroll", "browser_back", "browser_wait",
                   "browser_select", "files_read", "files_list", "files_search", "memory_search"}
+# Loop guard: small local models sometimes repeat the exact same call until the step budget is gone
+# (e.g. opening one RSS feed 24 times in a row). Identical calls are refused after REPEAT_STREAK in a row,
+# and read-type calls after REPEAT_TOTAL anywhere in the task. Tools where repeating is normal are exempt from the streak rule.
+REPEAT_STREAK = 2
+REPEAT_TOTAL = 3
+REPEAT_STREAK_OK = {"browser_scroll", "browser_press", "browser_wait", "browser_click", "browser_back", "update_plan"}
+REPEAT_READ = re.compile(r"navigate|search|read|list|_get|fetch|query")
+
+
+def _call_sig(name: str, args) -> str:
+    if isinstance(args, str):
+        try:
+            args = json.loads(args or "{}")
+        except ValueError:
+            pass
+    return name + " " + json.dumps(args or {}, ensure_ascii=False, sort_keys=True)
+
+
+def repeat_guard(transcript: list[dict], call: dict) -> str | None:
+    """Refusal text if `call` repeats an identical earlier call too often, else None."""
+    name = call["name"]
+    if name == "update_plan":
+        return None
+    sigs = []
+    for m in transcript:
+        for tc in m.get("tool_calls") or []:
+            if tc.get("id") == call["id"]:
+                break
+            fn = tc.get("function") or {}
+            sigs.append(_call_sig(fn.get("name", ""), fn.get("arguments")))
+        else:
+            continue
+        break
+    me = _call_sig(name, call.get("args") or {})
+    streak = 0
+    for sgn in reversed(sigs):
+        if sgn != me:
+            break
+        streak += 1
+    total = sigs.count(me)
+    if (name not in REPEAT_STREAK_OK and streak >= REPEAT_STREAK) or (REPEAT_READ.search(name) and total >= REPEAT_TOTAL):
+        n = total + 1
+        return (f"ERROR: 重复调用已拦截 — 这是第 {n} 次用完全相同的参数调用 {name}，结果不会改变，本次没有执行。"
+                "请直接使用前面已经拿到的结果继续下一步；如果这个来源读不到需要的内容，就跳过它，换别的来源，或者用已有的内容完成任务。"
+                f" Repeated identical call blocked ({name}, {n}x): the result will not change. Use what you already have, "
+                "skip this source, and move on to the next step.")
+    return None
 
 
 def _fn(name: str, desc: str, props: dict, required: list[str] | None = None) -> dict:
@@ -173,6 +220,23 @@ class Runtime:
             if t:
                 self.store.add_msg(t["conv_id"], "assistant", f"⚠️ 任务失败 Task failed：{e}", task_id)
                 await self.publish({"kind": "conv_update", "conv_id": t["conv_id"]})
+                await self._warn_unattended(t, "运行出错", f"{type(e).__name__}: {e}")
+
+    async def _warn_unattended(self, t: dict, what: str, detail: str):
+        """A scheduled / triggered run went wrong while nobody was watching: tell the user (app + Telegram)."""
+        if t.get("source") != "schedule":
+            return
+        sch = self.store.schedule(t["schedule_id"]) if t.get("schedule_id") else None
+        name = (sch or {}).get("name") or truncate(t["goal"], 40)
+        title = f"⚠️ 「{name}」这次{what}"
+        body = (f"{truncate(detail, 600)}\n可以在「自动化」里点 ▶ 立即运行 重试，或在任务详情里查看过程。"
+                f" The scheduled run did not finish ({what}); open the task to see what happened, or run it again.")
+        try:
+            n = self.store.notify(title, body, task_id=t["id"], level="warning")
+            await self.publish({"kind": "notification", "notification": n})
+            await self.sentinel("POST", "/internal/notify", {"task_id": t["id"], "text": f"{title}\n{body}"}, timeout=20)
+        except Exception:
+            pass
 
     async def cancel(self, task_id: str, reason: str = ""):
         self.cancel_flags.add(task_id)
@@ -443,10 +507,18 @@ class Runtime:
                 if st.get("status") in ("pending", "running"):
                     st["status"] = "done" if not force_final else st["status"]
             self.store.update_task(task_id, transcript=transcript, result=final, plan=plan, finished_at=now_ts())
-            await self.set_status(task_id, "COMPLETED")
+            if force_final:
+                # ran out of steps: this is not a success — say so instead of quietly marking it completed
+                why = f"达到步数上限（{max_steps} 步），任务没有做完 (step limit of {max_steps} reached; unfinished)"
+                await self.set_status(task_id, "FAILED", error=why)
+            else:
+                await self.set_status(task_id, "COMPLETED")
             await self.event(task_id, "final", {"text": truncate(final, 4000)})
             self.store.add_msg(t["conv_id"], "assistant", final, task_id)
             await self.publish({"kind": "conv_update", "conv_id": t["conv_id"]})
+            if force_final:
+                await self._warn_unattended(t, f"达到 {max_steps} 步上限，没有做完", final)
+                return
             self.store.add_episode(task_id, f"{t['goal'][:200]} → {final[:600]}")
             if t["source"] == "schedule":
                 sch = self.store.schedule(t["schedule_id"]) if t["schedule_id"] else None
@@ -515,7 +587,13 @@ class Runtime:
         await self.event(task_id, "tool_call", {"call_id": call["id"], "name": name, "args": _preview_args(args), "sub": sub})
         ext_names = {x["function"]["name"] for x in catalog.get("tools", [])}
         ok = True
-        if allow is not None and name not in allow:
+        repeated = repeat_guard(transcript, call)
+        if repeated:
+            content = repeated
+            ok = False
+            await self.audit("executor", name, task_id, resource="loop_guard", risk="low", decision="DENY",
+                             result="repeat_blocked", detail={"args": _preview_args(args)})
+        elif allow is not None and name not in allow:
             content = f"ERROR: tool {name} is not available to this agent."
             ok = False
         elif name in LOCAL_NAMES:

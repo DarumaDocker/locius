@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import tempfile
@@ -447,3 +448,42 @@ def test_telegram_remembers_rejected_private_chats(store):
     asyncio.run(bot.handle({"message": {"chat": {"id": -100, "type": "group", "title": "g"}, "text": "hi"}}, "999"))
     seen = store.kv_get("tg_seen_chats", [])
     assert [(x["chat_id"], x["name"]) for x in seen] == [("415690541", "Lucas Lu")]   # groups are not offered
+
+
+def test_repeat_guard_blocks_identical_loops():
+    """The 2026-09-28 news run opened the same RSS feed 24 times and ran out of steps."""
+    from app.runtime.agent import repeat_guard
+    tr, n = [{"role": "system", "content": ""}], [0]
+
+    def call(name, args):
+        n[0] += 1
+        c = {"id": f"c{n[0]}", "name": name, "args": args}
+        tr.append({"role": "assistant", "content": "", "tool_calls": [
+            {"id": c["id"], "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}]})
+        return repeat_guard(tr, c)
+
+    feed = {"url": "https://techcrunch.com/category/robotics/feed/"}
+    assert call("browser_navigate", feed) is None
+    assert call("browser_navigate", feed) is None
+    assert "重复调用已拦截" in call("browser_navigate", feed)          # 3rd in a row
+    assert call("browser_navigate", {"url": "https://a"}) is None
+    assert "Repeated identical call" in call("browser_navigate", feed)   # 4th overall, not in a row
+    # scrolling / clicking the same way several times in a row is normal
+    for _ in range(4):
+        assert call("browser_scroll", {"direction": "down"}) is None
+    # non-read tools: only the in-a-row rule
+    assert call("files_write", {"path": "a", "content": "x"}) is None
+    assert call("browser_type", {"ref": "e1", "text": "x"}) is None
+    assert call("files_write", {"path": "a", "content": "x"}) is None
+    # several calls in one assistant message: only the ones before this call count
+    tr.append({"role": "assistant", "content": "", "tool_calls": [
+        {"id": "m1", "type": "function", "function": {"name": "files_read", "arguments": '{"path": "z"}'}},
+        {"id": "m2", "type": "function", "function": {"name": "files_read", "arguments": '{"path": "z"}'}}]})
+    assert repeat_guard(tr, {"id": "m1", "name": "files_read", "args": {"path": "z"}}) is None
+    assert repeat_guard(tr, {"id": "m2", "name": "files_read", "args": {"path": "z"}}) is None
+
+
+def test_feed_formatting():
+    from app.browser.main import format_feed
+    txt = format_feed({"feed": "Robotics", "items": [{"title": "A", "link": "https://a", "date": "d", "summary": "s"}]}, "u")
+    assert "Robotics" in txt and "1. A  [d]" in txt and "https://a" in txt and "不需要重复打开" in txt

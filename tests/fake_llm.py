@@ -66,6 +66,10 @@ async def chat(req: Request):
     tools_done = [m for m in msgs if m["role"] == "tool"]
     n = len(tools_done)
     last_tool = tools_done[-1]["content"] if tools_done else ""
+    if "LOOPFEED" in goal:   # a model stuck re-opening the same RSS feed (the 2026-09-28 news-brief run)
+        if not b.get("tools"):
+            return reply(f"LOOP SUMMARY after {n} tool calls: feed read, email not sent.")
+        return reply("", [tc("browser_navigate", {"url": PAGE.rsplit('/', 1)[0] + "/feed.xml"})])
     if "SEND" in goal:
         if n == 0:
             return reply("I'll send it.", [tc("gmail_send", {"to": "john@example.com", "subject": "Tuesday", "body": "Tuesday 3pm works."})])
