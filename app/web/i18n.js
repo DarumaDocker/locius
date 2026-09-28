@@ -461,5 +461,20 @@ window.LOCIUS_EN = {
 "🧩 MCP 连接器 MCP connectors": "🧩 MCP connectors",
 "🧩 子 Agent ({0})：{1}": "🧩 Sub-agent ({0}): {1}",
 "🧩 子 Agent 完成 ({0})": "🧩 Sub-agent finished ({0})",
-"{0} · {1} · 下次 next: {2} · 上次 last: {3}": "{0} · {1} · next: {2} · last: {3}"
+"{0} · {1} · 下次 next: {2} · 上次 last: {3}": "{0} · {1} · next: {2} · last: {3}",
+"ℹ️ {0} 上一次运行一直没完成，已自动取消并重新运行": "ℹ️ {0} the previous run never finished, so it was cancelled and a fresh run started",
+"⌛ 已过期": "⌛ Expired",
+"⏳ 上次运行在等你审批": "⏳ Last run is waiting for your approval",
+"⏳ 上次运行在等你接管浏览器": "⏳ Last run is waiting for you to take over the browser",
+"⏸ 上次运行已暂停": "⏸ Last run is paused",
+"▶ 正在运行": "▶ Running",
+"⚠️ {0} 到点时上一次运行还没结束，这次被跳过了（共 {1} 次）": "⚠️ {0} skipped because the previous run had not finished ({1} time(s))",
+"⛔ 上次运行已取消": "⛔ Last run was cancelled",
+"✅ 上次运行完成": "✅ Last run completed",
+"✅ 已批准": "✅ Approved",
+"❌ 上次运行失败": "❌ Last run failed",
+"❌ 已拒绝": "❌ Denied",
+"最近已处理 Recent decisions": "Recent decisions",
+"范围 {0}": "Scope {0}",
+"还没有处理过的审批": "No decisions yet"
 };

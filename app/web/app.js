@@ -547,10 +547,25 @@ function openApproval(id) {
 }
 function closeModal() { $('#modalRoot').innerHTML = ''; }
 
+const AP_DONE = { approved: [T('✅ 已批准'), 'st-COMPLETED'], denied: [T('❌ 已拒绝'), 'st-FAILED'], expired: [T('⌛ 已过期'), 'st-CANCELLED'] };
 function renderDrawer() {
   const b = $('#drawerBody'); b.innerHTML = '';
   if (!S.approvals.length) b.append(h('div', { class: 'empty' }, T('没有待审批的操作 ✓')));
   S.approvals.forEach(a => b.append(approvalForm(a)));
+  const hist = h('div', { class: 'stack', style: 'gap:6px' });
+  b.append(h('details', { class: 'ap-history', style: 'margin-top:16px' },
+    h('summary', { class: 'small' }, h('b', null, T('最近已处理 Recent decisions'))), hist));
+  sapi('approvals?status=resolved&limit=20').then(r => {
+    if (!r.approvals.length) { hist.append(h('div', { class: 'small muted' }, T('还没有处理过的审批'))); return; }
+    r.approvals.forEach(a => {
+      const [lbl, cls] = AP_DONE[a.status] || [a.status, ''];
+      const res = a.result || {};
+      const why = a.status === 'expired' ? (res.reason || '') : a.decided_by === 'user' && a.scope && a.scope !== 'ONCE' ? Tf("范围 {0}", (a.scope)) : '';
+      hist.append(h('div', { class: 'card', style: 'padding:8px 10px' },
+        h('div', { class: 'row' }, h('span', { style: 'flex:1' }, B((a.summary || {}).title || a.tool)), h('span', { class: 'pill ' + cls }, lbl)),
+        h('div', { class: 'small muted' }, `${fmtTime(a.resolved_at || a.created_at)} · ${a.tool}` + (why ? ' · ' + why : ''))));
+    });
+  }).catch(() => {});
 }
 
 // ================================================================== BROWSER
@@ -731,6 +746,24 @@ function checkPicker(defKind = 'interval') {
     : { kind: kind.value, spec: spec.value } };
 }
 
+// Why a schedule did not produce a result: its last run is still waiting on you, or runs were skipped / superseded.
+const LAST_RUN = { WAITING_APPROVAL: T('⏳ 上次运行在等你审批'), WAITING_EXTERNAL: T('⏳ 上次运行在等你接管浏览器'), PAUSED: T('⏸ 上次运行已暂停'),
+  CREATED: T('▶ 正在运行'), PLANNING: T('▶ 正在运行'), RUNNING: T('▶ 正在运行'), COMPLETED: T('✅ 上次运行完成'), FAILED: T('❌ 上次运行失败'),
+  CANCELLED: T('⛔ 上次运行已取消') };
+function schedNotice(s) {
+  const b = s.blocked || {}, out = [];
+  if (s.last_status && LAST_RUN[s.last_status]) {
+    const waitingYou = s.last_status === 'WAITING_APPROVAL';
+    out.push(h('div', { class: 'row', style: 'gap:8px' }, h('span', { class: 'pill st-' + s.last_status }, LAST_RUN[s.last_status]),
+      waitingYou ? h('button', { class: 'btn small', onclick: () => { $('#drawer').hidden = false; renderDrawer(); } }, T('去审批 Review')) : null));
+  }
+  if (b.skipped) out.push(h('div', { class: 'small', style: 'color:var(--warn)' },
+    Tf("⚠️ {0} 到点时上一次运行还没结束，这次被跳过了（共 {1} 次）", (fmtTime(b.skipped.ts)), (b.skipped.count || 1))));
+  if (b.superseded) out.push(h('div', { class: 'small muted' },
+    Tf("ℹ️ {0} 上一次运行一直没完成，已自动取消并重新运行", (fmtTime(b.superseded.ts)))));
+  return out.length ? h('div', { class: 'stack', style: 'gap:4px' }, out) : null;
+}
+
 async function viewSchedules(root) {
   const [r, gr] = await Promise.all([api('schedules'), api('goals')]);
   const scheds = r.schedules.filter(s => s.kind !== 'event'), triggers = r.schedules.filter(s => s.kind === 'event');
@@ -797,6 +830,7 @@ async function viewSchedules(root) {
     h('div', { class: 'small muted' }, isTrig ? `${schedDesc(s)}` + (s.trigger._checked ? Tf(" · 上次检查 {0}", (s.trigger._checked)) : '') + (s.last_run ? Tf(" · 上次触发 {0}", (fmtTime(s.last_run))) : '')
       : Tf("{0} · {1} · 下次 next: {2} · 上次 last: {3}", (schedDesc(s)), (s.tz), (fmtTime(s.next_run)), (fmtTime(s.last_run) || '—'))),
     isTrig && s.trigger._error ? h('div', { class: 'small', style: 'color:var(--danger)' }, '⚠️ ' + B(s.trigger._error)) : null,
+    schedNotice(s),
     Object.keys(s.state || {}).length ? h('pre', { class: 'small', style: 'white-space:pre-wrap;margin:0' }, JSON.stringify(s.state, null, 1)) : null,
     h('div', { class: 'row' },
       isTrig ? h('button', { class: 'btn small', onclick: safe(async () => { const p = await api(`schedules/${s.id}/poll`, { method: 'POST', body: {} });

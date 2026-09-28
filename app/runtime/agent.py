@@ -174,12 +174,19 @@ class Runtime:
                 self.store.add_msg(t["conv_id"], "assistant", f"⚠️ 任务失败 Task failed：{e}", task_id)
                 await self.publish({"kind": "conv_update", "conv_id": t["conv_id"]})
 
-    async def cancel(self, task_id: str):
+    async def cancel(self, task_id: str, reason: str = ""):
         self.cancel_flags.add(task_id)
         t = self.store.task(task_id)
         if t and t["status"] not in TERMINAL:
-            await self.set_status(task_id, "CANCELLED", finished_at=now_ts())
-            await self.event(task_id, "cancelled", {})
+            await self.set_status(task_id, "CANCELLED", finished_at=now_ts(), **({"error": reason} if reason else {}))
+            await self.event(task_id, "cancelled", {"reason": reason} if reason else {})
+            if t["status"] == "WAITING_APPROVAL":
+                # don't leave an orphan approval behind: approving it later would run an action for a dead task
+                try:
+                    await self.sentinel("POST", "/internal/expire_approvals",
+                                        {"task_id": task_id, "reason": reason or "任务已取消 (task cancelled)"}, timeout=15)
+                except Exception:
+                    pass
 
     async def pause(self, task_id: str):
         self.pause_flags.add(task_id)

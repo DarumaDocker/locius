@@ -14,6 +14,7 @@ from app.common.util import VERSION, token_ok
 from app.runtime.agent import TERMINAL, WORKSPACE, Runtime
 from app.runtime import goals as G
 from app.runtime.scheduler import EVENT_SOURCES, Scheduler, create_schedule, describe, next_run, validate
+from app.runtime.scheduler import WAITING as SCHED_WAITING
 
 DATA = os.environ.get("RUNTIME_DATA", "/data")
 RUNTIME_TOKEN = os.environ.get("RUNTIME_TOKEN", "")
@@ -170,6 +171,9 @@ async def schedules():
         x["describe"] = describe(x)
         x["state"] = {k: v for k, v in st.items() if not str(k).startswith("_")}
         x["trigger"] = {k: st.get(k) for k in ("_error", "_error_at", "_checked", "_last_events") if st.get(k) is not None}
+        last = rt.store.task(x["last_task"]) if x.get("last_task") else None
+        x["last_status"] = last["status"] if last else ""
+        x["blocked"] = {k[1:]: st[k] for k in ("_skipped", "_superseded") if st.get(k)}
         out.append(x)
     return {"schedules": out, "sources": EVENT_SOURCES}
 
@@ -306,6 +310,10 @@ async def poll_schedule(sid: str):
 
 @app.post("/api/schedules/{sid}/run")
 async def run_schedule(sid: str):
+    s = rt.store.schedule(sid)
+    last = rt.store.task(s["last_task"]) if s and s.get("last_task") else None
+    if last and last["status"] in SCHED_WAITING:
+        await sched.supersede(s, last, manual=True)   # don't leave the old run (and its approval) dangling
     t = await sched.run_now(sid)
     return {"task_id": t["id"]}
 

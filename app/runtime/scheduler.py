@@ -25,6 +25,13 @@ EVENT_SOURCES = {"gmail.new_email": "收到新邮件 New email", "slack.new_mess
 EVENT_SOURCES_EN = {"gmail.new_email": "New email", "slack.new_message": "New Slack message",
                     "notion.db_changed": "Notion database changed"}
 MAX_EVENT_RUNS_PER_HOUR = 12
+# A run that is still waiting on the user (approval / takeover / paused) when its next run is due gets superseded
+# once it has waited this long; otherwise one unanswered approval silently blocks every later run of the schedule.
+STALE_WAIT = 6 * 3600
+ORPHAN_AFTER = 10 * 60          # "running" in the DB but no live worker (e.g. after a restart)
+WAITING = ("WAITING_APPROVAL", "WAITING_EXTERNAL", "PAUSED")
+STATUS_ZH = {"WAITING_APPROVAL": "等待你审批", "WAITING_EXTERNAL": "等待你接管浏览器", "PAUSED": "已暂停",
+             "CREATED": "排队中", "PLANNING": "规划中", "RUNNING": "运行中"}
 
 
 def event_spec(spec: str) -> dict:
@@ -134,21 +141,93 @@ class Scheduler:
                 g = store.goal(sch["goal_id"])
                 if not g or g["status"] != "active":
                     continue
-            # don't pile up runs: skip if the previous run is still active
-            last = store.task(sch["last_task"]) if sch.get("last_task") else None
-            busy = bool(last and last["status"] not in ("COMPLETED", "FAILED", "CANCELLED"))
             try:
                 nxt = next_run(sch["kind"], sch["spec"], sch["tz"], now)
             except ValueError:
                 store.db.execute("UPDATE schedules SET enabled=0 WHERE id=?", (sch["id"],))
                 continue
-            store.db.execute("UPDATE schedules SET next_run=?, last_run=? WHERE id=?", (nxt, now, sch["id"]))
+            store.db.execute("UPDATE schedules SET next_run=? WHERE id=?", (nxt, sch["id"]))
+            # don't pile up runs: skip if the previous run is still active — unless it is stale
+            last = store.task(sch["last_task"]) if sch.get("last_task") else None
+            busy = bool(last and last["status"] not in ("COMPLETED", "FAILED", "CANCELLED"))
+            if busy and self.is_stale(last, now):
+                await self.supersede(sch, last)
+                busy = False
             if busy:
-                continue  # for events: cursor unchanged, so nothing is lost — picked up on the next poll
+                # for events: cursor unchanged, so nothing is lost — picked up on the next poll
+                await self.note_skip(sch, last)
+                continue
             if sch["kind"] == "event":
+                store.db.execute("UPDATE schedules SET last_run=? WHERE id=?", (now, sch["id"]))
                 await self.poll_event(sch)
             else:
                 await self.run_now(sch["id"])
+
+    # ---------------------------------------------------------------- blocked runs
+    def is_stale(self, t: dict, now: float) -> bool:
+        age = now - float(t.get("updated_at") or t.get("created_at") or now)
+        if t["status"] in WAITING:
+            return age >= STALE_WAIT
+        live = self.rt.running.get(t["id"])
+        return not (live and not live.done()) and age >= ORPHAN_AFTER
+
+    def _set_state(self, sid: str, **kv):
+        sch = self.rt.store.schedule(sid)
+        st = dict((sch or {}).get("state") or {})
+        for k, v in kv.items():
+            if v is None:
+                st.pop(k, None)
+            else:
+                st[k] = v
+        self.rt.store.db.execute("UPDATE schedules SET state=? WHERE id=?", (dumps(st), sid))
+        return st
+
+    async def _tell(self, title: str, body: str, task_id: str = "", level: str = "warning"):
+        store = self.rt.store
+        n = store.notify(title, body, task_id=task_id, level=level)
+        await self.rt.publish({"kind": "notification", "notification": n})
+        try:
+            await self.rt.sentinel("POST", "/internal/notify", {"task_id": task_id, "text": f"{title}\n{body}"}, timeout=20)
+        except Exception:
+            pass
+
+    async def supersede(self, sch: dict, last: dict, manual: bool = False):
+        was = last["status"]
+        why = STATUS_ZH.get(was, was)
+        reason = (f"你手动开始了新的一次运行，这次运行（{why}）已取消 (replaced by a manual run while {was})" if manual else
+                  f"定时任务「{sch['name']}」到了下一次运行时间，这次运行仍在「{why}」，已自动取消，由新的一次运行接替 "
+                  f"(superseded by the next scheduled run while {was})")
+        await self.rt.cancel(last["id"], reason=reason)
+        await self.rt.audit("scheduler", "schedule.superseded", last["id"], resource=sch["id"], result="cancelled",
+                            detail={"status": was, "manual": manual})
+        if manual:
+            self._set_state(sch["id"], _skipped=None)
+            return
+        self._set_state(sch["id"], _superseded={"ts": time.time(), "task": last["id"], "status": was}, _skipped=None)
+        hint = ("想以后自动发送、不用每次点批准：审批时在范围里选「以后总是允许（同一目标）」。"
+                "Tip: choose \"Always allow\" in the approval dialog to stop being asked for this recipient."
+                if was == "WAITING_APPROVAL" else "")
+        await self._tell(f"⏰ 「{sch['name']}」上一次运行一直{why}，已自动取消",
+                         f"新的一次运行已经开始。The previous run was still {was.lower().replace('_', ' ')} "
+                         f"when the next run was due, so it was cancelled and a fresh run started. {hint}".strip(),
+                         task_id=last["id"])
+
+    async def note_skip(self, sch: dict, last: dict):
+        prev = (sch.get("state") or {}).get("_skipped") or {}
+        same = prev.get("task") == last["id"]
+        told = float(prev.get("told", 0) or 0) if same else 0.0
+        # triggers poll every few minutes and lose nothing by skipping (cursor unchanged): record, but don't notify
+        tell = sch["kind"] != "event" and time.time() - told >= 12 * 3600
+        self._set_state(sch["id"], _skipped={"ts": time.time(), "task": last["id"],
+                                             "status": last["status"], "count": int(prev.get("count", 0) if same else 0) + 1,
+                                             "told": time.time() if tell else told})
+        if not tell:
+            return
+        why = STATUS_ZH.get(last["status"], last["status"])
+        await self._tell(f"⏰ 「{sch['name']}」这次没有运行",
+                         f"上一次运行还在「{why}」，所以这次跳过了。处理完它（或在「任务」里取消）之后会恢复正常。"
+                         f"Skipped: the previous run is still {last['status'].lower().replace('_', ' ')}.",
+                         task_id=last["id"])
 
     async def poll_event(self, sch: dict):
         store = self.rt.store
@@ -208,6 +287,8 @@ class Scheduler:
         store.add_msg(sch["conv_id"], "user", shown if (goal or events) else f"{label}: {sch['goal']}")
         t = await self.rt.submit(sch["conv_id"], text, source="schedule", schedule_id=sid)
         store.db.execute("UPDATE schedules SET last_task=?, last_run=? WHERE id=?", (t["id"], now_ts(), sid))
+        if (sch.get("state") or {}).get("_skipped"):
+            self._set_state(sid, _skipped=None)
         if events:
             try:
                 await self.rt.sentinel("POST", "/internal/taint", {"task_id": t["id"], "taint": "CONFIDENTIAL",

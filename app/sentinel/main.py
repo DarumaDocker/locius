@@ -196,6 +196,26 @@ async def internal_notify(req: Request):
         return {"sent": False, "error": str(e)}
 
 
+@app.post("/internal/expire_approvals", dependencies=[Depends(runtime_auth)])
+async def internal_expire_approvals(req: Request):
+    """A task ended without the user deciding (cancelled, or superseded by the next scheduled run):
+    its pending approvals must not linger — mark them expired so they can no longer be approved."""
+    b = await req.json()
+    tid, reason = str(b.get("task_id", "")), str(b.get("reason", ""))[:300]
+    if not tid:
+        return {"expired": 0}
+    n = 0
+    for ap in store.approvals("pending", 500):
+        if ap["task_id"] != tid or ap["id"] in _resolving:
+            continue
+        store.resolve_approval(ap["id"], "expired", ap.get("scope") or "ONCE", {"status": "expired", "reason": reason},
+                               decided_by="system")
+        store.audit("sentinel", "approval.expire", task_id=tid, resource=ap["tool"], risk=ap["risk"], decision=DENY,
+                    result="expired", detail={"approval_id": ap["id"], "reason": reason})
+        n += 1
+    return {"expired": n}
+
+
 @app.get("/internal/browser_state", dependencies=[Depends(runtime_auth)])
 async def internal_browser_state():
     try:
@@ -634,12 +654,19 @@ async def telegram_detect(req: Request):
     tok = str(b.get("bot_token", "")).strip() or (store.get_secret("cred_telegram_1") or {}).get("bot_token", "")
     if not tok:
         raise HTTPException(400, "请先填写 bot token")
+    chats = {}
+    saved = (store.get_secret("cred_telegram_1") or {}).get("bot_token", "")
+    if bot and bot.status.get("running") and tok == saved:
+        # our own poll loop is consuming the updates (a second getUpdates would conflict / see nothing):
+        # use the private chats it saw and rejected because the configured chat id didn't match
+        for x in sorted(store.kv_get("tg_seen_chats", []) or [], key=lambda x: x.get("ts", 0)):
+            chats[str(x["chat_id"])] = x.get("name", "")
+        return {"chats": [{"chat_id": k, "name": v} for k, v in chats.items()]}
     async with httpx.AsyncClient(timeout=20) as c:
         r = await c.get(f"{os.environ.get('TELEGRAM_API', 'https://api.telegram.org')}/bot{tok}/getUpdates", params={"timeout": 0})
     data = r.json() if r.content else {}
     if not data.get("ok"):
         raise HTTPException(400, f"Telegram: {data.get('description') or r.status_code}")
-    chats = {}
     for up in data.get("result") or []:
         ch = ((up.get("message") or {}).get("chat")) or {}
         if ch.get("type") == "private":

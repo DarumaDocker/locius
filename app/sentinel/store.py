@@ -214,14 +214,19 @@ class Store:
         return r
 
     def approvals(self, status: str | None = None, limit: int = 100) -> list[dict]:
+        if status == "resolved":   # history: everything already decided (approved / denied / expired)
+            rows = self.db.all("SELECT id FROM approvals WHERE status!='pending' ORDER BY COALESCE(resolved_at, created_at) DESC "
+                               "LIMIT ?", (limit,))
+            return [self.approval(r["id"]) for r in rows]
         if status:
             rows = self.db.all("SELECT id FROM approvals WHERE status=? ORDER BY created_at DESC LIMIT ?", (status, limit))
         else:
             rows = self.db.all("SELECT id FROM approvals ORDER BY created_at DESC LIMIT ?", (limit,))
         return [self.approval(r["id"]) for r in rows]
 
-    def resolve_approval(self, aid: str, status: str, scope: str, result=None, args: dict | None = None) -> None:
-        data = {"status": status, "scope": scope, "resolved_at": now_ts(), "decided_by": "user",
+    def resolve_approval(self, aid: str, status: str, scope: str, result=None, args: dict | None = None,
+                         decided_by: str = "user") -> None:
+        data = {"status": status, "scope": scope, "resolved_at": now_ts(), "decided_by": decided_by,
                 "result": dumps(result) if result is not None else ""}
         if args is not None:
             data["args"] = dumps(args)

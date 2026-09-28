@@ -364,3 +364,86 @@ def test_goal_deadline_parse():
     assert event_spec('{"source": "gmail.new_email"}')["every"] == 3
     with pytest.raises(ValueError):
         event_spec('{"source": "x"}')
+
+
+def test_scheduler_supersedes_stale_waiting_run():
+    """One unanswered approval must not silently block every later run of a daily schedule."""
+    import asyncio
+    import time as _t
+    from app.runtime.store import RStore
+    from app.runtime.scheduler import Scheduler, create_schedule, STALE_WAIT
+
+    class FakeRT:
+        def __init__(self):
+            self.store = RStore(tempfile.mkdtemp())
+            self.running, self.calls, self.cancelled, self.submitted = {}, [], [], []
+
+        async def sentinel(self, method, path, payload=None, timeout=0):
+            self.calls.append((path, payload))
+            return {}
+
+        async def publish(self, ev):
+            pass
+
+        async def audit(self, *a, **kw):
+            pass
+
+        async def cancel(self, tid, reason=""):
+            self.cancelled.append(tid)
+            self.store.update_task(tid, status="CANCELLED")
+
+        async def submit(self, conv_id, goal, source="chat", schedule_id=""):
+            t = self.store.create_task(goal, conv_id, source, schedule_id)
+            self.submitted.append(t["id"])
+            return t
+
+    rt = FakeRT()
+    sch = create_schedule(rt.store, "早报", "do it", "cron", "0 6 * * *", "Asia/Singapore")
+    sc = Scheduler(rt)
+    old = rt.store.create_task("x", sch["conv_id"], "schedule", sch["id"])
+    rt.store.update_task(old["id"], status="WAITING_APPROVAL")
+    rt.store.db.execute("UPDATE schedules SET last_task=?, next_run=? WHERE id=?", (old["id"], _t.time() - 1, sch["id"]))
+
+    # fresh wait (< STALE_WAIT): skipped, but recorded + the user is told once
+    asyncio.run(sc.tick())
+    s = rt.store.schedule(sch["id"])
+    assert not rt.submitted and s["state"]["_skipped"]["count"] == 1
+    assert any(p == "/internal/notify" for p, _ in rt.calls)
+    n_notify = sum(p == "/internal/notify" for p, _ in rt.calls)
+    rt.store.db.execute("UPDATE schedules SET next_run=? WHERE id=?", (_t.time() - 1, sch["id"]))
+    asyncio.run(sc.tick())
+    assert sum(p == "/internal/notify" for p, _ in rt.calls) == n_notify   # no spam on the second skip
+    assert rt.store.schedule(sch["id"])["state"]["_skipped"]["count"] == 2
+
+    # waited too long: superseded — old run cancelled, a new run started, skip flag cleared
+    rt.store.db.execute("UPDATE tasks SET updated_at=? WHERE id=?", (_t.time() - STALE_WAIT - 5, old["id"]))
+    rt.store.db.execute("UPDATE schedules SET next_run=? WHERE id=?", (_t.time() - 1, sch["id"]))
+    asyncio.run(sc.tick())
+    s = rt.store.schedule(sch["id"])
+    assert rt.cancelled == [old["id"]] and len(rt.submitted) == 1
+    assert s["last_task"] == rt.submitted[0] and "_skipped" not in s["state"] and s["state"]["_superseded"]["task"] == old["id"]
+    assert s["next_run"] > _t.time()
+
+
+def test_expire_and_history_of_approvals(store):
+    aid = "ap_test1"
+    store.db.insert("approvals", {"id": aid, "task_id": "t1", "call_id": "c", "tool": "gmail_send", "args": "{}", "summary": "{}",
+                                  "risk": "high", "reason": "", "status": "pending", "scope": "", "decided_by": "",
+                                  "result": "", "created_at": 1.0, "resolved_at": None})
+    assert [a["id"] for a in store.approvals("pending")] == [aid]
+    assert store.approvals("resolved") == []
+    store.resolve_approval(aid, "expired", "ONCE", {"status": "expired", "reason": "superseded"}, decided_by="system")
+    assert store.approvals("pending") == []
+    h = store.approvals("resolved")
+    assert h[0]["status"] == "expired" and h[0]["decided_by"] == "system" and h[0]["result"]["reason"] == "superseded"
+
+
+def test_telegram_remembers_rejected_private_chats(store):
+    import asyncio
+    from app.sentinel.telegram_bot import TelegramBot
+    bot = TelegramBot(store, "http://x", resolver=None)
+    up = {"message": {"chat": {"id": 415690541, "type": "private", "first_name": "Lucas", "last_name": "Lu"}, "text": "/start"}}
+    asyncio.run(bot.handle(up, "999"))
+    asyncio.run(bot.handle({"message": {"chat": {"id": -100, "type": "group", "title": "g"}, "text": "hi"}}, "999"))
+    seen = store.kv_get("tg_seen_chats", [])
+    assert [(x["chat_id"], x["name"]) for x in seen] == [("415690541", "Lucas Lu")]   # groups are not offered

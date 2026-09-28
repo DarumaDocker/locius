@@ -220,7 +220,10 @@ class TelegramBot:
         msg = up.get("message") or {}
         frm = str(msg.get("chat", {}).get("id", ""))
         if frm != chat:
-            return self._reject(frm)
+            ch = msg.get("chat") or {}
+            if ch.get("type") != "private":
+                return self._reject(frm)
+            return self._reject(frm, " ".join(x for x in (ch.get("first_name"), ch.get("last_name")) if x) or ch.get("username", ""))
         text = (msg.get("text") or "").strip()
         if not text:
             await self.send("暂时只支持文字消息 (text only for now) 🙏")
@@ -242,7 +245,12 @@ class TelegramBot:
         else:
             await self.new_task(text)
 
-    def _reject(self, frm: str):
+    def _reject(self, frm: str, name: str | None = None):
+        if name is not None:
+            # a private chat (latest 5): while this loop is polling, getUpdates-based "detect chat id" sees nothing,
+            # so the Connections page reads these instead
+            seen = [x for x in (self.store.kv_get("tg_seen_chats", []) or []) if x.get("chat_id") != frm]
+            self.store.kv_set("tg_seen_chats", (seen + [{"chat_id": frm, "name": name[:60], "ts": time.time()}])[-5:])
         if time.time() - self._rejected_log > 60:   # rate-limited audit of strangers poking the bot
             self._rejected_log = time.time()
             self.store.audit(self.actor, "telegram.rejected", result="denied", detail={"from_chat": frm})
