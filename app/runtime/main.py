@@ -153,7 +153,8 @@ async def stream(request: Request):
                     ev = await asyncio.wait_for(q.get(), timeout=15)
                     yield f"data: {json.dumps(ev, ensure_ascii=False, default=str)}\n\n"
                 except asyncio.TimeoutError:
-                    yield ": ping\n\n"
+                    # a real event (not an SSE comment) so the page can tell a live stream from a silently dead one
+                    yield 'data: {"kind": "ping"}\n\n'
         finally:
             subscribers.discard(q)
     return StreamingResponse(gen(), media_type="text/event-stream",

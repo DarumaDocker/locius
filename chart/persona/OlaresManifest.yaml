@@ -61,6 +61,7 @@ spec:
 
     Runs on the local models served by your Olares by default — any OpenAI-compatible endpoint works. English and 中文 interface.
   upgradeDescription: |
+    0.2.5: The chat page no longer gets stuck on "Planning": if the live connection drops (sleep, network change, session refresh) it reconnects and catches up by itself, so results and approval requests show up without reopening the chat.
     0.2.4: Agents no longer burn their whole step budget repeating one call (identical repeats are blocked), RSS/Atom feeds open as a clean headline list, and a scheduled run that runs out of steps or errors is marked failed and you are notified (app + Telegram).
     0.2.3: Automations no longer get stuck: a scheduled run still waiting for your approval is cancelled when the next run is due (with a Telegram/app notice), skipped runs are shown on the schedule card, and the approvals drawer lists recent decisions. "Detect chat ID" for Telegram now works while the bot is connected.
     0.2.2: Ready for Olares Market — official icon and screenshots, public source code (MIT), no personal defaults.

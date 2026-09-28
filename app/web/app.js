@@ -233,9 +233,37 @@ async function openConv(id) {
   catch (e) { toast(T('对话不存在或已删除'), true); newChat(); return; }
   if (S.conv !== id) return;  // user switched away meanwhile
   S.convData = r;
-  Object.assign(S.tasks, r.tasks);
+  mergeTasks(r.tasks);
   renderConvList(); renderThread();
 }
+
+// A fetched snapshot can be older than a live event that arrived while the request was in flight: keep the newer one.
+function mergeTasks(tasks) {
+  for (const t of Object.values(tasks || {})) {
+    const o = S.tasks[t.id];
+    if (!o || (t.updated_at || 0) >= (o.updated_at || 0)) S.tasks[t.id] = { ...(o || {}), ...t };
+  }
+}
+
+// Re-read the open conversation and redraw only if something changed (keeps open "Activity" panels open).
+async function refreshConv(force) {
+  const id = S.conv;
+  if (!id || S.view !== 'chat') return;
+  let r;
+  try { r = await api('conversations/' + id); } catch (e) { return; }
+  if (S.conv !== id || S.view !== 'chat') return;
+  const old = S.convData;
+  const changed = force || !old || old.messages.length !== r.messages.length ||
+    Object.values(r.tasks || {}).some(t => { const o = S.tasks[t.id]; return !o || o.status !== t.status || (o.updated_at || 0) < (t.updated_at || 0); });
+  if (!changed) return;
+  mergeTasks(r.tasks);
+  S.convData = r;
+  const open = [...document.querySelectorAll('.taskcard details[open]')].map(d => d.closest('.taskcard').id);
+  renderThread();
+  open.forEach(cid => { const d = document.querySelector('#' + cid + ' details'); if (d) d.open = true; });
+}
+const convHasActiveTask = () => S.convData && Object.keys(S.convData.tasks || {})
+  .some(id => S.tasks[id] && !['COMPLETED', 'FAILED', 'CANCELLED'].includes(S.tasks[id].status));
 
 function renderThread(thread) {
   thread = thread || $('.thread'); if (!thread) return;
@@ -1189,8 +1217,9 @@ async function viewSettings(root) {
 
 // ================================================================== live updates
 function onEvent(ev) {
+  if (ev.kind === 'ping') return;
   if (ev.kind === 'task_update') {
-    const t = ev.task; S.tasks[t.id] = { ...(S.tasks[t.id] || {}), ...t };
+    const t = ev.task; mergeTasks({ [t.id]: t });
     renderNav();
     const card = document.getElementById('tc-' + t.id);
     if (card && S.view === 'chat') { const fresh = taskCard(S.tasks[t.id]); const det = card.querySelector('details'); const wasOpen = det && det.open;
@@ -1203,7 +1232,7 @@ function onEvent(ev) {
     if (ev.type === 'plan' && S.tasks[ev.task_id]) { S.tasks[ev.task_id].plan = ev.data; const card = document.getElementById('tc-' + ev.task_id);
       if (card && S.view === 'chat') card.parentElement.replaceWith(taskCard(S.tasks[ev.task_id])); }
   } else if (ev.kind === 'conv_update') {
-    if (S.view === 'chat') { loadConvs().then(() => renderConvList()); if (ev.conv_id === S.conv) openConv(S.conv); }
+    if (S.view === 'chat') { loadConvs().then(() => renderConvList()); if (ev.conv_id === S.conv) refreshConv(true); }
   } else if (ev.kind === 'approval_requested') {
     loadApprovals();
   } else if (ev.kind === 'takeover_requested') {
@@ -1214,12 +1243,37 @@ function onEvent(ev) {
   else if ((ev.kind === 'schedule_update' || ev.kind === 'goal_update') && S.view === 'schedules') route();
 }
 
+// The stream can drop without the page noticing (laptop sleep, network change, Olares session refresh): the browser
+// may reconnect and silently lose the events of the gap, or give up for good. So: the server sends a ping every 15 s,
+// a watchdog reconnects when nothing arrived for 45 s, and every (re)connect re-reads the state that may have been missed.
+let ES = null, lastEv = 0;
 function connectStream() {
-  const es = new EventSource('api/stream');
-  es.onmessage = m => { try { onEvent(JSON.parse(m.data)); } catch (e) { console.error(e); } };
-  es.onerror = () => { $('#sentinelChip').className = 'chip bad'; };
-  es.onopen = () => { $('#sentinelChip').className = 'chip ok'; };
+  if (ES) { try { ES.close(); } catch (e) {} }
+  const es = ES = new EventSource('api/stream');
+  lastEv = Date.now();
+  es.onmessage = m => { lastEv = Date.now(); try { onEvent(JSON.parse(m.data)); } catch (e) { console.error(e); } };
+  es.onerror = () => {
+    $('#sentinelChip').className = 'chip bad';
+    if (es.readyState === 2 && ES === es) setTimeout(() => { if (ES === es) connectStream(); }, 3000);  // closed for good: start over
+  };
+  es.onopen = () => {
+    lastEv = Date.now(); $('#sentinelChip').className = 'chip ok';
+    if (S._streamSeen) resync();
+    S._streamSeen = true;
+  };
 }
+function resync() {
+  loadApprovals();
+  refreshConv();
+  if (S.view === 'tasks' && S.selTask) { const box = $('#taskDetail'); if (box) renderTaskDetail(box, S.selTask); }
+}
+setInterval(() => { if (!ES || ES.readyState === 2 || Date.now() - lastEv > 45000) connectStream(); }, 10000);
+// safety net while a task in the open conversation is still running (costs one small request every 8 s)
+setInterval(() => { if (!document.hidden && S.view === 'chat' && convHasActiveTask()) refreshConv(); }, 8000);
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  if (!ES || ES.readyState === 2 || Date.now() - lastEv > 20000) connectStream(); else resync();
+});
 
 async function refreshModelChip() {
   try {
