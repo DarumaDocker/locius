@@ -18,14 +18,19 @@ help-center forms — or by email. Try them in that order unless the user says o
 - Search `https://duckduckgo.com/html/?q=<company>+contact+live+chat` (or `+cancel+subscription`, `+return+refund`).
 - Self-service first: Account → Subscriptions / Orders → Return or Cancel is usually faster than chat.
 - Login needed → browser_request_takeover("请登录 <site>"). Never type passwords or one-time codes.
-- Chat widgets usually live in an iframe (refs look like [f1e3]). Look for Chat / Live chat / Messaging / Contact us /
-  Help / 在线客服.
+- Chat widgets usually live in an iframe (refs look like [f1e3]) or a shadow root. Look for Chat / Live chat / Messaging /
+  Contact us / Help / 在线客服.
+- The chat bubble often has no ref or no name (an icon in the bottom-right corner). Don't search for it with browser_find
+  over and over — use vision: browser_locate("the round chat bubble in the bottom-right corner") → browser_click_at(x, y).
+  Same for the message box once the chat window is open: browser_locate("the message input box of the chat window") →
+  browser_click_at(x, y, text="…", submit=true) sends the message (approval).
 
 ## 3. Chat
 - First message: one short paragraph — name on the account, order/account number, what happened, the outcome wanted.
 - Every message goes through Sentinel's approval dialog (the user can edit it, or choose "本任务 This task" to allow the
   rest of this chat). Just send it; don't ask in chat.
-- After sending: browser_wait 15–45 s, then browser_snapshot to read the reply. Up to ~15 rounds.
+- After sending: browser_wait 15–45 s, then browser_snapshot (or browser_look("what did the chat reply?") if the chat
+  window is not in the snapshot) to read the reply. Up to ~15 rounds.
   With bots, use their menu words ("Talk to an agent", "Cancel subscription", "Return an item").
 - Be polite, factual and brief. Use only facts from the user or their emails — never invent order details.
 - Retention offers ("50% off for 3 months", "pause instead"): don't accept or refuse on your own unless the user already

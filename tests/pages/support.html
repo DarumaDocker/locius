@@ -1,0 +1,29 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Helpdesk.test — Support</title>
+<style>body{font-family:sans-serif;margin:0;padding:24px} h1{margin-top:0}</style></head>
+<body><h1>Helpdesk.test support</h1><p>Questions about plans and pricing? Chat with our assistant.</p>
+<div id="chat-host"></div>
+<script>
+// A Tidio-style widget: everything lives in an OPEN shadow root (no iframe).
+const host = document.getElementById('chat-host');
+const root = host.attachShadow({ mode: 'open' });
+root.innerHTML = `<style>
+  .launch{position:fixed;right:24px;bottom:24px;width:60px;height:60px;border-radius:30px;background:#0066ff;border:0;color:#fff;font-size:26px}
+  .panel{position:fixed;right:24px;bottom:96px;width:340px;height:420px;background:#fff;border:1px solid #ccc;border-radius:12px;display:none;flex-direction:column}
+  .panel.open{display:flex} .log{flex:1;overflow:auto;padding:10px;font-size:14px} .msg{margin:6px 0} .bot{color:#123} .me{text-align:right;color:#060}
+  .row{display:flex;border-top:1px solid #eee} textarea{flex:1;height:48px;border:0;padding:8px} .send{width:70px}
+  .quick button{margin:3px;font-size:12px}</style>
+  <button class="launch" aria-label="Open chat widget">&#128172;</button>
+  <div class="panel" role="dialog" aria-label="Chat">
+    <div class="log" id="log"><div class="msg bot">Hi! I'm Lyra, the Helpdesk.test assistant. How can I help?</div>
+      <div class="quick"><button>Pricing</button><button>Talk to a human</button></div></div>
+    <div class="row"><textarea aria-label="Type your message" placeholder="Type your message"></textarea><button class="send" aria-label="Send message">Send</button></div>
+  </div>`;
+const panel = root.querySelector('.panel'), log = root.querySelector('#log'), ta = root.querySelector('textarea');
+root.querySelector('.launch').onclick = () => panel.classList.toggle('open');
+const add = (who, text) => { const d = document.createElement('div'); d.className = 'msg ' + who; d.textContent = text; log.appendChild(d); };
+const answer = q => /free/i.test(q) ? 'Yes — the Free plan costs S$0 and includes 50 Lyra AI conversations per month. Would you like to leave your email for a demo?'
+  : /human|agent/i.test(q) ? 'Our team replies within 2 hours on weekdays.' : 'Could you tell me a bit more?';
+const send = () => { const q = ta.value.trim(); if (!q) return; add('me', q); ta.value = ''; setTimeout(() => add('bot', 'Lyra: ' + answer(q)), 1500); };
+root.querySelector('.send').onclick = send;
+ta.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
+</script></body></html>

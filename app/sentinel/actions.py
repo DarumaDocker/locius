@@ -264,6 +264,9 @@ async def _browser(store, tool: str, args: dict, task_id: str) -> dict:
     payload["task_id"] = task_id
     snap = await broker("POST", f"/agent/{action}", payload, timeout=180.0 if action == "wait" else 90.0)
     out = _snap_envelope(store, task_id, snap)
+    if action == "locate" and snap.get("image_b64"):
+        # grid screenshot for the runtime's vision model (browser_locate); the agent only gets the resulting x/y
+        out.update({k: snap[k] for k in ("image_b64", "image_type", "region", "cols", "rows", "labels", "viewport", "at") if k in snap})
     if action == "look" and snap.get("image_b64"):
         # the screenshot goes to the runtime's vision model only; it is never shown to the agent as text
         out["image_b64"] = snap["image_b64"]

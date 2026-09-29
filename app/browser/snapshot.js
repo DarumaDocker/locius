@@ -6,7 +6,10 @@
   const ATTR = 'data-persona-ref';
   const lines = [];
   let n = 0;
-  try { document.querySelectorAll('[' + ATTR + ']').forEach(e => e.removeAttribute(ATTR)); } catch (e) {}
+  // open shadow roots (chat widgets such as Tidio, many web components) are walked too
+  const deepAll = sel => { const out = []; const visit = root => { root.querySelectorAll(sel).forEach(e => out.push(e));
+    root.querySelectorAll('*').forEach(e => { if (e.shadowRoot) visit(e.shadowRoot); }); }; visit(document); return out; };
+  try { deepAll('[' + ATTR + ']').forEach(e => e.removeAttribute(ATTR)); } catch (e) {}
   const clean = s => (s || '').replace(/\s+/g, ' ').trim();
   const cut = (s, k) => { s = clean(s); return s.length > k ? s.slice(0, k) + '…' : s; };
   const SKIP = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'SVG', 'CANVAS', 'IFRAME', 'OBJECT', 'EMBED', 'HEAD', 'META', 'LINK']);
@@ -105,7 +108,7 @@
       if (el.getAttribute('aria-hidden') === 'true') continue;
       if (!visible(el) && !['OPTION'].includes(el.tagName)) {
         // invisible containers can still hold visible fixed children; cheap check
-        if (el.children.length === 0) continue;
+        if (el.children.length === 0 && !el.shadowRoot) continue;
         const r = el.getBoundingClientRect();
         if (r.width < 1 && r.height < 1 && getComputedStyle(el).display === 'none') continue;
       }
@@ -122,6 +125,7 @@
       const block = /^(H[1-6]|P|LI|TR|DIV|SECTION|ARTICLE|HEADER|FOOTER|NAV|MAIN|ASIDE|FORM|TABLE|UL|OL|DL|DT|DD|BLOCKQUOTE|PRE|LABEL|FIELDSET|LEGEND)$/.test(el.tagName);
       if (/^H[1-6]$/.test(el.tagName)) { flush(); const t = clean(el.innerText); if (t) lines.push('#'.repeat(+el.tagName[1]) + ' ' + cut(t, 160)); if (!el.querySelector(INTERACTIVE)) continue; }
       if (block) flush();
+      if (el.shadowRoot) walk(el.shadowRoot);
       walk(el);
       if (block) flush();
     }

@@ -35,7 +35,7 @@ WEB_DIR = os.environ.get("WEB_DIR", os.path.join(os.path.dirname(os.path.dirname
 SHOTS = os.path.join(SDATA, "shots")
 EDITABLE = {"gmail_send": ["to", "cc", "subject", "body"], "gmail_reply": ["to", "cc", "subject", "body"],
             "gmail_create_draft": ["to", "cc", "subject", "body"], "gmail_forward": ["to", "note"],
-            "browser_type": ["text"], "gmail_unsubscribe": ["message_ids"], "slack_send_message": ["text"],
+            "browser_type": ["text"], "browser_click_at": ["text"], "gmail_unsubscribe": ["message_ids"], "slack_send_message": ["text"],
             "notion_create_page": ["title", "content"], "notion_append": ["content"],
             "calendar_create_event": ["title", "start", "end", "location", "description"],
             "calendar_update_event": ["title", "start", "end", "location", "description"]}
@@ -275,6 +275,10 @@ async def _context_for(tool: str, args: dict, task_id: str) -> tuple[dict | None
     if tool in ("browser_click", "browser_type", "browser_select", "browser_upload"):
         info = await actions.broker("POST", "/agent/describe", {"task_id": task_id, "ref": args.get("ref", "")}, timeout=20)
         return info, {"url": info.get("page_url", ""), "title": info.get("page_title", "")}
+    if tool == "browser_click_at":
+        info = await actions.broker("POST", "/agent/describe_at", {"task_id": task_id, "x": args.get("x", 0), "y": args.get("y", 0)},
+                                    timeout=20)
+        return info, {"url": info.get("page_url", ""), "title": info.get("page_title", "")}
     if tool == "browser_press":
         info = await actions.broker("POST", "/agent/focused", {"task_id": task_id}, timeout=20)
         st = await actions.broker("GET", "/state", timeout=10)
@@ -320,12 +324,20 @@ async def _summary(tool: str, args: dict, elem: dict | None, page: dict | None) 
             s["items"] = [{"id": i, "from": "", "subject": "", "method": ""} for i in ids]
         s["fields"] = [["邮件数 Emails", str(len(ids))], ["同时归档 Also archive", "是 Yes" if args.get("archive") else "否 No"]]
     elif tool.startswith("browser_"):
-        verb = {"browser_click": "点击 Click", "browser_type": "输入 Type", "browser_select": "选择 Select",
+        verb = {"browser_click": "点击 Click", "browser_click_at": "按位置点击 Click at position", "browser_type": "输入 Type", "browser_select": "选择 Select",
                 "browser_press": "按键 Press key", "browser_upload": "上传文件 Upload", "browser_navigate": "打开网页 Open page"}
         s["title"] = f"浏览器操作：{verb.get(tool, tool)}"
         s["fields"] = [["网站 Site", (page or {}).get("url") or args.get("url", "")], ["页面 Page", (page or {}).get("title", "")]]
         if elem:
             s["fields"].append(["元素 Element", f"{elem.get('tag', '')} 「{elem.get('name', '')}」"])
+        if tool == "browser_click_at":
+            s["fields"].append(["位置 Position", f"x={args.get('x')}, y={args.get('y')}"])
+            if elem and elem.get("frames"):
+                s["fields"].append(["所在框架 Inside iframe", " › ".join(elem["frames"])])
+            if args.get("text"):
+                s["body"] = args.get("text", "")
+                if args.get("submit"):
+                    s["fields"].append(["提交 Submit", "输入后按回车 Enter"])
         if tool == "browser_type":
             s["body"] = args.get("text", "")
             if args.get("submit"):

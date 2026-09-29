@@ -11,12 +11,18 @@
   layer.id = ID;
   layer.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483647;';
   const marks = [];
-  for (const el of document.querySelectorAll('[data-persona-ref]')) {
+  const deepAll = sel => { const out = []; const visit = root => { root.querySelectorAll(sel).forEach(e => out.push(e));
+    root.querySelectorAll('*').forEach(e => { if (e.shadowRoot) visit(e.shadowRoot); }); }; visit(document); return out; };
+  // elementFromPoint stops at a shadow host; follow it down, and compare across shadow boundaries
+  const deepPoint = (x, y) => { let t = document.elementFromPoint(x, y);
+    while (t && t.shadowRoot) { const i = t.shadowRoot.elementFromPoint(x, y); if (!i || i === t) break; t = i; } return t; };
+  const within = (a, b) => { for (let n = b; n; n = n.parentNode || n.host) if (n === a) return true; return false; };
+  for (const el of deepAll('[data-persona-ref]')) {
     const r = el.getBoundingClientRect();
     if (r.width < 4 || r.height < 4 || r.bottom < 0 || r.right < 0 || r.top > VH || r.left > VW) continue;
     const cx = Math.min(Math.max(r.left + r.width / 2, 0), VW - 1), cy = Math.min(Math.max(r.top + r.height / 2, 0), VH - 1);
-    const top = document.elementFromPoint(cx, cy);
-    if (top && top !== el && !el.contains(top) && !top.contains(el)) continue;      // covered by something else
+    const top = deepPoint(cx, cy);
+    if (top && top !== el && !within(el, top) && !within(top, el)) continue;      // covered by something else
     const ref = el.getAttribute('data-persona-ref');
     const box = document.createElement('div');
     box.style.cssText = `position:fixed;left:${r.left}px;top:${r.top}px;width:${r.width}px;height:${r.height}px;border:2px solid #e11;box-sizing:border-box;`;
@@ -34,7 +40,9 @@
   }
   // the text a person would read on screen (before the labels are added)
   let text = '';
-  const tw = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
+  const roots = [document.body || document.documentElement, ...deepAll('*').filter(e => e.shadowRoot).map(e => e.shadowRoot)];
+  for (const root of roots) {
+  const tw = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   for (let n = tw.nextNode(); n && text.length < 2500; n = tw.nextNode()) {
     const t = n.nodeValue.replace(/\s+/g, ' ').trim();
     const p = n.parentElement;
@@ -44,6 +52,7 @@
     const cs = getComputedStyle(p);
     if (cs.visibility === 'hidden' || cs.display === 'none' || +cs.opacity === 0) continue;
     text += (/^(DIV|P|LI|H\d|TR|SECTION|ARTICLE|BUTTON|A)$/.test(p.tagName) ? '\n' : ' ') + t;
+  }
   }
   document.documentElement.appendChild(layer);
   return { marks, text: text.replace(/\n\s*\n+/g, '\n').trim().slice(0, 2500) };

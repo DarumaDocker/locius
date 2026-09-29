@@ -52,6 +52,8 @@ async def chat(req: Request):
     sys = msgs[0]["content"] if msgs and msgs[0]["role"] == "system" else ""
     if sys.startswith("You look at a screenshot"):   # the vision helper behind browser_look
         return reply(fake_vision(msgs[-1]["content"]))
+    if sys.startswith(("You locate things", "This is a zoomed-in part", "A red circle with a crosshair")):   # browser_locate
+        return reply(fake_locate(sys, msgs[-1]["content"]))
     if "planning module" in sys and "inbox this week" in msgs[-1]["content"]:
         return reply(json.dumps({"objective": "Triage this week's inbox and prepare replies", "steps": [
             {"id": "s1", "description": "Search the inbox for important emails from the last 7 days", "tool_hint": "gmail", "risk": "read"},
@@ -100,7 +102,7 @@ async def chat(req: Request):
     if "SHOPCART" in goal:   # the 2026-09-29 Amazon run: find a case on a long page, add it to the cart
         # a real model would reason from the tool results; this one follows the path the skill describes
         def ref_after(pattern, text):
-            m = re.search(r"\[(e\d+)\][^\n]*" + pattern, text)
+            m = re.search(r"\[(e\d+)\][^\n]*" + pattern, text, re.I)
             return m.group(1) if m else None
         if n == 0:
             return reply("", [tc("browser_navigate", {"url": "http://shop.test:8099/shop.html?k=iphone+17+pro+max+case"})])
@@ -119,6 +121,64 @@ async def chat(req: Request):
         if n == 6:
             return reply("", [tc("browser_look", {"question": "Did the item get added to the cart? What does the cart show?"})])
         return reply("SHOP DONE: " + last_tool[:600])
+    if "SUPPORTCHAT" in goal:   # a Tidio-style chat bot whose widget lives in an open shadow root
+        def ref_of(pattern, text):
+            m = re.search(r"\[((?:f\d+)?e\d+)\][^\n]*" + pattern, text, re.I)
+            return m.group(1) if m else None
+        if n == 0:
+            return reply("", [tc("browser_navigate", {"url": "http://shop.test:8099/support.html"})])
+        if n == 1:
+            return reply("", [tc("browser_look", {"question": "Is there a chat launcher? Name its label."})])
+        if n == 2:
+            ref = (re.search(r"click \[((?:f\d+)?e\d+)\]", last_tool) or [None, None])[1]
+            return reply("", [tc("browser_click", {"ref": ref or "e1"})])
+        if n == 3:
+            return reply("", [tc("browser_find", {"query": "Type your message"})])
+        if n == 4:
+            return reply("", [tc("browser_type", {"ref": ref_of("Type your message", last_tool) or "e1", "submit": True,
+                                                 "text": "Hi! Do you have a free plan, and how many AI conversations does it include?"})])
+        if n == 5:
+            return reply("", [tc("browser_wait", {"seconds": 3})])
+        if n == 6:
+            return reply("", [tc("browser_snapshot", {})])
+        m = re.search(r"Lyra: ([^\n\"\\]+)", last_tool)
+        return reply("SUPPORT DONE: " + (m.group(1) if m else "NO REPLY " + last_tool[:800]))
+    if "BUBBLECHAT" in goal:   # the Tidio case: bubble + chat window inside a cross-origin iframe, no names, no refs
+        def xy(text):
+            m = re.search(r"browser_click_at \{\\?\"x\\?\": (\d+), \\?\"y\\?\": (\d+)\}", text)
+            return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+        if n == 0:
+            return reply("", [tc("browser_navigate", {"url": "http://shop.test:8099/bubble.html"})])
+        if n == 1:
+            return reply("", [tc("browser_locate", {"target": "the blue round chat bubble in the bottom-right corner"})])
+        if n == 2:
+            x, y = xy(last_tool)
+            return reply("", [tc("browser_click_at", {"x": x, "y": y})])
+        if n == 3:
+            return reply("", [tc("browser_locate", {"target": "the yellow message box of the chat window"})])
+        if n == 4:
+            x, y = xy(last_tool)
+            return reply("", [tc("browser_click_at", {"x": x, "y": y, "text": "Hi! Do you have a free plan?", "submit": True})])
+        if n == 5:
+            return reply("", [tc("browser_wait", {"seconds": 3})])
+        if n == 6:
+            return reply("", [tc("browser_snapshot", {})])
+        m = re.search(r"Bot: Yes[^\n\"\\]+", last_tool)
+        return reply("BUBBLE DONE: " + (m.group(0) if m else "NO REPLY " + last_tool[:1500]))
+    if "SUPPORTIFRAME" in goal:   # a Zendesk-style messaging window inside an iframe
+        if n == 0:
+            return reply("", [tc("browser_navigate", {"url": "http://shop.test:8099/support_iframe.html"})])
+        if n == 1:
+            return reply("", [tc("browser_look", {"question": "Where do I type a message? Name its label."})])
+        if n == 2:
+            ref = (re.search(r"click \[((?:f\d+)?e\d+)\]", last_tool) or [None, None])[1]
+            return reply("", [tc("browser_type", {"ref": ref or "e1", "submit": True, "text": "How long does delivery take?"})])
+        if n == 3:
+            return reply("", [tc("browser_wait", {"seconds": 3})])
+        if n == 4:
+            return reply("", [tc("browser_snapshot", {})])
+        m = re.search(r"Zed: Standard[^\n\"\\]+", last_tool)
+        return reply("IFRAME DONE: " + (m.group(0) if m else "NO REPLY " + last_tool[:800]))
     if "SHOPSCROLL" in goal:
         if n == 0:
             return reply("", [tc("browser_navigate", {"url": "http://shop.test:8099/shop.html"})])
@@ -297,7 +357,53 @@ def fake_vision(content):
         m = re.search(r"(\d+) items? in cart", text)
         added = re.search(r"Added to Cart: ([^\n\"]+)", text)
         return f"The cart shows {m.group(1) if m else '?'} items in cart. {('Message: Added to Cart: ' + added.group(1)) if added else ''} {info}"
+    m = re.search(r"\[((?:f\d+)?e\d+)\] button \"Open chat widget\"", text)
+    if m:
+        return f"A round blue chat button sits in the bottom-right corner. To open the chat, click [{m.group(1)}]. {info}"
+    m = re.search(r"\[(f\d+e\d+)\] textbox \"Message\"", text)
+    if m:
+        return f"The messaging window on the right has a Message box; click [{m.group(1)}] to type. {info}"
     m = re.search(r"\[(e\d+)\] link \"[^\"]*Aurora Glitter Case", text)
     if m:
         return f"The Aurora Glitter Case (4.4 out of 5 stars, S$21.90) looks the nicest — sparkly purple. To open it, click [{m.group(1)}]. {info}"
     return f"I can see the page but not the product list here; scroll down. {info}"
+
+
+def fake_locate(sys, content):
+    """Stand-in vision model for browser_locate: finds the target by its colour (blue chat bubble / yellow message box)
+    and answers with the grid cell, the zoomed cell number, or YES/NO for the red marker — exercising the real geometry."""
+    import base64, io
+    from PIL import Image
+    parts = content if isinstance(content, list) else []
+    text = " ".join(p.get("text", "") for p in parts if p.get("type") == "text").lower()
+    url = next((p["image_url"]["url"] for p in parts if p.get("type") == "image_url"), "")
+    img = Image.open(io.BytesIO(base64.b64decode(url.split(",", 1)[1]))).convert("RGB")
+    want = (0, 102, 255) if "bubble" in text else (255, 235, 59) if "message" in text else None
+    if not want:
+        return "NONE"
+    W, H = img.size
+    px = img.load()
+    xs = ys = cnt = 0
+    for y in range(0, H, 2):
+        for x in range(0, W, 2):
+            r, g, b = px[x, y]
+            if abs(r - want[0]) < 45 and abs(g - want[1]) < 45 and abs(b - want[2]) < 45:
+                xs += x; ys += y; cnt += 1
+    if cnt < 8:
+        return "NONE"
+    cx, cy = xs / cnt, ys / cnt
+    if sys.startswith("You locate things"):
+        return "ABCDEFGH"[min(7, int(cx / (W / 8)))] + str(min(6, int(cy / (H / 6)) + 1))
+    if sys.startswith("This is a zoomed-in part"):
+        return str(min(5, int(cy / (H / 6))) * 8 + min(7, int(cx / (W / 8))) + 1)
+    rx = ry = rn = 0
+    for y in range(0, H, 2):
+        for x in range(0, W, 2):
+            r, g, b = px[x, y]
+            if r > 210 and g < 50 and b < 50:
+                rx += x; ry += y; rn += 1
+    if not rn:
+        return "NO — no red marker visible"
+    d = ((rx / rn - cx) ** 2 + (ry / rn - cy) ** 2) ** 0.5
+    return f"YES — the marker is on the {'chat bubble' if want[0] == 0 else 'message box'} (off by {d:.0f}px)" if d < 25 \
+        else f"NO — the marker is {d:.0f}px away from it"

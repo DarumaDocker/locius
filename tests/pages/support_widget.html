@@ -1,0 +1,12 @@
+<!doctype html><html><head><meta charset="utf-8"><title>widget</title>
+<style>body{font-family:sans-serif;margin:0;display:flex;flex-direction:column;height:100vh} #log{flex:1;padding:10px;overflow:auto} .row{display:flex} input{flex:1;padding:8px}</style></head>
+<body><div id="log"><div>Zed: Welcome to Helpdesk.test messaging. Ask me anything about delivery.</div></div>
+<div class="row"><input aria-label="Message" placeholder="Message"><button aria-label="Send">Send</button></div>
+<script>
+const log = document.getElementById('log'), inp = document.querySelector('input');
+const add = t => { const d = document.createElement('div'); d.textContent = t; log.appendChild(d); };
+const send = () => { const q = inp.value.trim(); if (!q) return; add('You: ' + q); inp.value = '';
+  setTimeout(() => add('Zed: Standard delivery takes 3–5 working days.'), 1200); };
+document.querySelector('button').onclick = send;
+inp.addEventListener('keydown', e => { if (e.key === 'Enter') send(); });
+</script></body></html>

@@ -226,7 +226,9 @@ _SEARCH_WORDS = re.compile(r"(search|find|query|filter|搜索|查找|搜寻|検�
 # Putting something in a shopping cart is reversible and costs nothing, but shops (Amazon included) build the button as
 # <input type="submit">. Treat a plain "add to cart/basket/bag" as a normal click; buying / checkout still need approval.
 _CART_ADD = re.compile(r"^\s*(add to (cart|basket|bag|trolley)|add to shopping (cart|bag)|加入购物车|加入購物車|添加到购物车|放入购物车|"
-                       r"カートに入れる|장바구니 담기)\s*$", re.I)
+                       r"カートに入れる|장바구니 담기)"
+                       # Amazon appends its keyboard shortcut to the accessible name: "Add to cart, shift, Alt, K"
+                       r"(\s*,\s*(shift|alt|ctrl|control|cmd|command|option|meta|[a-z0-9]))*\s*$", re.I)
 
 
 def click_is_risky(role: str, name: str, input_type: str = "") -> bool:

@@ -5,7 +5,9 @@
   if (!words.length) return [];
   const clean = s => (s || '').replace(/\s+/g, ' ').trim();
   const out = [];
-  const all = document.querySelectorAll('[data-persona-ref]');
+  const deepAll = sel => { const out = []; const visit = root => { root.querySelectorAll(sel).forEach(e => out.push(e));
+    root.querySelectorAll('*').forEach(e => { if (e.shadowRoot) visit(e.shadowRoot); }); }; visit(document); return out; };
+  const all = deepAll('[data-persona-ref]');   // including open shadow roots (chat widgets)
   for (const el of all) {
     const name = clean(el.getAttribute('aria-label') || el.innerText || el.value || el.getAttribute('title') || (el.querySelector && el.querySelector('img[alt]') ? el.querySelector('img[alt]').alt : ''));
     const low = name.toLowerCase();

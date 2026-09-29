@@ -55,7 +55,7 @@ fnd = results(t, "browser_find")
 check("browser_find locates the product and returns its price as context",
       fnd and "Aurora Glitter Case" in fnd[0]["preview"] and "S$21.90" in fnd[0]["preview"], fnd[:1])
 check("browser_find finds the Add to Cart button on the product page",
-      len(fnd) > 1 and "Add to Cart" in fnd[1]["preview"], fnd[1:2])
+      len(fnd) > 1 and "add to cart, shift, alt, k" in fnd[1]["preview"].lower(), fnd[1:2])
 clicks = results(t, "browser_click")
 check("clicked into the chosen product", clicks and "product.html?id=3" in clicks[0]["preview"], clicks[:1])
 check("Add to Cart clicked without approval, cart updated",
@@ -73,6 +73,7 @@ check("browser_scroll returns the region around the new position (not the header
 # ---------------------------------------------------------------- the approval rule itself
 from app.sentinel import guard  # noqa: E402
 check("Add to Cart (an <input type=submit> on Amazon) is a normal click", not guard.click_is_risky("button", "Add to Cart", "submit"))
+check("...also with Amazon's shortcut suffix", not guard.click_is_risky("button", "Add to cart, shift, Alt, K", "submit"))
 check("Buy Now still needs approval", guard.click_is_risky("button", "Buy Now", "submit"))
 check("checkout still needs approval", guard.click_is_risky("link", "Proceed to checkout", ""))
 

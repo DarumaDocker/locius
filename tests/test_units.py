@@ -53,6 +53,8 @@ def test_click_risk():
     # putting something in the cart is reversible (Amazon's button is an <input type=submit>); buying is not
     assert not guard.click_is_risky("button", "Add to Cart", "submit")
     assert not guard.click_is_risky("button", "加入购物车", "submit")
+    assert not guard.click_is_risky("button", "Add to cart, shift, Alt, K", "submit")     # Amazon.sg, 2026-09-29
+    assert guard.click_is_risky("button", "Buy Now, shift, Alt, B", "submit")
     assert guard.click_is_risky("button", "Buy Now", "submit")
     assert guard.click_is_risky("button", "Add to Cart and checkout", "submit")
 
@@ -116,6 +118,11 @@ def test_policy_browser(store):
                   elem={"role": "searchbox", "name": "Search"}, page=page).decision == ALLOW
     assert decide(store, "browser_type", {"ref": "e2", "text": "hello", "submit": True}, "t",
                   elem={"role": "textbox", "name": "Message"}, page=page).decision == ASK
+    # a <button> defaults to type=submit; outside a form (chat launcher) it's an ordinary click, inside a form it's not
+    assert decide(store, "browser_click", {"ref": "e3"}, "t", elem={"name": "Open chat widget", "role": "button",
+                  "input_type": "submit", "in_form": False}, page=page).decision == ALLOW
+    assert decide(store, "browser_click", {"ref": "e3"}, "t", elem={"name": "Go", "role": "button",
+                  "input_type": "submit", "in_form": True}, page=page).decision == ASK
     assert decide(store, "browser_navigate", {"url": "http://192.168.1.1/"}, "t").decision == DENY
     # taint: after reading email, navigating to a new domain with data in the URL asks
     store.update_task_ctx("t", taint="CONFIDENTIAL")

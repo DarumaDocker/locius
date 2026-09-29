@@ -40,6 +40,8 @@ FEED_JS = open(os.path.join(os.path.dirname(__file__), "feed.js"), encoding="utf
 BLOCK_JS = open(os.path.join(os.path.dirname(__file__), "block.js"), encoding="utf-8").read()
 FIND_JS = open(os.path.join(os.path.dirname(__file__), "find.js"), encoding="utf-8").read()
 MARKS_JS = open(os.path.join(os.path.dirname(__file__), "marks.js"), encoding="utf-8").read()
+GRID_JS = open(os.path.join(os.path.dirname(__file__), "grid.js"), encoding="utf-8").read()
+AT_JS = open(os.path.join(os.path.dirname(__file__), "at.js"), encoding="utf-8").read()
 
 
 def format_feed(feed: dict, url: str) -> str:
@@ -312,15 +314,25 @@ class Broker:
         page = await self.page_for(task_id)
         await self.snapshot(task_id, 2000)                 # fresh refs
         marks, text = [], ""
+        # label the page and every iframe (chat widgets like Zendesk/Intercom live in iframes; their refs look like f1e3)
+        frames = [fr for fr in (self.frame_maps.get(task_id or "default") or {}).values() if not fr.is_detached()] or [page.main_frame]
         try:
-            got = await page.main_frame.evaluate(MARKS_JS, "draw")
-            marks, text = got.get("marks") or [], got.get("text") or ""
+            for fr in frames:
+                try:
+                    got = await fr.evaluate(MARKS_JS, "draw")
+                except Exception:
+                    continue
+                marks += got.get("marks") or []
+                if got.get("text"):
+                    text += ("\n" if text else "") + got["text"]
             img = await page.screenshot(type="jpeg", quality=70, timeout=10000)
         finally:
-            try:
-                await page.main_frame.evaluate(MARKS_JS, "clear")
-            except Exception:
-                pass
+            for fr in frames:
+                try:
+                    await fr.evaluate(MARKS_JS, "clear")
+                except Exception:
+                    pass
+        text = text[:3000]
         title = ""
         try:
             title = await page.title()
@@ -332,6 +344,73 @@ class Broker:
                 "marks": marks, "snapshot": "Labelled elements visible on screen:\n" + "\n".join(lines)
                 + ("\n\nText visible on screen:\n" + text if text else ""),
                 "viewport": VIEWPORT, "tabs": len([p for p in self.ctx.pages if not p.is_closed()])}
+
+    async def grid(self, task_id: str, region=None, cols=0, rows=0, labels="letters", mark=None) -> dict:
+        """Screenshot for visual targeting: a labelled grid over the viewport (or a zoomed region), and/or a red marker."""
+        page = await self.page_for(task_id)
+        vw, vh = VIEWPORT["width"], VIEWPORT["height"]
+        try:
+            vw, vh = await page.evaluate("[window.innerWidth, window.innerHeight]")
+        except Exception:
+            pass
+        if region:
+            x, y, w, h = (float(v) for v in region)
+            x, y = max(0.0, min(x, vw - 20)), max(0.0, min(y, vh - 20))
+            region = [x, y, max(20.0, min(w, vw - x)), max(20.0, min(h, vh - y))]
+        opts = {"mode": "draw", "region": region, "cols": int(cols or 0), "rows": int(rows or 0), "labels": labels,
+                "mark": [float(mark[0]), float(mark[1])] if mark else None}
+        try:
+            await page.main_frame.evaluate(GRID_JS, opts)
+            shot = {"type": "jpeg", "quality": 75, "timeout": 10000}
+            if region:
+                shot["clip"] = {"x": region[0], "y": region[1], "width": region[2], "height": region[3]}
+            img = await page.screenshot(**shot)
+        finally:
+            try:
+                await page.main_frame.evaluate(GRID_JS, {"mode": "clear"})
+            except Exception:
+                pass
+        import base64 as _b64
+        out = {"url": page.url, "title": await page.title(), "image_b64": _b64.b64encode(img).decode(), "image_type": "image/jpeg",
+               "region": region or [0, 0, vw, vh], "cols": opts["cols"], "rows": opts["rows"], "labels": labels,
+               "viewport": {"width": vw, "height": vh}, "tabs": len([p for p in self.ctx.pages if not p.is_closed()]),
+               "snapshot": ""}
+        if mark:
+            out["at"] = await self.at(task_id, mark[0], mark[1])
+        return out
+
+    async def at(self, task_id: str, x: float, y: float) -> dict:
+        """The element under a viewport point, looking into iframes (also cross-origin) and open shadow roots."""
+        page = await self.page_for(task_id)
+        frame, fx, fy, frames = page.main_frame, float(x), float(y), []
+        for _ in range(4):
+            try:
+                info = await frame.evaluate(AT_JS, [fx, fy])
+            except Exception as e:
+                return {"tag": "", "name": "", "error": str(e)[:120], "frames": frames}
+            if not info:
+                return {"tag": "", "name": "", "frames": frames}
+            if not info.get("iframe"):
+                info["frames"] = frames
+                info["page_url"], info["page_title"] = page.url, await page.title()
+                return info
+            bx, by = info["box"][0], info["box"][1]
+            child = None
+            for fr in frame.child_frames:
+                try:
+                    el = await fr.frame_element()
+                    bb = await el.bounding_box()
+                except Exception:
+                    continue
+                if bb and abs(bb["x"] - bx) < 3 and abs(bb["y"] - by) < 3 or (bb and bb["x"] <= fx <= bb["x"] + bb["width"]
+                                                                               and bb["y"] <= fy <= bb["y"] + bb["height"]):
+                    child = fr
+                    break
+            if child is None:
+                return {"tag": "iframe", "name": info.get("src", ""), "frames": frames}
+            frames.append(child.url.split("?")[0][:160])
+            frame, fx, fy = child, fx - bx, fy - by
+        return {"tag": "", "name": "", "frames": frames}
 
     def locate(self, task_id: str, ref: str):
         ref = str(ref).strip().strip("[]")
@@ -511,16 +590,25 @@ async def agent_action(action: str, req: Request):
         return await broker.describe(task_id, body.get("ref", ""))
     if action == "focused":
         return await broker.focused(task_id)
+    if action == "describe_at":
+        return await broker.at(task_id, float(body.get("x", 0)), float(body.get("y", 0)))
     if action == "request_takeover":
         broker.requested = {"task_id": task_id, "reason": str(body.get("reason", ""))[:300], "ts": time.time()}
         await broker.page_for(task_id)
         return {"ok": True, "status": "takeover_requested"}
     broker.check_agent()
-    if action in ("find", "look"):
+    if action in ("find", "look", "locate"):
         async with broker.lock:
             try:
                 if action == "find":
                     return await broker.find(task_id, str(body.get("query", ""))[:200])
+                if action == "locate":
+                    region, mark = body.get("region"), body.get("mark")
+                    if mark:
+                        return await broker.grid(task_id, mark=mark)
+                    if region:
+                        return await broker.grid(task_id, region=region, cols=8, rows=6, labels="numbers")
+                    return await broker.grid(task_id, cols=8, rows=6, labels="letters")
                 return await broker.look(task_id)
             except HTTPException:
                 raise
@@ -553,6 +641,20 @@ async def agent_action(action: str, req: Request):
                 except Exception as e:
                     raise HTTPException(409, f"点击失败 click failed: {str(e)[:200]}")
                 await broker.settle(page, 1200)
+                page = await broker.page_for(task_id)
+            elif action == "click_at":
+                # visual click (browser_locate found the point): works for iframes, shadow DOM, canvas, unlabeled icons
+                x, y = float(body.get("x", -1)), float(body.get("y", -1))
+                if not (0 <= x <= VIEWPORT["width"] * 2 and 0 <= y <= VIEWPORT["height"] * 2):
+                    raise HTTPException(400, "x/y must be viewport coordinates from browser_locate")
+                await page.mouse.click(x, y)
+                await broker.settle(page, 900)
+                text = str(body.get("text") or "")
+                if text:
+                    await page.keyboard.type(text, delay=15)
+                    if body.get("submit"):
+                        await page.keyboard.press("Enter")
+                        await broker.settle(page, 1500)
                 page = await broker.page_for(task_id)
             elif action == "type":
                 loc = broker.locate(task_id, body.get("ref", ""))

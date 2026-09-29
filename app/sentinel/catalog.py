@@ -141,6 +141,26 @@ TOOLS: dict[str, dict] = {
                        "(e.g. 'which case looks nicest'), or to confirm what happened. Then click the ref it names.",
         "parameters": _obj({"question": {"type": S, "description": "what you want to know about the visible page"}}, ["question"]),
     },
+    "browser_locate": {
+        "connector": "browser", "capability": "browse", "operation": "read", "risk": "low", "data_class": "PUBLIC",
+        "description": "用视觉在截图上定位一个东西（例如右下角的客服聊天气泡），返回它的屏幕坐标。"
+                       "LOCATE something on the screen with vision and get its x/y position — for things that have no ref: "
+                       "icons, chat bubbles and chat windows inside iframes or widgets, canvas maps, custom buttons. Describe it "
+                       "the way a person would ('the blue round chat bubble in the bottom-right corner', 'the message box of the "
+                       "chat window'). Then use browser_click_at with the returned x/y.",
+        "parameters": _obj({"target": {"type": S, "description": "what to find, described visually (colour, shape, position, text on it)"}},
+                           ["target"]),
+    },
+    "browser_click_at": {
+        "connector": "browser", "capability": "interact", "operation": "click", "risk": "low", "data_class": "PUBLIC",
+        "description": "按屏幕坐标点击（坐标来自 browser_locate），可选：点击后输入文字并回车发送。"
+                       "Click at x/y screen coordinates from browser_locate (works inside iframes and chat widgets). Optionally "
+                       "type text into what was clicked and press Enter (submit=true) — e.g. to send a chat message. Sending, "
+                       "buying and other consequential clicks trigger the user's approval.",
+        "parameters": _obj({"x": {"type": "number"}, "y": {"type": "number"},
+                            "text": {"type": S, "description": "optional text to type after clicking"},
+                            "submit": {"type": "boolean", "description": "press Enter after typing"}}, ["x", "y"]),
+    },
     "browser_scroll": {
         "connector": "browser", "capability": "browse", "operation": "scroll", "risk": "low", "data_class": "PUBLIC",
         "description": "滚动页面，返回新位置附近的内容。Scroll the page; the returned snapshot shows the part of the page around the new position.",

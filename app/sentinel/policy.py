@@ -81,15 +81,20 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
         elif ctx["injection"] and dom not in ctx["domains"] and not trusted and carries_data:
             risk = _bump(risk, "high")
             reasons.append("本任务读到疑似提示注入的内容后，要访问一个带参数的新网址 (possible exfiltration after injection)")
-    if tool in ("browser_click", "browser_type", "browser_select", "browser_press", "browser_upload") and page:
+    if tool in ("browser_click", "browser_click_at", "browser_type", "browser_select", "browser_press", "browser_upload") and page:
         dom = guard.domain_of(page.get("url", ""))
         if dom and dom in set(conn["config"].get("blocked_domains") or []):
             return Decision(DENY, "high", f"域名 {dom} 在黑名单中 (blocked domain)")
-    if tool == "browser_click" and elem:
-        if guard.click_is_risky(elem.get("role", ""), elem.get("name", ""), elem.get("input_type", "")):
+    if tool == "browser_click_at" and not (elem and elem.get("tag")):
+        risk = _bump(risk, "high")
+        reasons.append("无法确认这个位置上是什么元素 (can't tell what is at this position)")
+    if tool in ("browser_click", "browser_click_at") and elem:
+        # a <button> reports type "submit" by default; outside a <form> it submits nothing (chat launchers, menus)
+        itype = elem.get("input_type", "") if elem.get("in_form", True) else ""
+        if guard.click_is_risky(elem.get("role", ""), elem.get("name", ""), itype):
             risk = _bump(risk, "high")
             reasons.append(f"点击的按钮「{elem.get('name', '')}」可能提交/购买/发送/删除 (consequential click)")
-    if tool == "browser_type":
+    if tool == "browser_type" or (tool == "browser_click_at" and args.get("text")):
         if elem and (elem.get("input_type", "").lower() == "password" or elem.get("is_password")):
             return Decision(DENY, "high", "Agent 不能输入密码。请调用 browser_request_takeover 让用户接管输入 (use takeover for passwords)")
         text = str(args.get("text", ""))
