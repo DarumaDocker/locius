@@ -31,7 +31,8 @@ async def main():
             .find(x => x.textContent.includes('很长很长')); return t ? t.scrollHeight > t.clientHeight + 1 : null; }""")
         w0 = await width()
         check("default width 240", abs(w0 - 240) < 2, w0)
-        check("long title is cut off at the default width (2 lines max)", await clipped() is True)
+        await pg.wait_for_timeout(800)
+        check("long title is cut off at the default width (2 lines max)", await clipped() is True, await clipped())
         async def drag(dx):
             box = await pg.locator(".conv-resizer").bounding_box()
             x, y = box["x"] + box["width"] / 2, box["y"] + 300

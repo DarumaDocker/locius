@@ -1297,6 +1297,7 @@ async function viewSettings(root) {
       h('p', { class: 'sub' }, T('默认全部使用本机 Qwen3.8-27B，数据不出 Olares One。任何 OpenAI 兼容接口都可替换。')),
       field('model_base_url', T('接口地址'), 'Base URL'), field('model_name', T('执行模型'), 'Model'),
       field('planner_model', T('规划模型（留空=同上）'), 'Planner model'),
+      field('vision_model', T('视觉模型（看网页截图，留空=同执行模型）'), 'Vision model'),
       field('temperature', T('温度'), 'Temperature', 'number'), field('max_tokens', T('单次最大输出'), 'Max tokens', 'number'),
       field('llm_timeout', T('超时（秒）'), 'Timeout s', 'number'),
       tog('disable_thinking', T('关闭思考模式（更快，复杂任务效果可能下降）Disable thinking')),

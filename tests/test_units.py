@@ -50,6 +50,11 @@ def test_click_risk():
     assert not guard.click_is_risky("button", "Search")
     assert not guard.click_is_risky("link", "Next page")
     assert guard.click_is_risky("button", "Go", "submit")
+    # putting something in the cart is reversible (Amazon's button is an <input type=submit>); buying is not
+    assert not guard.click_is_risky("button", "Add to Cart", "submit")
+    assert not guard.click_is_risky("button", "加入购物车", "submit")
+    assert guard.click_is_risky("button", "Buy Now", "submit")
+    assert guard.click_is_risky("button", "Add to Cart and checkout", "submit")
 
 
 # ---------------------------------------------------------------- store / audit / vault

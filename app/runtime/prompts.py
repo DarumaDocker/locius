@@ -205,6 +205,7 @@ Current time: {now_str(tz, language)}
 - After an approved action runs, always tell the user what actually happened (per item for batch actions), including failures.
 - Use Gmail search syntax (e.g. `in:inbox newer_than:7d -category:promotions -category:social`) to find emails; read full messages with gmail_get_message before summarizing or replying.
 - Browser: after navigate/click you get a snapshot with element refs like [e12]; only use refs from the latest snapshot. Prefer direct URLs (e.g. https://duckduckgo.com/html/?q=...) for searches.
+- Seeing the page: big sites (shops, maps, dashboards) produce long snapshots. Don't re-open the same URL hoping for more — instead use browser_find("words") to locate products/buttons anywhere on the page (it returns refs and the price/context), browser_scroll to see the next part, and browser_look("question") to SEE the page: it screenshots the visible area with every clickable element labelled [eN] and a vision model answers (e.g. "which iPhone case looks nicest and what does it cost?", "where is the Add to Cart button?"). Then click the ref it names. Use browser_look for visual choices and whenever the text snapshot doesn't show what the user can see.
 - For long waits (e.g. a support agent replying) use browser_wait.
 - For recurring requests (every day / every week / every hour…), create a schedule with schedule_create.
 - Save durable facts the user explicitly asks you to remember with memory_remember.

@@ -38,6 +38,8 @@ MAX_DOWNLOAD = 200 * 1024 * 1024
 SNAPSHOT_JS = open(os.path.join(os.path.dirname(__file__), "snapshot.js"), encoding="utf-8").read()
 FEED_JS = open(os.path.join(os.path.dirname(__file__), "feed.js"), encoding="utf-8").read()
 BLOCK_JS = open(os.path.join(os.path.dirname(__file__), "block.js"), encoding="utf-8").read()
+FIND_JS = open(os.path.join(os.path.dirname(__file__), "find.js"), encoding="utf-8").read()
+MARKS_JS = open(os.path.join(os.path.dirname(__file__), "marks.js"), encoding="utf-8").read()
 
 
 def format_feed(feed: dict, url: str) -> str:
@@ -242,7 +244,7 @@ class Broker:
             pass
         await asyncio.sleep(ms / 1000)
 
-    async def snapshot(self, task_id: str, max_chars=12000) -> dict:
+    async def snapshot(self, task_id: str, max_chars=12000, near: bool = False) -> dict:
         page = await self.page_for(task_id)
         await self.settle(page, 200)
         try:
@@ -261,7 +263,7 @@ class Broker:
             prefix = "" if i == 0 else f"f{i}"
             fmap[prefix] = fr
             try:
-                txt = await fr.evaluate(SNAPSHOT_JS, prefix)
+                txt = await fr.evaluate(SNAPSHOT_JS, {"prefix": prefix, "near": bool(near and i == 0)})
             except Exception as e:
                 txt = f"(无法读取 frame: {str(e)[:80]})" if i == 0 else ""
             if i == 0:
@@ -278,9 +280,58 @@ class Broker:
         max_chars = max(2000, min(int(max_chars or 12000), 40000))
         truncated = len(body) > max_chars
         if truncated:
-            body = body[:max_chars] + "\n…[快照已截断 snapshot truncated — use browser_scroll or a larger max_chars]"
+            body = body[:max_chars] + ("\n…[快照已截断 snapshot truncated — browser_find(\"text\") locates anything on the page; "
+                                       "browser_scroll shows the part around the new position; browser_look lets you see the page]")
         tabs = len([p for p in self.ctx.pages if not p.is_closed()])
+        if near:
+            body = "(showing the part of the page around the current scroll position)\n" + body
         return {"url": page.url, "title": title, "snapshot": body, "truncated": truncated, "tabs": tabs}
+
+    async def find(self, task_id: str, query: str) -> dict:
+        """Locate elements by text anywhere on the page (all frames); refs stay valid for click/type."""
+        snap = await self.snapshot(task_id, 2000)          # assigns fresh refs in every frame
+        matches = []
+        for prefix, fr in (self.frame_maps.get(task_id or "default") or {}).items():
+            try:
+                found = await fr.evaluate(FIND_JS, query)
+            except Exception:
+                found = []
+            matches += found
+        matches.sort(key=lambda m: -m.get("score", 0))
+        matches = matches[:25]
+        lines = [f"browser_find \"{query}\": {len(matches)} match(es) on {snap['url']}"]
+        for m in matches:
+            ctx = m.get("context") or ""
+            lines.append(f"[{m['ref']}] {m['role']} \"{m['name']}\" ({m['where']})" + (f"\n    context: {ctx}" if ctx and ctx != m['name'] else ""))
+        if not matches:
+            lines.append("(nothing found — try other words, browser_scroll to load more, or browser_look to see the page)")
+        return {"url": snap["url"], "title": snap["title"], "snapshot": "\n".join(lines), "tabs": snap["tabs"], "matches": len(matches)}
+
+    async def look(self, task_id: str) -> dict:
+        """Screenshot of the viewport with every visible element labelled by its ref (set-of-marks) for a vision model."""
+        page = await self.page_for(task_id)
+        await self.snapshot(task_id, 2000)                 # fresh refs
+        marks, text = [], ""
+        try:
+            got = await page.main_frame.evaluate(MARKS_JS, "draw")
+            marks, text = got.get("marks") or [], got.get("text") or ""
+            img = await page.screenshot(type="jpeg", quality=70, timeout=10000)
+        finally:
+            try:
+                await page.main_frame.evaluate(MARKS_JS, "clear")
+            except Exception:
+                pass
+        title = ""
+        try:
+            title = await page.title()
+        except Exception:
+            pass
+        lines = [f"[{m['ref']}] {m['role']} \"{m['name']}\"" for m in marks]
+        import base64 as _b64
+        return {"url": page.url, "title": title, "image_b64": _b64.b64encode(img).decode(), "image_type": "image/jpeg",
+                "marks": marks, "snapshot": "Labelled elements visible on screen:\n" + "\n".join(lines)
+                + ("\n\nText visible on screen:\n" + text if text else ""),
+                "viewport": VIEWPORT, "tabs": len([p for p in self.ctx.pages if not p.is_closed()])}
 
     def locate(self, task_id: str, ref: str):
         ref = str(ref).strip().strip("[]")
@@ -465,6 +516,16 @@ async def agent_action(action: str, req: Request):
         await broker.page_for(task_id)
         return {"ok": True, "status": "takeover_requested"}
     broker.check_agent()
+    if action in ("find", "look"):
+        async with broker.lock:
+            try:
+                if action == "find":
+                    return await broker.find(task_id, str(body.get("query", ""))[:200])
+                return await broker.look(task_id)
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(500, f"浏览器错误 browser error: {str(e)[:300]}")
     async with broker.lock:
         page = await broker.page_for(task_id)
         try:
@@ -530,8 +591,12 @@ async def agent_action(action: str, req: Request):
                       "top": "window.scrollTo(0,0)", "bottom": "window.scrollTo(0, document.body.scrollHeight)"}.get(d)
                 if not js:
                     raise HTTPException(400, "direction must be up/down/top/bottom")
+                y0 = await page.evaluate("window.scrollY")
                 await page.mouse.wheel(0, {"down": 700, "up": -700, "top": -100000, "bottom": 100000}[d])
                 await asyncio.sleep(0.5)
+                if await page.evaluate("window.scrollY") == y0:     # wheel went to an inner element (or nowhere)
+                    await page.evaluate(js)
+                    await asyncio.sleep(0.3)
             elif action == "back":
                 await page.go_back(timeout=20000)
                 await broker.settle(page, 800)
@@ -554,7 +619,8 @@ async def agent_action(action: str, req: Request):
             raise
         except Exception as e:
             raise HTTPException(500, f"浏览器错误 browser error: {str(e)[:300]}")
-        snap = await broker.snapshot(task_id, body.get("max_chars", 12000))
+        near = action == "scroll" or bool(body.get("near"))
+        snap = await broker.snapshot(task_id, body.get("max_chars", 12000), near=near)
         if action in ("navigate", "click", "snapshot", "back", "wait", "press"):
             try:
                 blk = await page.main_frame.evaluate(BLOCK_JS, broker.nav_status.get(task_id, 0) if action == "navigate" else 0)

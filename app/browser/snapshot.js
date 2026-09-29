@@ -1,4 +1,8 @@
-(prefix) => {
+(opts) => {
+  // opts: {prefix, near}. near=true -> only what is around the current scroll position (so scrolling shows new content)
+  const prefix = typeof opts === 'string' ? opts : ((opts && opts.prefix) || '');
+  const near = !!(opts && opts.near);
+  const VH = window.innerHeight || 800;
   const ATTR = 'data-persona-ref';
   const lines = [];
   let n = 0;
@@ -85,7 +89,10 @@
     if (el.disabled || el.getAttribute('aria-disabled') === 'true') line += ' [disabled]';
     if (el.tagName === 'A') {
       const h = el.getAttribute('href') || '';
-      if (h && !h.startsWith('javascript')) { let abs = h; try { abs = new URL(h, location.href).href; } catch (e) {} line += ` → ${abs.length > 220 ? abs.slice(0, 220) + '…(url truncated)' : abs}`; }
+      if (h && !h.startsWith('javascript')) {
+        let abs = h; try { const u = new URL(h, location.href); abs = u.href; if (abs.length > 140 && u.search) abs = u.origin + u.pathname; } catch (e) {}
+        line += ` → ${abs.length > 160 ? abs.slice(0, 160) + '…' : abs}`;
+      }
     }
     lines.push(line);
   };
@@ -103,6 +110,10 @@
         if (r.width < 1 && r.height < 1 && getComputedStyle(el).display === 'none') continue;
       }
       if (el.tagName === 'INPUT' && (el.type || '').toLowerCase() === 'hidden') continue;
+      if (near) {
+        const r = el.getBoundingClientRect();
+        if ((r.width || r.height) && (r.bottom < -150 || r.top > VH + 900)) continue;   // far above/below the viewport
+      }
       if (isInteractive(el)) {
         flush();
         emitEl(el);

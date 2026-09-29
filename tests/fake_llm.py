@@ -46,7 +46,12 @@ async def chat(req: Request):
         from fastapi.responses import JSONResponse
         return JSONResponse({"error": {"message": "model 'missing-model' not found"}}, status_code=404)
     msgs = b["messages"]
+    if b.get("model") == "text-only" and "image_url" in json.dumps(msgs):
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"error": {"message": "image input is not supported by this model"}}, status_code=400)
     sys = msgs[0]["content"] if msgs and msgs[0]["role"] == "system" else ""
+    if sys.startswith("You look at a screenshot"):   # the vision helper behind browser_look
+        return reply(fake_vision(msgs[-1]["content"]))
     if "planning module" in sys and "inbox this week" in msgs[-1]["content"]:
         return reply(json.dumps({"objective": "Triage this week's inbox and prepare replies", "steps": [
             {"id": "s1", "description": "Search the inbox for important emails from the last 7 days", "tool_hint": "gmail", "risk": "read"},
@@ -92,6 +97,34 @@ async def chat(req: Request):
         if not any("已发送到对话" in str(m["content"]) for m in done):
             return reply("", [tc("send_file", {"path": "reports/brief.pdf", "note": "简报"})])
         return reply(f"BUDGET DONE after {n} tool results; tools offered at the end: {','.join(sorted(tnames))}")
+    if "SHOPCART" in goal:   # the 2026-09-29 Amazon run: find a case on a long page, add it to the cart
+        # a real model would reason from the tool results; this one follows the path the skill describes
+        def ref_after(pattern, text):
+            m = re.search(r"\[(e\d+)\][^\n]*" + pattern, text)
+            return m.group(1) if m else None
+        if n == 0:
+            return reply("", [tc("browser_navigate", {"url": "http://shop.test:8099/shop.html?k=iphone+17+pro+max+case"})])
+        if n == 1:   # the snapshot is cut off inside the header: look at the page instead of re-opening it
+            return reply("", [tc("browser_look", {"question": "Which iPhone 17 Pro Max case in the results looks nicest? Name its link ref."})])
+        if n == 2:   # also cross-check by text search
+            return reply("", [tc("browser_find", {"query": "Aurora Glitter Case"})])
+        if n == 3:
+            seen = str(tools_done[1]["content"])
+            ref = (re.search(r"click \[(e\d+)\]", seen) or [None, None])[1] or ref_after("Aurora Glitter", last_tool)
+            return reply("", [tc("browser_click", {"ref": ref or "e1"})])
+        if n == 4:
+            return reply("", [tc("browser_find", {"query": "Add to Cart"})])
+        if n == 5:
+            return reply("", [tc("browser_click", {"ref": ref_after("Add to Cart", last_tool) or "e1"})])
+        if n == 6:
+            return reply("", [tc("browser_look", {"question": "Did the item get added to the cart? What does the cart show?"})])
+        return reply("SHOP DONE: " + last_tool[:600])
+    if "SHOPSCROLL" in goal:
+        if n == 0:
+            return reply("", [tc("browser_navigate", {"url": "http://shop.test:8099/shop.html"})])
+        if n == 1:
+            return reply("", [tc("browser_scroll", {"direction": "down"})])
+        return reply("SCROLL DONE: " + last_tool[:3000])
     if "BLOCKSITE" in goal:
         seq = [("browser_navigate", {"url": "http://opentable.test:8094/wall"}),
                ("browser_navigate", {"url": "http://opentable.test:8094/wall?page=2"}),
@@ -245,3 +278,26 @@ async def chat(req: Request):
 @app.get("/calls")
 def calls():
     return {"n": len(CALLS), "last": CALLS[-1] if CALLS else None}
+
+
+def fake_vision(content):
+    """Stand-in for a vision model: checks the screenshot really is an image with red set-of-marks boxes,
+    then picks the 'nicest' case from the label list (the glittery one, as a person might)."""
+    import base64, io
+    from PIL import Image
+    parts = content if isinstance(content, list) else []
+    text = " ".join(p.get("text", "") for p in parts if p.get("type") == "text")
+    url = next((p["image_url"]["url"] for p in parts if p.get("type") == "image_url"), "")
+    if not url.startswith("data:image/"):
+        return "NO IMAGE"
+    img = Image.open(io.BytesIO(base64.b64decode(url.split(",", 1)[1]))).convert("RGB")
+    red = sum(1 for r, g, bl in img.getdata() if r > 200 and g < 60 and bl < 60)
+    info = f"(IMG {img.width}x{img.height} RED={red})"
+    if "added to the cart" in text:
+        m = re.search(r"(\d+) items? in cart", text)
+        added = re.search(r"Added to Cart: ([^\n\"]+)", text)
+        return f"The cart shows {m.group(1) if m else '?'} items in cart. {('Message: Added to Cart: ' + added.group(1)) if added else ''} {info}"
+    m = re.search(r"\[(e\d+)\] link \"[^\"]*Aurora Glitter Case", text)
+    if m:
+        return f"The Aurora Glitter Case (4.4 out of 5 stars, S$21.90) looks the nicest — sparkly purple. To open it, click [{m.group(1)}]. {info}"
+    return f"I can see the page but not the product list here; scroll down. {info}"

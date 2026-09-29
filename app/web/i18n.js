@@ -501,5 +501,6 @@ window.LOCIUS_EN = {
 "，新建一个项目（名字随意，如 Locius）": " and create a project (any name, e.g. Locius)",
 "📅 Google 日历 Google Calendar": "📅 Google Calendar",
 "界面和 Agent 都用这个语言：思考过程、任务计划、回答、通知和定时任务的汇报。选 English 就全部用英文。": "Used by the interface and the agent: its reasoning, task plans, answers, notifications and scheduled-task reports. Choose English and everything is in English.",
-"语言": "Language"
+"语言": "Language",
+"视觉模型（看网页截图，留空=同执行模型）": "Vision model (reads page screenshots; empty = executor model)"
 };

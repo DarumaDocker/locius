@@ -125,9 +125,25 @@ TOOLS: dict[str, dict] = {
         "description": "按键，如 Enter / Escape / Tab / ArrowDown。Press a keyboard key on the page.",
         "parameters": _obj({"key": {"type": S}}, ["key"]),
     },
+    "browser_find": {
+        "connector": "browser", "capability": "browse", "operation": "read", "risk": "low", "data_class": "PUBLIC",
+        "description": "在整个页面里按文字查找元素（商品标题、按钮如 Add to Cart 等），返回 ref 和周围信息（如价格）。"
+                       "Find elements anywhere on the page by their text — product titles, buttons like 'Add to Cart', links — even when "
+                       "the snapshot was truncated. Returns refs you can click plus nearby context such as the price.",
+        "parameters": _obj({"query": {"type": S, "description": "words to look for, e.g. 'iPhone 17 Pro Max case' or 'Add to Cart'"}}, ["query"]),
+    },
+    "browser_look": {
+        "connector": "browser", "capability": "browse", "operation": "read", "risk": "low", "data_class": "PUBLIC",
+        "description": "用视觉看当前页面：截图并给每个可点元素标上 [eN]，由视觉模型回答你的问题。"
+                       "LOOK at the page with vision: takes a screenshot of the visible part, labels every clickable element with its "
+                       "ref [eN], and a vision model answers your question (what products/prices/buttons are shown, which one "
+                       "matches, where to click). Use it when the text snapshot is unclear, for images/visual choices "
+                       "(e.g. 'which case looks nicest'), or to confirm what happened. Then click the ref it names.",
+        "parameters": _obj({"question": {"type": S, "description": "what you want to know about the visible page"}}, ["question"]),
+    },
     "browser_scroll": {
         "connector": "browser", "capability": "browse", "operation": "scroll", "risk": "low", "data_class": "PUBLIC",
-        "description": "滚动页面。Scroll the page up or down.",
+        "description": "滚动页面，返回新位置附近的内容。Scroll the page; the returned snapshot shows the part of the page around the new position.",
         "parameters": _obj({"direction": {"type": S, "enum": ["up", "down", "top", "bottom"]}}, ["direction"]),
     },
     "browser_back": {
