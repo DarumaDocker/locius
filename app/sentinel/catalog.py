@@ -46,7 +46,7 @@ TOOLS: dict[str, dict] = {
         "description": "在 Gmail 草稿箱创建草稿（不会发送）。Create a draft (NOT sent). For a reply pass reply_to_message_id; "
                        "'to' and 'subject' may be left empty for replies and will be filled from the original email.",
         "parameters": _obj({"to": {"type": S}, "subject": {"type": S}, "body": {"type": S}, "cc": {"type": S},
-                            "reply_to_message_id": {"type": S},
+                            "reply_to_message_id": {"type": S}, "attachments": {"type": "array", "items": {"type": S}, "description": "optional: workspace file paths to attach (e.g. a filled PDF)"},
                             "from_account": {"type": S, "description": "optional: which of the user's mailboxes (email) to use; default = the default mailbox; replies always use the mailbox of the original email"}}, ["body"]),
     },
     "gmail_send": {
@@ -54,14 +54,20 @@ TOOLS: dict[str, dict] = {
         "description": "发送邮件（需要用户在审批界面批准）。Send an email. Always requires the user's approval in the approval UI; "
                        "do not ask for permission in chat, just call this tool. For replies pass reply_to_message_id.",
         "parameters": _obj({"to": {"type": S}, "subject": {"type": S}, "body": {"type": S}, "cc": {"type": S},
-                            "reply_to_message_id": {"type": S},
+                            "reply_to_message_id": {"type": S}, "attachments": {"type": "array", "items": {"type": S}, "description": "optional: workspace file paths to attach (e.g. a filled PDF)"},
                             "from_account": {"type": S, "description": "optional: send from this mailbox (email); default = the default mailbox"}}, ["body"]),
     },
     "gmail_reply": {
         "connector": "gmail", "capability": "send", "operation": "send", "risk": "high", "data_class": "CONFIDENTIAL",
         "description": "回复一封邮件并发送（需要审批）。Reply to an email and send it (requires approval). reply_all includes other recipients.",
-        "parameters": _obj({"message_id": {"type": S}, "body": {"type": S}, "reply_all": {"type": "boolean"}},
+        "parameters": _obj({"message_id": {"type": S}, "body": {"type": S}, "reply_all": {"type": "boolean"}, "attachments": {"type": "array", "items": {"type": S}, "description": "optional: workspace file paths to attach (e.g. a filled PDF)"}},
                            ["message_id", "body"]),
+    },
+    "gmail_save_attachment": {
+        "connector": "gmail", "capability": "read", "operation": "read", "risk": "low", "data_class": "CONFIDENTIAL",
+        "description": "把邮件附件保存到工作区（attachments/ 文件夹），比如要填写的 PDF 表格。Save an email attachment into the workspace "
+                       "(attachments/…) so you can read or fill it — e.g. a PDF form. filename = one of the names listed by gmail_get_message.",
+        "parameters": _obj({"message_id": {"type": S}, "filename": {"type": S}}, ["message_id", "filename"]),
     },
     "gmail_forward": {
         "connector": "gmail", "capability": "send", "operation": "send", "risk": "high", "data_class": "CONFIDENTIAL",

@@ -64,3 +64,8 @@ Recommend 1–2 with a short reason. If the user already said "just book the bes
 Some sites (e.g. OpenTable) block automated browsers ("Access Denied", 403, robot checks). Don't retry other URLs on that
 site: use Reserve with Google or another provider for the same restaurant. Only if the user insists on that exact site,
 request a takeover so they can pass the check themselves.
+
+## Showing the shortlist
+- When you have 2–6 verified candidates, call present_choices(kind="comparison"): label = the restaurant name as written on
+  its page, details = exact snippets you read (available times, price range, rating, address). Put your recommendation
+  in note. The user's pick comes back as their next message; then book it (approval).

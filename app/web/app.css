@@ -339,3 +339,10 @@ table.data tr.clickable { cursor: pointer; } table.data tr.clickable:hover { bac
 /* language toggle */
 .top-right .lang-toggle { display: inline-flex; cursor: pointer; font-weight: 600; }
 .top-right .lang-toggle:hover { color: var(--text); border-color: var(--accent); }
+.choices { max-width: 720px; }
+.choices-q { font-weight: 600; margin-bottom: 8px; }
+.choice-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px; }
+.choice { border: 1px solid var(--line); border-radius: var(--radius); padding: 10px; display: flex; flex-direction: column; gap: 6px; background: var(--surface); }
+.choice-title { font-weight: 600; overflow-wrap: anywhere; }
+.choice ul { margin: 0; padding-left: 18px; }
+.choice .btn { margin-top: auto; align-self: flex-start; }

@@ -502,5 +502,16 @@ window.LOCIUS_EN = {
 "📅 Google 日历 Google Calendar": "📅 Google Calendar",
 "界面和 Agent 都用这个语言：思考过程、任务计划、回答、通知和定时任务的汇报。选 English 就全部用英文。": "Used by the interface and the agent: its reasoning, task plans, answers, notifications and scheduled-task reports. Choose English and everything is in English.",
 "语言": "Language",
-"视觉模型（看网页截图，留空=同执行模型）": "Vision model (reads page screenshots; empty = executor model)"
+"视觉模型（看网页截图，留空=同执行模型）": "Vision model (reads page screenshots; empty = executor model)",
+"✓ 已核对：名称和细节都摘自 Agent 读过的原网页": "✓ Verified: names and details are quoted from pages the agent actually read",
+"我选：{0}": "I choose: {0}",
+"选这个 Choose": "Choose",
+"要监控的网页": "Page to watch",
+"条件：change / text / price_below": "Condition: change / text / price_below",
+"等待出现的文字（mode=text）": "Text to wait for (mode=text)",
+"价格低于（mode=price_below）": "Price below (mode=price_below)",
+"只看这个词附近（可选，如商品名）": "Only near this word (optional, e.g. the product name)",
+"🌐 网页变化 / 降价 / 到货": "🌐 Web page change / price drop / back in stock",
+"（只通知）": "(notify only) ",
+"网页监控：「要做什么」留空 = 只给你发通知（不运行 Agent）。同一个变化只提醒一次；检查失败会自动拉长间隔，连续失败会停用并告诉你。": "Web page watch: leave “Then do” empty to just get a notification (no agent run). Each change is reported once; failed checks back off, and repeated failures turn the watch off and tell you."
 };

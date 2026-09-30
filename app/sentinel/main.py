@@ -408,6 +408,8 @@ async def _summary(tool: str, args: dict, elem: dict | None, page: dict | None) 
     else:
         s["title"] = tool
         s["fields"] = [[k, str(v)] for k, v in args.items()]
+    if tool in ("gmail_send", "gmail_reply", "gmail_create_draft") and args.get("attachments"):
+        s["fields"].append(["附件 Attachments", ", ".join(os.path.basename(str(x)) for x in args["attachments"])])
     return s
 
 
@@ -905,11 +907,15 @@ async def watch(req: Request):
     if not info:
         return {"error": f"unknown source {src}", "events": [], "cursor": b.get("cursor")}
     conn = store.connection(info["connector"])
-    if not conn["enabled"] or not conn["permissions"].get("read", False):
+    perm = "browse" if info["connector"] == "browser" else "read"
+    if not conn["enabled"] or not conn["permissions"].get(perm, False):
         return {"error": f"{info['connector']} 未启用或读取权限已关闭 (connector disabled / read permission off)",
                 "events": [], "cursor": b.get("cursor")}
     try:
-        res = await asyncio.to_thread(watchers.poll, store, src, dict(b.get("params") or {}), b.get("cursor"))
+        if src == "web.page":
+            res = await watchers.poll_web(store, dict(b.get("params") or {}), b.get("cursor"))
+        else:
+            res = await asyncio.to_thread(watchers.poll, store, src, dict(b.get("params") or {}), b.get("cursor"))
     except watchers.WatchError as e:
         return {"error": str(e), "events": [], "cursor": b.get("cursor")}
     if res["events"]:

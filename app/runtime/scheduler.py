@@ -21,9 +21,13 @@ from croniter import croniter
 from app.common.util import dumps, new_id, now_ts, truncate
 
 EVENT_SOURCES = {"gmail.new_email": "收到新邮件 New email", "slack.new_message": "Slack 新消息 New Slack message",
-                 "notion.db_changed": "Notion 数据库有变化 Notion database changed"}
+                 "notion.db_changed": "Notion 数据库有变化 Notion database changed",
+                 "web.page": "网页变化 Web page change"}
 EVENT_SOURCES_EN = {"gmail.new_email": "New email", "slack.new_message": "New Slack message",
-                    "notion.db_changed": "Notion database changed"}
+                    "notion.db_changed": "Notion database changed", "web.page": "Web page change"}
+WATCH_MODES = ("change", "text", "price_below")
+MAX_FAILS = 6          # consecutive failed polls before a trigger/watch turns itself off
+MAX_BACKOFF = 6 * 3600
 MAX_EVENT_RUNS_PER_HOUR = 12
 # A run that is still waiting on the user (approval / takeover / paused) when its next run is due gets superseded
 # once it has waited this long; otherwise one unanswered approval silently blocks every later run of the schedule.
@@ -50,10 +54,25 @@ def event_spec(spec: str) -> dict:
         raise ValueError("Slack 触发需要指定频道 channel")
     if d["source"] == "notion.db_changed" and not params.get("database_id"):
         raise ValueError("Notion 触发需要指定数据库 database_id")
-    every = float(d.get("every") or 3)
+    if d["source"] == "web.page":
+        if not str(params.get("url") or "").strip():
+            raise ValueError("网页监控需要网址 url")
+        mode = str(params.get("mode") or "change").strip().lower()
+        if mode not in WATCH_MODES:
+            raise ValueError(f"mode 只能是 {' / '.join(WATCH_MODES)}")
+        if mode == "text" and not str(params.get("text") or "").strip():
+            raise ValueError("mode=text 需要 text（要等待出现的文字）")
+        if mode == "price_below":
+            try:
+                float(str(params.get("threshold") or "").replace(",", ""))
+            except ValueError:
+                raise ValueError("mode=price_below 需要数字 threshold，例如 15")
+        params = dict(params, mode=mode)
+    every = float(d.get("every") or (60 if d["source"] == "web.page" else 3))
     if every < 1:
         raise ValueError("检查间隔至少 1 分钟 (poll every >= 1 minute)")
-    return {"source": d["source"], "params": {k: str(v)[:300] for k, v in params.items()}, "every": every}
+    action = "notify" if str(d.get("action") or "").lower() == "notify" else "run"
+    return {"source": d["source"], "params": {k: str(v)[:300] for k, v in params.items()}, "every": every, "action": action}
 
 
 def next_run(kind: str, spec: str, tz: str, base: float | None = None) -> float:
@@ -111,7 +130,8 @@ def describe(sch: dict) -> str:
         except ValueError:
             return "事件 event (invalid)"
         p = ", ".join(f"{k}={v}" for k, v in d["params"].items() if v)
-        return f"{EVENT_SOURCES[d['source']]}{(' · ' + p) if p else ''} · 每 {d['every']:g} 分钟检查"
+        act = " · 只通知 notify only" if d.get("action") == "notify" else ""
+        return f"{EVENT_SOURCES[d['source']]}{(' · ' + p) if p else ''} · 每 {d['every']:g} 分钟检查{act}"
     return f"{sch['kind']} {sch['spec']}"
 
 
@@ -258,8 +278,22 @@ class Scheduler:
         if res.get("error"):
             st["_error"] = truncate(str(res["error"]), 300)
             st["_error_at"] = time.strftime("%Y-%m-%d %H:%M")
+            # back off: wait twice as long after each consecutive failure; give up (and say so) after MAX_FAILS
+            fails = int(st.get("_fails") or 0) + 1
+            st["_fails"] = fails
+            if fails >= MAX_FAILS:
+                en = self._en()
+                st["_error"] = (f"Turned off after {fails} failed checks in a row: {st['_error']}" if en
+                                else f"连续 {fails} 次检查失败，已自动停用：{st['_error']}")
+                store.db.execute("UPDATE schedules SET enabled=0, state=? WHERE id=?", (dumps(st), sch["id"]))
+                await self._tell(f"⚡ \"{sch['name']}\" was turned off" if en else f"⚡「{sch['name']}」已自动停用", st["_error"])
+                await self.rt.publish({"kind": "schedule_update"})
+                return 0
+            delay = min(spec["every"] * 60 * (2 ** fails), MAX_BACKOFF)
+            store.db.execute("UPDATE schedules SET next_run=? WHERE id=?", (time.time() + delay, sch["id"]))
         else:
             st.pop("_error", None)
+            st.pop("_fails", None)
             st["_cursor"] = res.get("cursor")
             st["_checked"] = time.strftime("%Y-%m-%d %H:%M")
         events = res.get("events") or []
@@ -273,12 +307,30 @@ class Scheduler:
                 n = store.notify(f"⚡ Trigger \"{sch['name']}\" was turned off" if en else f"⚡ 触发器「{sch['name']}」已自动停用",
                                  st["_error"], level="warning")
                 await self.rt.publish({"kind": "notification", "notification": n})
-                return
+                return 0
             st["_fired"] = fired + [time.time()]
             st["_last_events"] = len(events)
         store.db.execute("UPDATE schedules SET state=? WHERE id=?", (dumps(st), sch["id"]))
-        if events:
+        if events and spec.get("action") == "notify":
+            await self.notify_events(sch, spec, events)
+        elif events:
             await self.run_now(sch["id"], events=events, injection=res.get("injection") or [], source=spec["source"])
+        return len(events)
+
+    async def notify_events(self, sch: dict, spec: dict, events: list):
+        """A watch that only has to tell the user (no agent run, no model call)."""
+        en = self._en()
+        lines = []
+        for e in events[:5]:
+            detail = e.get("excerpt") or "; ".join(e.get("added_lines") or []) or ", ".join(f"{p:g}" for p in e.get("prices_seen") or [])
+            lines.append(f"• {e.get('condition', '')}: {truncate(str(detail), 300)}\n  {e.get('url', '')}")
+        title = f"👀 {sch['name']}"
+        await self._tell(title, "\n".join(lines), level="info")
+        store = self.rt.store
+        store.add_msg(sch["conv_id"], "assistant", title + "\n\n" + "\n".join(lines))
+        await self.rt.publish({"kind": "conv_update", "conv_id": sch["conv_id"]})
+        await self.rt.audit("scheduler", "watch.notify", "", resource=sch["id"], result="success",
+                            detail={"events": len(events), "source": spec["source"]})
 
     async def run_now(self, sid: str, events: list | None = None, injection: list | None = None, source: str = "") -> dict:
         from app.runtime import goals as G

@@ -22,6 +22,11 @@ SOURCES = {
     "notion.db_changed": {"connector": "notion", "label": "Notion 数据库有新增/修改 Notion database changed",
                           "params": {"database_id": "数据库 ID 或链接"}},
 }
+SOURCES["web.page"] = {"connector": "browser", "label": "网页变化 Web page change",
+                       "params": {"url": "要监控的网页 page to watch",
+                                  "mode": "change（内容有变化）| text（出现某段文字）| price_below（价格低于阈值）",
+                                  "text": "mode=text 时要等待出现的文字", "threshold": "mode=price_below 时的价格阈值，如 15",
+                                  "keyword": "可选：只看这个词附近的价格/文字 (e.g. the product name)"}}
 MAX_EVENTS = 20
 
 
@@ -126,3 +131,115 @@ def poll(store, source: str, params: dict, cursor: dict | None) -> dict:
     events = events[:MAX_EVENTS]
     text = "\n".join(str(e) for e in events)
     return {"events": events, "cursor": new_cursor, "injection": guard.scan_injection(text) if events else []}
+
+
+# ------------------------------------------------------------------ web page watch (OpenMuse-style tracking)
+import hashlib
+import re
+
+_REF = re.compile(r"\[(?:f\d+)?e\d+\]\s*")
+_ARROW_URL = re.compile(r"\s→\s\S+")
+_PRICE = re.compile(r"(?:S\$|US\$|HK\$|A\$|C\$|RM|SGD|USD|HKD|RMB|CNY|¥|￥|€|£|\$)\s?(\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?)",
+                    re.I)
+
+
+def page_text(snapshot: str) -> str:
+    """The words a person reads on the page: drop element refs and link targets so layout churn doesn't count."""
+    lines = []
+    for ln in (snapshot or "").splitlines():
+        ln = _ARROW_URL.sub("", _REF.sub("", ln)).strip()
+        if ln and not ln.startswith(("…[", "(showing the part")):
+            lines.append(re.sub(r"\s+", " ", ln))
+    return "\n".join(lines)
+
+
+def prices(text: str, keyword: str = "") -> list[float]:
+    spans = [text]
+    if keyword:
+        low = text.lower()
+        spans = [text[i:i + 250] for i in [m.start() for m in re.finditer(re.escape(keyword.lower()), low)]]
+    out = []
+    for sp in spans:
+        for m in _PRICE.finditer(sp):
+            try:
+                out.append(float(m.group(1).replace(",", "")))
+            except ValueError:
+                continue
+            if keyword:
+                break   # near a keyword: only the first price after it belongs to that item
+    return out
+
+
+def evaluate(params: dict, text: str, title: str, url: str, cursor: dict | None) -> tuple[list, dict]:
+    """Compare this observation with the previous one (the cursor). Only a *new* change / newly met condition fires,
+    so the same alert never repeats; the first observation only saves the baseline."""
+    mode = str(params.get("mode") or "change").strip().lower()
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    h = hashlib.sha256(text.encode()).hexdigest()
+    line_h = [hashlib.sha1(ln.encode()).hexdigest()[:12] for ln in lines]
+    cur = {"hash": h, "lines": line_h[-600:], "title": title[:200]}
+    prev = cursor or {}
+    events: list = []
+    if mode == "text":
+        want = str(params.get("text") or "").strip()
+        if not want:
+            raise WatchError("mode=text 需要指定要等待的文字 (text required)")
+        idx = text.lower().find(want.lower())
+        met = idx >= 0
+        cur["met"] = met
+        if met and cursor is not None and not prev.get("met"):
+            events.append({"url": url, "title": title, "condition": f"text appeared: {want}",
+                           "excerpt": text[max(0, idx - 120): idx + len(want) + 200]})
+    elif mode == "price_below":
+        try:
+            limit = float(str(params.get("threshold") or "").replace(",", "").lstrip("$S"))
+        except ValueError:
+            raise WatchError("mode=price_below 需要数字阈值 threshold, e.g. 15")
+        found = prices(text, str(params.get("keyword") or ""))
+        low = min(found) if found else None
+        cur["low"], cur["met"] = low, bool(low is not None and low < limit)
+        alerted = prev.get("alerted")
+        if cur["met"] and cursor is not None and (not prev.get("met") or (alerted is not None and low < alerted)):
+            cur["alerted"] = low
+            events.append({"url": url, "title": title, "condition": f"price {low:g} < {limit:g}",
+                           "prices_seen": sorted(set(found))[:10]})
+        elif cur["met"]:
+            cur["alerted"] = alerted if alerted is not None else low
+        if not found:
+            cur["note"] = "no prices found on the page"
+    else:
+        if cursor is not None and prev.get("hash") and prev["hash"] != h:
+            old = set(prev.get("lines") or [])
+            added = [ln for ln, lh in zip(lines, line_h) if lh not in old][:8]
+            if added or len(line_h) != len(prev.get("lines") or []):
+                events.append({"url": url, "title": title, "condition": "page changed",
+                               "added_lines": [truncate_line(x) for x in added]})
+    return events, cur
+
+
+def truncate_line(s: str, n: int = 240) -> str:
+    return s if len(s) <= n else s[:n] + "…"
+
+
+async def poll_web(store, params: dict, cursor: dict | None) -> dict:
+    from app.sentinel.actions import ActionError, broker
+    url = str(params.get("url") or "").strip()
+    if url and "://" not in url:
+        url = "https://" + url
+    ok, why = guard.check_url(url)
+    if not ok:
+        raise WatchError(why)
+    dom = guard.domain_of(url)
+    if dom and dom in set(store.connection("browser")["config"].get("blocked_domains") or []):
+        raise WatchError(f"域名 {dom} 在黑名单中 (blocked domain)")
+    tid = "watch-" + hashlib.sha1(url.encode()).hexdigest()[:10]
+    try:
+        snap = await broker("POST", "/agent/navigate", {"task_id": tid, "url": url, "max_chars": 40000}, timeout=90)
+    except ActionError as e:
+        raise WatchError(str(e)[:300])
+    if snap.get("blocked"):
+        raise WatchError(f"网站拦截了自动浏览器 (bot wall: {(snap['blocked'] or {}).get('detail', '')})")
+    text, _ = guard.redact_secrets(page_text(str(snap.get("snapshot") or "")))
+    events, cur = evaluate(params, text, str(snap.get("title") or ""), str(snap.get("url") or url), cursor)
+    blob = "\n".join(str(e) for e in events)
+    return {"events": events[:MAX_EVENTS], "cursor": cur, "injection": guard.scan_injection(blob) if events else []}

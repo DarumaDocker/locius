@@ -515,3 +515,67 @@ def test_agent_language_follows_the_setting():
     s = executor_system(user_name="Lucas", tz="Asia/Singapore", connections={}, plan={}, facts=[], skills=[],
                         language="en", reply_lang=en)
     assert s.startswith("LANGUAGE: ENGLISH.") and "notifications in English" in s
+
+
+# ---------------------------------------------------------------- 0.2.12: watches, grounded choices, PDF forms
+def test_web_watch_evaluate():
+    from app.sentinel import watchers as w
+    assert w.prices("Aurora Case\nPrice: S$18.00\nOther: Basic S$12.90", "aurora") == [18.0]
+    assert w.prices("A $1,299.00 B S$15.50") == [1299.0, 15.5]
+    assert "[e3]" not in w.page_text('[e3] link "Buy" → https://x.test/a\n# Title')
+    p = {"mode": "price_below", "threshold": "20"}
+    ev, c = w.evaluate(p, "S$18", "t", "u", None)
+    assert ev == [] and c["met"]                                  # first look = baseline, even if already cheap
+    ev, c = w.evaluate(p, "S$25", "t", "u", c)
+    ev, c = w.evaluate(p, "S$18", "t", "u", c)
+    assert len(ev) == 1                                           # newly met -> alert
+    assert w.evaluate(p, "S$18", "t", "u", c)[0] == []            # same again -> quiet
+    ev, c = w.evaluate({"mode": "change"}, "a\nb", "t", "u", None)
+    ev, c = w.evaluate({"mode": "change"}, "a\nb\nc", "t", "u", c)
+    assert ev and ev[0]["added_lines"] == ["c"]
+
+
+def test_web_watch_spec():
+    from app.runtime.scheduler import event_spec
+    d = event_spec({"source": "web.page", "params": {"url": "https://x.test", "mode": "price_below", "threshold": 15},
+                    "action": "notify"})
+    assert d["action"] == "notify" and d["every"] == 60
+    for bad in ({"url": ""}, {"url": "https://x", "mode": "text"}, {"url": "https://x", "mode": "price_below", "threshold": "cheap"}):
+        with pytest.raises(ValueError):
+            event_spec({"source": "web.page", "params": bad})
+
+
+def test_pdf_form_fill(tmp_path):
+    from app.runtime import pdfforms
+    src = os.path.join(os.path.dirname(__file__), "pages", "permission_slip.pdf")
+    names = {f["name"]: f for f in pdfforms.fields(src)}
+    assert names["lunch"]["type"] == "radio" and names["consent"]["type"] == "checkbox" and names["tshirt"]["options"] == ["S", "M", "L", "XL"]
+    out = str(tmp_path / "f.pdf")
+    r = pdfforms.fill(src, {"student_name": "Able", "consent": "yes", "lunch": "Regular", "tshirt": "XXL", "nope": 1}, out)
+    got = {f["name"]: f["value"] for f in pdfforms.fields(out)}
+    assert got["student_name"] == "Able" and got["consent"] == "Yes" and got["lunch"] == "regular"
+    assert any("tshirt" in p for p in r["problems"]) and any("nope" in p for p in r["problems"])
+    with pytest.raises(pdfforms.FormError):
+        pdfforms.fill(src, {"nope": 1}, out)
+
+
+def test_gmail_attachments_in_message():
+    g = Gmail("me@example.com", "pw")
+    msg = g._compose("you@example.com", "Slip", "attached", attachments=[("slip.pdf", "application/pdf", b"%PDF-1.4 x")])
+    parts = [p for p in msg.iter_attachments()]
+    assert len(parts) == 1 and parts[0].get_filename() == "slip.pdf" and parts[0].get_content() == b"%PDF-1.4 x"
+
+
+def test_grounded_choices(tmp_path):
+    from app.runtime.agent import Runtime
+
+    async def pub(_):
+        pass
+    rt = Runtime(str(tmp_path), pub)
+    rt._remember("t1", "browser_navigate", {"url": "https://shop.test/s?k=case", "snapshot": 'Aurora Case\n  4.4 out of 5 stars\n  S$21.90\n[e9] link "Kick" → https://shop.test/p/7'})
+    ok = [{"label": "Aurora Case", "details": ["S$21.90"], "source_url": "https://www.shop.test/s"}]
+    assert rt._check_choices("t1", ok) == []
+    assert rt._check_choices("t1", [{"label": "Aurora Case", "details": ["S$9.90"], "source_url": "https://shop.test/s"}])
+    assert rt._check_choices("t1", [{"label": "X", "details": ["S$21.90"], "source_url": "https://elsewhere.test/"}])
+    # a product link seen on a page that was read counts, checked against that page's text
+    assert rt._check_choices("t1", [{"label": "Aurora Case", "details": ["4.4 out of 5 stars"], "source_url": "https://shop.test/p/7"}]) == []

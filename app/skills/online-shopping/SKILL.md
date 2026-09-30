@@ -23,3 +23,9 @@ description: 网购：搜索商品、用视觉挑选、加入购物车（不结�
    or check the cart count in the snapshot.
 7. **Login / CAPTCHA / robot check** → browser_request_takeover. Never type passwords or card numbers.
 8. **Final answer**: product title, price, seller/rating, link, and "added to cart ✓ (not checked out)"; mention anything uncertain.
+
+## Comparing and watching
+- Showing several candidates: call present_choices(kind="comparison") with labels/prices copied exactly from the page
+  (e.g. from browser_find context). Locius checks them against what you read; put your opinion in note.
+- "Tell me when it's cheaper / back in stock": watch_create(url=product page, mode="price_below", threshold=…, keyword=
+  product name) or mode="text", text="In stock". It notifies once per new drop; no need for a schedule.

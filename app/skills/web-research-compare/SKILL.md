@@ -10,3 +10,7 @@ description: 网页调研并做对比（如酒店、产品）Research several op
 3. Collect comparable fields (price with currency and date checked, rating & review count, distance/location, policies).
 4. Produce a Markdown comparison table + a short recommendation that uses the user's known preferences from memory.
 5. Save the report to the workspace with files_write (e.g. reports/<topic>-<date>.md) and mention the path.
+
+## Presenting the comparison
+- For a pick-one decision, also call present_choices(kind="comparison") with exact excerpts (names, prices, specs) from the
+  pages you read and their source_url. Locius refuses details it can't find in those pages — copy, don't paraphrase.

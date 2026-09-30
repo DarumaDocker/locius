@@ -327,7 +327,8 @@ function renderThread(thread) {
       S.gmailReady === false ? h('p', { class: 'small muted' }, T('提示：先到「连接 Connections」配置 Gmail 应用专用密码 (App Password)。')) : null)));
   } else {
     const shown = new Set();
-    for (const m of d.messages) {
+    const lastUser = d.messages.map(m => m.role).lastIndexOf('user');
+    for (const [mi, m] of d.messages.entries()) {
       if (m.role === 'user') {
         msgs.append(h('div', { class: 'msg user' }, h('div', { class: 'bubble' }, m.content)));
         if (m.task_id && S.tasks[m.task_id]) { msgs.append(taskCard(S.tasks[m.task_id])); shown.add(m.task_id); }
@@ -345,6 +346,8 @@ function renderThread(thread) {
               h('span', { class: 'small muted' }, T('已处理 resolved')))));
         } else if (j.type === 'file') {
           msgs.append(fileCard(j));
+        } else if (j.type === 'choices') {
+          msgs.append(choicesCard(j, mi > lastUser));
         } else if (j.type === 'takeover') {
           const active = t && t.status === 'WAITING_EXTERNAL';
           msgs.append(h('div', { class: 'msg' }, h('div', { class: 'sys-card takeover' }, '🖐',
@@ -415,6 +418,30 @@ function fileCard(j) {
     h('div', { class: 'row', style: 'gap:8px;margin-top:8px' },
       h('a', { class: 'btn small primary', href: url + '&download=1', download: j.name, style: 'text-decoration:none' }, T('⬇ 下载 Download')),
       canOpen ? h('a', { class: 'btn small', href: url, target: '_blank', rel: 'noopener', style: 'text-decoration:none' }, T('打开 Open')) : null)));
+}
+
+// options the agent offered (present_choices). "verified" = every name/detail was found in pages it actually read
+function choicesCard(j, active) {
+  const safe = u => /^https?:\/\//i.test(u || '') ? u : '';
+  const host = u => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch (e) { return u; } };
+  const pick = async o => {
+    if (!active || S.sending) return;
+    S.sending = true;
+    try {
+      const r = await api('chat', { method: 'POST', body: { message: Tf("我选：{0}", o.label), conversation_id: S.conv } });
+      await loadConvs(); await openConv(r.conversation_id);
+    } catch (e) { toast(e.message, true); } finally { S.sending = false; }
+  };
+  return h('div', { class: 'msg assistant' }, h('div', { class: 'bubble choices' },
+    j.question ? h('div', { class: 'choices-q' }, j.question) : null,
+    j.verified ? h('div', { class: 'small', style: 'color:var(--ok);margin-bottom:6px' }, T('✓ 已核对：名称和细节都摘自 Agent 读过的原网页')) : null,
+    h('div', { class: 'choice-grid' }, (j.options || []).map(o => h('div', { class: 'choice' },
+      h('div', { class: 'choice-title' }, o.label),
+      o.details && o.details.length ? h('ul', { class: 'small' }, o.details.map(x => h('li', null, x))) : null,
+      o.note ? h('div', { class: 'small muted' }, '💬 ' + o.note) : null,
+      safe(o.source_url) ? h('a', { class: 'small', href: safe(o.source_url), target: '_blank', rel: 'noopener noreferrer' }, '🔗 ' + host(o.source_url)) : null,
+      h('button', { class: 'btn small' + (active ? ' primary' : ''), disabled: !active, onclick: () => pick(o) },
+        active ? T('选这个 Choose') : T('已结束 done')))))));
 }
 
 function planList(plan) {
@@ -807,13 +834,16 @@ const SRC_FIELDS = {
   'gmail.new_email': [['query', T('Gmail 搜索条件（可选）'), T('例如 from:boss@acme.com 或 is:important；留空 = 所有新邮件')], ['account', T('只看某个邮箱（可选）'), 'you@gmail.com']],
   'slack.new_message': [['channel', T('Slack 频道'), '#general'], ['keyword', T('包含关键词才触发（可选）'), T('例如 urgent')], ['mentions_only', T('只在 @我 时触发（填 yes）'), 'yes']],
   'notion.db_changed': [['database_id', T('Notion 数据库 ID 或链接'), 'https://www.notion.so/…']],
+  'web.page': [['url', T('要监控的网页'), 'https://…'], ['mode', T('条件：change / text / price_below'), 'price_below'],
+    ['text', T('等待出现的文字（mode=text）'), 'In stock'], ['threshold', T('价格低于（mode=price_below）'), '15'],
+    ['keyword', T('只看这个词附近（可选，如商品名）'), 'iPhone 17 Pro Max']],
 };
 function checkPicker(defKind = 'interval') {
   const kind = h('select', null, h('option', { value: 'interval' }, T('每隔 N 分钟 Interval')), h('option', { value: 'cron' }, T('按时间 Cron')),
     h('option', { value: 'event' }, T('有新事件时 Event')));
   kind.value = defKind;
   const spec = h('input', { type: 'text', value: '60' });
-  const src = h('select', null, Object.keys(SRC_FIELDS).map(k => h('option', { value: k }, { 'gmail.new_email': T('📧 收到新邮件'), 'slack.new_message': T('💬 Slack 新消息'), 'notion.db_changed': T('📝 Notion 数据库变化') }[k])));
+  const src = h('select', null, Object.keys(SRC_FIELDS).map(k => h('option', { value: k }, { 'gmail.new_email': T('📧 收到新邮件'), 'slack.new_message': T('💬 Slack 新消息'), 'notion.db_changed': T('📝 Notion 数据库变化'), 'web.page': T('🌐 网页变化 / 降价 / 到货') }[k])));
   const every = h('input', { type: 'number', min: '1', value: '3', style: 'width:80px' });
   const pbox = h('div', { class: 'stack' });
   const inputs = {};
@@ -905,9 +935,12 @@ async function viewSchedules(root) {
       h('label', { class: 'field' }, h('span', null, T('名称 Name')), tName), tCheck.el,
       h('label', { class: 'field' }, h('span', null, T('要做什么 Then do')), tGoal),
       h('p', { class: 'small muted' }, T('创建后第一次检查只记录现状，之后出现的新邮件/消息/修改才会触发。Locius 自己发的消息、自己改的页面不会触发，避免循环。')),
+      h('p', { class: 'small muted' }, T('网页监控：「要做什么」留空 = 只给你发通知（不运行 Agent）。同一个变化只提醒一次；检查失败会自动拉长间隔，连续失败会停用并告诉你。')),
       h('div', null, h('button', { class: 'btn primary', onclick: safe(async () => {
         const v = tCheck.value();
-        const s = await api('schedules', { method: 'POST', body: { name: tName.value, goal: tGoal.value, kind: 'event', spec: v.spec } });
+        let goal = tGoal.value;
+        if (v.spec.source === 'web.page' && !goal.trim()) { v.spec.action = 'notify'; goal = T('（只通知）') + tName.value; }  // a watch that just tells you
+        const s = await api('schedules', { method: 'POST', body: { name: tName.value, goal, kind: 'event', spec: v.spec } });
         await api(`schedules/${s.id}/poll`, { method: 'POST', body: {} }).catch(() => {});
         toast(T('已创建触发器 Created')); route();
       }) }, T('创建 Create')))));

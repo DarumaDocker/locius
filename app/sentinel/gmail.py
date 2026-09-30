@@ -23,6 +23,7 @@ import httpx
 from app.sentinel.guard import check_url, domain_of, is_security_message, redact_secrets
 
 TIMEOUT = 30
+MAX_ATTACHMENT = 25 * 1024 * 1024
 
 
 class GmailError(Exception):
@@ -318,7 +319,38 @@ class Gmail:
             _logout(m)
 
     # ------------------------------------------------------------ compose
-    def _compose(self, to: str, subject: str, body: str, cc: str = "", in_reply_to: dict | None = None) -> EmailMessage:
+    def get_attachment(self, message_id: str, filename: str) -> tuple[str, str, bytes]:
+        """One attachment of a message: (filename, content type, bytes). Security emails never give out attachments."""
+        m = self._imap()
+        try:
+            self._select_all(m)
+            uid = self._uid_for_msgid(m, message_id)
+            meta = self._fetch_meta(m, [uid.encode()], with_snippet=False)
+            if meta and meta[0].get("security_message"):
+                raise GmailError("安全类邮件的附件不提供给 Agent (security email)")
+            typ, data = m.uid("FETCH", uid, "(BODY.PEEK[])")
+            raw = next((d[1] for d in data if isinstance(d, tuple)), b"")
+            msg = email.message_from_bytes(raw)
+            names = []
+            want = (filename or "").strip().lower()
+            for part in msg.walk():
+                if part.is_multipart():
+                    continue
+                fn = _dec(part.get_filename()) if part.get_filename() else ""
+                if not fn and "attachment" not in (part.get("Content-Disposition") or "").lower():
+                    continue
+                names.append(fn or "(unnamed)")
+                if not want or fn.lower() == want:
+                    payload = part.get_payload(decode=True) or b""
+                    if len(payload) > MAX_ATTACHMENT:
+                        raise GmailError(f"附件太大 attachment too large ({len(payload) // 1_000_000} MB)")
+                    return fn or "attachment", part.get_content_type(), payload
+            raise GmailError(f"找不到附件 attachment not found: {filename}. Attachments: {', '.join(names) or 'none'}")
+        finally:
+            _logout(m)
+
+    def _compose(self, to: str, subject: str, body: str, cc: str = "", in_reply_to: dict | None = None,
+                 attachments: list | None = None) -> EmailMessage:
         msg = EmailMessage()
         msg["From"] = email.utils.formataddr((self.display_name, self.email)) if self.display_name else self.email
         msg["To"] = to
@@ -337,6 +369,9 @@ class Gmail:
         msg["Date"] = email.utils.formatdate(localtime=True)
         msg["Message-ID"] = email.utils.make_msgid(domain=self.email.split("@")[-1])
         msg.set_content(body)
+        for name, ctype, data in attachments or []:
+            main, _, sub = (ctype or "application/octet-stream").partition("/")
+            msg.add_attachment(data, maintype=main, subtype=sub or "octet-stream", filename=name)
         return msg
 
     def _original(self, message_id: str | None) -> dict | None:
@@ -366,9 +401,10 @@ class Gmail:
         subj = orig.get("subject", "")
         return {"to": to, "cc": cc, "subject": subj if subj.lower().startswith("re:") else f"Re: {subj}"}
 
-    def create_draft(self, to: str, subject: str, body: str, cc: str = "", reply_to_message_id: str | None = None) -> dict:
+    def create_draft(self, to: str, subject: str, body: str, cc: str = "", reply_to_message_id: str | None = None,
+                     attachments: list | None = None) -> dict:
         orig = self._original(reply_to_message_id)
-        msg = self._compose(to, subject, body, cc, orig)
+        msg = self._compose(to, subject, body, cc, orig, attachments)
         m = self._imap()
         try:
             drafts = self.folders(m)["drafts"]
@@ -379,9 +415,10 @@ class Gmail:
         finally:
             _logout(m)
 
-    def send(self, to: str, subject: str, body: str, cc: str = "", reply_to_message_id: str | None = None) -> dict:
+    def send(self, to: str, subject: str, body: str, cc: str = "", reply_to_message_id: str | None = None,
+             attachments: list | None = None) -> dict:
         orig = self._original(reply_to_message_id)
-        msg = self._compose(to, subject, body, cc, orig)
+        msg = self._compose(to, subject, body, cc, orig, attachments)
         try:
             with smtplib.SMTP_SSL(self.smtp_host, 465, context=ssl.create_default_context(), timeout=TIMEOUT) as s:
                 s.login(self.email, self.password)
@@ -390,7 +427,8 @@ class Gmail:
             raise GmailError(f"SMTP 登录失败 (auth failed): {e}")
         except (smtplib.SMTPException, OSError) as e:
             raise GmailError(f"发送失败 send failed: {e}")
-        return {"sent": True, "to": to, "cc": cc, "subject": msg["Subject"], "message_id_header": msg["Message-ID"]}
+        return {"sent": True, "to": to, "cc": cc, "subject": msg["Subject"], "message_id_header": msg["Message-ID"],
+                "attachments": [a[0] for a in attachments or []]}
 
     # ------------------------------------------------------------ unsubscribe (RFC 2369 / RFC 8058)
     def unsubscribe_targets(self, ids: list[str]) -> list[dict]:

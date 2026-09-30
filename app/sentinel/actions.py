@@ -129,8 +129,36 @@ async def execute(store, tool: str, args: dict, task_id: str) -> dict:
     raise ActionError(f"no executor for {tool}")
 
 
+MAX_SEND_ATTACH = 20 * 1024 * 1024
+
+
+def workspace_files(paths) -> list[tuple[str, str, bytes]]:
+    """Files to attach, read from the workspace through the runtime (Sentinel has no workspace mount)."""
+    import mimetypes
+    out, total = [], 0
+    for p in [str(x).strip() for x in (paths or []) if str(x).strip()][:10]:
+        if ".quarantine" in p.split("/"):
+            raise ActionError(f"隔离区文件不能作为附件 (quarantined file): {p}", status="denied")
+        with httpx.Client(timeout=60) as c:
+            r = c.get(os.environ.get("RUNTIME_URL", "http://127.0.0.1:8081") + "/api/files/raw", params={"path": p, "download": 1})
+        if r.status_code != 200:
+            raise ActionError(f"找不到附件文件 attachment not found in the workspace: {p}")
+        total += len(r.content)
+        if total > MAX_SEND_ATTACH:
+            raise ActionError("附件总大小超过 20 MB (attachments over 20 MB)")
+        name = os.path.basename(p)
+        out.append((name, mimetypes.guess_type(name)[0] or "application/octet-stream", r.content))
+    return out
+
+
 def _gmail_sync(store, tool: str, args: dict, task_id: str) -> dict:
     try:
+        if tool == "gmail_save_attachment":
+            import base64
+            g, raw = client_for_id(store, args["message_id"])
+            name, ctype, data = g.get_attachment(raw, str(args.get("filename") or ""))
+            return {"trust": "untrusted", "source": f"email attachment {name}", "filename": name, "type": ctype,
+                    "size": len(data), "data_b64": base64.b64encode(data).decode(), "account": g.email}
         if tool == "gmail_search":
             acc = str(args.get("account") or "").strip()
             clients = [gmail_client(store, a["id"]) for a in mailboxes.ready_accounts(store)] \
@@ -172,7 +200,9 @@ def _gmail_sync(store, tool: str, args: dict, task_id: str) -> dict:
                 to, subject = d["to"], subject or d["subject"]
             if not to:
                 raise ActionError("缺少收件人 'to'")
-            return {**g.create_draft(to, subject, str(args.get("body", "")), cc, rid), "from": g.email}
+            files = workspace_files(args.get("attachments"))
+            return {**g.create_draft(to, subject, str(args.get("body", "")), cc, rid, **({"attachments": files} if files else {})), "from": g.email,
+                    "attachments": [f[0] for f in files]}
         if tool in ("gmail_send", "gmail_reply"):
             rid = args.get("reply_to_message_id") or args.get("message_id") or None
             if rid:
@@ -185,7 +215,8 @@ def _gmail_sync(store, tool: str, args: dict, task_id: str) -> dict:
                 to, cc, subject = d["to"], cc or d["cc"], subject or d["subject"]
             if not to:
                 raise ActionError("缺少收件人 'to'")
-            return {**g.send(to, subject, str(args.get("body", "")), cc, rid), "from": g.email}
+            files = workspace_files(args.get("attachments"))
+            return {**g.send(to, subject, str(args.get("body", "")), cc, rid, **({"attachments": files} if files else {})), "from": g.email}
         if tool == "gmail_forward":
             g, raw = client_for_id(store, args["message_id"])
             orig = g.get_message(raw)

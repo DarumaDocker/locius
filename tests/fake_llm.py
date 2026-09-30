@@ -121,6 +121,40 @@ async def chat(req: Request):
         if n == 6:
             return reply("", [tc("browser_look", {"question": "Did the item get added to the cart? What does the cart show?"})])
         return reply("SHOP DONE: " + last_tool[:600])
+    if "CHOICES" in goal:   # present_choices: a made-up price is refused, exact excerpts are shown as verified cards
+        if n == 0:
+            return reply("", [tc("browser_navigate", {"url": "http://shop.test:8099/shop.html?k=case"})])
+        if n == 1:
+            return reply("", [tc("browser_find", {"query": "Aurora Glitter Case"})])
+        if n == 2:
+            return reply("", [tc("browser_find", {"query": "Kickstand Case"})])
+        if n == 3:   # hallucinated detail + a page never read
+            return reply("", [tc("present_choices", {"question": "Which case?", "kind": "comparison", "options": [
+                {"label": "Aurora Glitter Case for iPhone 17 Pro Max, MagSafe compatible", "details": ["S$9.90", "4.4 out of 5 stars"],
+                 "source_url": "http://shop.test:8099/shop.html?k=case"},
+                {"label": "Titanium Case", "details": ["S$5"], "source_url": "http://other.test/titanium"}]})])
+        if n == 4:
+            return reply("", [tc("present_choices", {"question": "Which case do you like?", "kind": "comparison", "options": [
+                {"label": "Aurora Glitter Case for iPhone 17 Pro Max, MagSafe compatible", "details": ["S$21.90", "4.4 out of 5 stars · 231 ratings"],
+                 "source_url": "http://shop.test:8099/shop.html", "note": "闪亮的紫色，最好看"},
+                {"label": "Kickstand Case for iPhone 17 Pro Max", "details": ["S$33.90"],
+                 "source_url": "http://shop.test:8099/shop.html", "note": "带支架"}]})])
+        return reply("CHOICES DONE: " + last_tool[:400])
+    if "WATCHPRICE" in goal:
+        if n == 0:
+            return reply("", [tc("watch_create", {"name": "Aurora case price", "url": "http://shop.test:8099/watch.html",
+                                                  "mode": "price_below", "threshold": 20, "keyword": "Aurora"})])
+        return reply("WATCH DONE: " + last_tool[:300])
+    if "PDFFORM" in goal:
+        if n == 0:
+            return reply("", [tc("pdf_form_fields", {"path": "forms/permission_slip.pdf"})])
+        if n == 1:
+            return reply("", [tc("pdf_form_fill", {"path": "forms/permission_slip.pdf", "values": {
+                "student_name": "Able Lu", "class": "5JNI", "parent_name": "Lucas Lu", "consent": True,
+                "lunch": "vegetarian", "tshirt": "L", "signature": "Lucas"}})])
+        if n == 2:
+            return reply("", [tc("send_file", {"path": "forms/permission_slip-filled.pdf", "note": "请检查"})])
+        return reply("PDF DONE: " + "\n".join(str(m["content"])[:600] for m in tools_done))
     if "SUPPORTCHAT" in goal:   # a Tidio-style chat bot whose widget lives in an open shadow root
         def ref_of(pattern, text):
             m = re.search(r"\[((?:f\d+)?e\d+)\][^\n]*" + pattern, text, re.I)

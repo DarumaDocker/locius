@@ -303,10 +303,10 @@ async def poll_schedule(sid: str):
     last = rt.store.task(s["last_task"]) if s.get("last_task") else None
     if last and last["status"] not in TERMINAL:
         raise HTTPException(409, "上一次运行还没结束 (previous run still active)")
-    await sched.poll_event(s)
+    n = await sched.poll_event(s)
     s2 = rt.store.schedule(sid)
     st = s2["state"] or {}
-    return {"ok": not st.get("_error"), "error": st.get("_error", ""), "fired": s2["last_task"] != s.get("last_task"),
+    return {"ok": not st.get("_error"), "error": st.get("_error", ""), "fired": bool(n) or s2["last_task"] != s.get("last_task"),
             "task_id": s2["last_task"] if s2["last_task"] != s.get("last_task") else ""}
 
 
