@@ -46,7 +46,7 @@ async def lifespan(app):
     yield
 
 
-app = FastAPI(lifespan=lifespan, title="Locius Runtime")
+app = FastAPI(lifespan=lifespan, title="OMuse Runtime")
 
 
 def internal_auth(x_persona_runtime: str | None = Header(default=None)):

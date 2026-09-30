@@ -1,4 +1,4 @@
-"""Goals (场景目标): long-running objectives that Locius keeps working on until they are achieved.
+"""Goals (场景目标): long-running objectives that OMuse keeps working on until they are achieved.
 
 A goal = objective + success criteria + how often to check (cron / interval / event trigger) + optional deadline.
 Each check is a normal agent task (same tools, same Sentinel approvals). The agent must end every check with

@@ -126,6 +126,24 @@ async def execute(store, tool: str, args: dict, task_id: str) -> dict:
     if str(t["connector"]).startswith("mcp:"):
         from app.sentinel import mcp_hub
         return await mcp_hub.call(store, tool, args, task_id)
+    if t["connector"] == "phone":
+        from app.sentinel import phone
+        try:
+            if tool == "phone_call":
+                return await phone.start_call(store, args, task_id)
+            if tool == "phone_call_status":
+                wait = args.get("wait_seconds")
+                res = await phone.wait_status(store, str(args.get("call_id", "")), 90 if wait is None else float(wait))
+                store.update_task_ctx(task_id, taint=t["data_class"])
+                return res
+            if tool == "phone_hangup":
+                call = phone.get_call(store, str(args.get("call_id", "")))
+                if not call:
+                    raise ActionError("没有这通电话 (unknown call id)")
+                await phone.hangup(store, call, "hung up by the agent")
+                return {"ok": True, "call_id": call["id"]}
+        except phone.PhoneError as e:
+            raise ActionError(str(e), status=e.status)
     raise ActionError(f"no executor for {tool}")
 
 

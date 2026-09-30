@@ -51,6 +51,49 @@ def _call_sig(name: str, args) -> str:
     return name + " " + json.dumps(args or {}, ensure_ascii=False, sort_keys=True)
 
 
+_PAGE_CHANGERS = {"browser_navigate", "browser_back", "browser_click", "browser_click_at", "browser_press"}
+
+
+def retype_guard(transcript: list[dict], call: dict) -> str | None:
+    """browser_type into a field the agent already filled on this page, with different text, is almost always a mix-up
+    (e.g. typing the first name into the booking-number box and wiping it). Ask it to use the right field instead."""
+    if call["name"] != "browser_type":
+        return None
+    args = call.get("args") or {}
+    ref, text = str(args.get("ref") or ""), str(args.get("text") or "")
+    if not ref or args.get("replace"):
+        return None
+    prev = []
+    for m in transcript:
+        for tc in m.get("tool_calls") or []:
+            if tc.get("id") == call["id"]:
+                break
+            fn = tc.get("function") or {}
+            try:
+                a = json.loads(fn.get("arguments") or "{}") if isinstance(fn.get("arguments"), str) else (fn.get("arguments") or {})
+            except ValueError:
+                a = {}
+            prev.append((fn.get("name", ""), a))
+        else:
+            continue
+        break
+    for nm, a in reversed(prev):
+        if nm in ("browser_navigate", "browser_back"):
+            return None
+        if nm == "browser_click" and a.get("submit"):
+            return None
+        if nm == "browser_type" and str(a.get("ref") or "") == ref:
+            old = str(a.get("text") or "")
+            if old and old != text:
+                return (f"ERROR: 没有执行 — 你刚才已经在 {ref} 里输入了「{old[:40]}」，再输入「{text[:40]}」会把它覆盖掉。"
+                        f"多半是填错了格子：先看快照里每个输入框的名字，把「{text[:40]}」填到对应的那个 ref。"
+                        f" Not done: you already typed \"{old[:40]}\" into {ref}; typing \"{text[:40]}\" there would replace it. "
+                        "You probably meant the next field — check each textbox's name in the snapshot and use its ref. "
+                        "If you really want to replace it, call browser_type again with replace=true.")
+            return None
+    return None
+
+
 def repeat_guard(transcript: list[dict], call: dict) -> str | None:
     """Refusal text if `call` repeats an identical earlier call too often, else None."""
     name = call["name"]
@@ -127,7 +170,7 @@ LOCAL_TOOLS = [
         "系统会逐条核对，找不到原文就拒绝显示。你的翻译、评价写在 note 里（不核对）。kind=clarify 用于简单的澄清选项（不核对）。"
         " Show options as cards the user can pick from. For kind=comparison every option's label and each detail MUST be an "
         "exact excerpt copied from a page or email you read in this task (same language, no paraphrase), with source_url = "
-        "that page (or a link on it); Locius checks each one against what you actually read and refuses unverifiable cards. "
+        "that page (or a link on it); OMuse checks each one against what you actually read and refuses unverifiable cards. "
         "Put translations, opinions and your recommendation in note (not checked). kind=clarify: plain choices, not checked. "
         "After calling it, finish with a short answer — the user's pick arrives as their next message.",
         {"question": S, "kind": {"type": "string", "enum": ["comparison", "clarify"]},
@@ -167,10 +210,12 @@ LOCAL_TOOLS = [
          "text": {"type": "string", "description": "mode=text: the words to wait for, e.g. 'In stock'"},
          "threshold": {"type": "number", "description": "mode=price_below: alert when a price on the page is below this"},
          "keyword": {"type": "string", "description": "optional: only prices/text near this word (e.g. the product name)"},
+         "current_price": {"type": "number", "description": "mode=price_below: the item's price as you saw it on the page now "
+                           "(e.g. 31.43). The watch reads the page itself and refuses to start if it reads a different price."},
          "every_minutes": {"type": "number", "description": "check interval, default 60, minimum 15"},
          "then": {"type": "string", "description": "optional standalone instruction to run when it fires"}},
         ["name", "url", "mode"]),
-    _fn("goal_create", "创建长期目标（场景目标）：Locius 会定期检查并持续推进，直到达成 Create a long-running goal that Locius keeps "
+    _fn("goal_create", "创建长期目标（场景目标）：OMuse 会定期检查并持续推进，直到达成 Create a long-running goal that OMuse keeps "
         "working on until achieved (e.g. 'get John to confirm the contract by Friday', 'keep inbox under 20 unread'). "
         "check_kind: interval (check_spec = minutes, >= 5) | cron (e.g. '0 9 * * *') | event (check_spec = JSON like trigger_create: "
         "{\"source\": ..., \"params\": {...}}). deadline: optional 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM'.",
@@ -209,6 +254,69 @@ class Suspend(Exception):
         self.status = status
         self.waiting = waiting
 
+
+
+_ERRORISH = re.compile(r"(system[-_]?error|/error|errorpage|error\.html|session[-_]?(expired|timeout)|timeout|expired|/sorry|"
+                       r"invalid[-_]?(request|access)|access[-_]?denied)", re.I)
+
+
+def deep_link_hint(asked: str, landed: str, title: str) -> str:
+    """A deep link (from an email, a bookmark) that lands on the site's error page usually means "no session yet",
+    not "the site is down": say so, so the agent enters through the home page instead of retrying for hours."""
+    from urllib.parse import urlparse
+    try:
+        a, b = urlparse(asked), urlparse(landed)
+    except ValueError:
+        return ""
+    if not a.netloc or not b.netloc or asked.rstrip("/") == landed.rstrip("/"):
+        return ""
+    if not (_ERRORISH.search(b.path + "?" + b.query) or re.search(r"\berror\b|エラー|错误", title, re.I)):
+        return ""
+    if _ERRORISH.search(a.path):
+        return ""
+    return ("[DEEP LINK → ERROR PAGE] You opened a deep link and were sent to an error page. On airline/bank/booking "
+            "sites this almost always means the link needs a session that a fresh browser doesn't have — it does NOT mean "
+            "the site is down. Don't retry the same link later. Open the company's main home page (search for it if "
+            "needed — booking systems often live on a different subdomain) and use its own menu (My Booking / Manage booking / Sign in) to get there; that page usually asks for the booking "
+            "number AND a passenger's first/last name.")
+
+
+
+_REFUSED = re.compile(r"heavy traffic|cannot be accepted at this time|大変混み合って|混み合っております|"
+                      r"document registration process could not be completed|please try again later|"
+                      r"request (?:was |has been )?(?:rejected|refused|blocked)|access (?:has been )?denied|"
+                      r"unusual (?:traffic|activity)|temporarily unavailable|服务繁忙|系统繁忙", re.I)
+
+
+def refusal_hint(url: str, title: str, text: str, submitted: bool) -> str:
+    """A transactional page (booking lookup, check-in, account) answering "busy / try later / system error" right after
+    the agent submitted a form or opened it. When the site's normal pages load fine, this is usually the site refusing
+    this automated browser, not an outage — retrying on a timer only repeats it. Say so plainly."""
+    if not _REFUSED.search(title + "\n" + text[:3000]) and not re.search(r"system[-_]?error", url, re.I):
+        return ""
+    return ("[SITE REFUSED THE REQUEST] The site answered with a busy / try-later / system-error page"
+            + (" right after you submitted" if submitted else "") + ". If its ordinary pages (home page, info pages) "
+            "load fine, this is most likely the site refusing this automated browser — not maintenance. First check your "
+            "inputs once (each field got the right value?) and try ONE more time; if it happens again, stop: tell the "
+            "user plainly that the site refused the automated browser, and that they can do it themselves on their own "
+            "device (give the steps and the details they need), or take over this browser (browser_request_takeover). "
+            "Don't schedule retries, don't call it maintenance unless the site says so for this date, and never try to "
+            "get around the refusal.")
+
+
+def _norm_goal(s: str) -> str:
+    return re.sub(r"[\s\W_]+", "", (s or "").lower())[:300]
+
+
+def same_schedule(schedules: list[dict], name: str, goal: str) -> dict | None:
+    """An enabled schedule doing the same job (same name, or the same goal text)."""
+    ng = _norm_goal(goal)
+    for s in schedules:
+        if not s.get("enabled"):
+            continue
+        if (name and s.get("name") == name[:80]) or (len(ng) >= 20 and _norm_goal(s.get("goal") or "") == ng):
+            return s
+    return None
 
 class Runtime:
     def __init__(self, data_dir: str, publish):
@@ -929,7 +1037,7 @@ class Runtime:
         await self.event(task_id, "tool_call", {"call_id": call["id"], "name": name, "args": _preview_args(args), "sub": sub})
         ext_names = {x["function"]["name"] for x in catalog.get("tools", [])}
         ok = True
-        repeated = repeat_guard(transcript, call)
+        repeated = repeat_guard(transcript, call) or retype_guard(transcript, call)
         if repeated:
             content = repeated
             ok = False
@@ -983,6 +1091,15 @@ class Runtime:
             else:
                 content = self._format_external(name, res)
             ok = st == "ok" and not content.startswith("ERROR")
+            if st == "ok" and name in ("browser_navigate", "browser_click", "browser_click_at", "browser_press") \
+                    and isinstance(res.get("result"), dict):
+                r0 = res["result"]
+                hint = refusal_hint(str(r0.get("url") or ""), str(r0.get("title") or ""), str(r0.get("snapshot") or "")[:3000],
+                                    submitted=name != "browser_navigate")
+                if name == "browser_navigate" and not hint:
+                    hint = deep_link_hint(str(args.get("url") or ""), str(r0.get("url") or ""), str(r0.get("title") or ""))
+                if hint:
+                    content = hint + "\n" + content
             if st == "ok" and name != "browser_locate":
                 self._remember(task_id, name, res.get("result"))
             blk = (res.get("result") or {}).get("blocked") if st == "ok" and isinstance(res.get("result"), dict) else None
@@ -1199,7 +1316,15 @@ class Runtime:
             await self.publish({"kind": "memory_update"})
             return "已删除 forgotten"
         if name == "schedule_create":
-            from app.runtime.scheduler import create_schedule
+            from app.runtime.scheduler import create_schedule, describe
+            dup = same_schedule(self.store.schedules(), str(a.get("name") or ""), str(a.get("goal") or ""))
+            if dup:
+                own = dup["id"] == (t.get("schedule_id") if isinstance(t, dict) else "")
+                return (f"ERROR: 已有同样的定时任务，没有再建 — a schedule for this already exists: id={dup['id']} "
+                        f"({dup['name']}; {describe(dup)}){' — it is the one running you right now' if own else ''}. "
+                        "Don't create duplicates (they run in parallel and repeat the work). It already runs again by itself; "
+                        "keep counters with schedule_state_set, change it with schedule_update, or schedule_delete it first "
+                        "if it really must be replaced.")
             sch = create_schedule(self.store, str(a["name"]), str(a["goal"]), str(a["kind"]), str(a["spec"]),
                                   self.store.settings()["timezone"])
             await self.publish({"kind": "schedule_update"})
@@ -1299,6 +1424,15 @@ class Runtime:
                         "Fix it and call watch_create again (e.g. a keyword that appears right before the price on the page, "
                         "such as a word from the product title; or the product page's own URL), or tell the user it can't be watched.")
             cur = base.get("cursor") if isinstance(base.get("cursor"), dict) else {}
+            try:
+                want = float(str(a.get("current_price") or "").replace(",", "").lstrip("S$US$€£¥ ")) if a.get("current_price") not in (None, "") else None
+            except ValueError:
+                want = None
+            if params["mode"] == "price_below" and want and cur.get("low") is not None and abs(float(cur["low"]) - want) > max(0.01, want * 0.01):
+                return (f"ERROR: 监控没有建立 — 它在页面上读到的是 {cur.get('seen') or cur['low']}，不是你看到的 {want:g}，说明它会盯错价格 "
+                        f"(the watch was NOT created: it read {cur['low']:g}, not the {want:g} you saw, so it would watch the wrong price). "
+                        "Use a keyword that is in the product's own title right before its price (or the exact product URL), "
+                        "and call watch_create again; if it still can't read the right price, tell the user this page can't be watched reliably.")
             state = {"_cursor": cur, "_checked": time.strftime("%Y-%m-%d %H:%M")}
             if cur.get("seen"):
                 state["_seen"] = truncate(str(cur["seen"]), 200)

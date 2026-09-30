@@ -41,7 +41,7 @@ check("fresh install: language not chosen yet", c.get(B + "/api/settings").json(
 async def ui():
     async with async_playwright() as p:
         b = await p.chromium.launch()
-        # an English browser opens Locius for the first time -> the setting becomes English
+        # an English browser opens OMuse for the first time -> the setting becomes English
         ctx = await b.new_context(locale="en-US", viewport={"width": 1280, "height": 900})
         pg = await ctx.new_page()
         await pg.goto(B + "/#chat")
@@ -89,7 +89,7 @@ check("en: planner told to plan in English", (t.get("plan") or {}).get("objectiv
 # a Chinese message in English mode still gets the English rule (the setting decides, not the message)
 check("en: setting wins over a Chinese request", "SYS_CJK=0" in res)
 
-# the model answers in Chinese anyway (memory says the user likes Chinese) -> Locius asks once for an English rewrite
+# the model answers in Chinese anyway (memory says the user likes Chinese) -> OMuse asks once for an English rewrite
 r = c.post(B + "/api/chat", json={"message": "ZHANSWER 帮我看看最重要的邮件"}, headers=H).json()
 t = wait(r["task_id"])
 check("en: a Chinese final answer is rewritten in English", (t.get("result") or "").startswith("Here is the most important email")

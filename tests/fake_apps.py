@@ -44,7 +44,7 @@ def reset():
     N["blocks"] = {PAGE_ID: [{"object": "block", "id": "b1", "type": "heading_2", "has_children": False,
                               "heading_2": {"rich_text": rt("Goals")}},
                              {"object": "block", "id": "b2", "type": "bulleted_list_item", "has_children": False,
-                              "bulleted_list_item": {"rich_text": rt("Ship Locius 0.2")}}]}
+                              "bulleted_list_item": {"rich_text": rt("Ship OMuse 0.2")}}]}
     N["log"] = []
     S["messages"] = {"C1": [{"ts": "1790000000.000100", "user": "U2", "text": "old message"}], "C2": []}
     S["posted"] = []
@@ -99,7 +99,7 @@ async def s_post(req: Request):
 async def me(req: Request):
     if not auth(req):
         return nerr(401, "API token is invalid.")
-    return {"object": "user", "id": BOT, "name": "Locius", "type": "bot", "bot": {"workspace_name": "Lucas's Notion"}}
+    return {"object": "user", "id": BOT, "name": "OMuse", "type": "bot", "bot": {"workspace_name": "Lucas's Notion"}}
 
 
 @app.post("/v1/search")

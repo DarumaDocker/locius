@@ -24,8 +24,8 @@ STATUS_ZH = {"CREATED": "已创建", "PLANNING": "规划中", "RUNNING": "执行
              "WAITING_EXTERNAL": "等待你接管浏览器", "PAUSED": "已暂停", "COMPLETED": "已完成", "FAILED": "失败",
              "CANCELLED": "已取消"}
 MARK = {"pending": "○", "running": "▸", "done": "✓", "failed": "✕", "skipped": "–"}
-HELP = ("🤖 <b>Locius on Telegram</b>\n"
-        "直接发消息 = 给 Locius 布置任务（和网页里的对话一样）。\n\n"
+HELP = ("🤖 <b>OMuse on Telegram</b>\n"
+        "直接发消息 = 给 OMuse 布置任务（和网页里的对话一样）。\n\n"
         "/new — 开始新对话 new conversation\n"
         "/tasks — 最近的任务 recent tasks\n"
         "/stop — 停止当前任务 stop the running task\n"

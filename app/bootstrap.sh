@@ -1,5 +1,5 @@
 #!/bin/sh
-# Locius container entrypoint. Usage: bootstrap.sh sentinel|runtime|browser
+# OMuse container entrypoint. Usage: bootstrap.sh sentinel|runtime|browser
 set -e
 ROLE="$1"
 echo "[persona:$ROLE] unpacking bundle"

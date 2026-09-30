@@ -1,4 +1,4 @@
-"""MCP connector framework: remote MCP servers as Locius connectors.
+"""MCP connector framework: remote MCP servers as OMuse connectors.
 
 Every MCP server the user adds becomes a connector "mcp:<sid>". Its tools are published into the Sentinel
 catalog as `mcp_<sid>__<tool>` so the planner/executor can call them; every call still goes through

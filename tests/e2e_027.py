@@ -90,7 +90,7 @@ check("calendar: consent URL points at Google auth with offline access", st["aut
 # forged callback with the wrong state is refused
 forged = c.get(B + "/sentinel/api/connections/calendar/callback", params={"code": "x", "state": "evil"})
 check("calendar: callback with a wrong state is refused", "state mismatch" in forged.text and forged.status_code == 200, forged.text[:200])
-# the user's browser follows Google's redirect back to Locius
+# the user's browser follows Google's redirect back to OMuse
 g = c.get(st["auth_url"], follow_redirects=False)
 loc = g.headers["location"]
 cb = c.get(loc.replace(st["redirect_uri"].split("/sentinel/")[0], B))

@@ -140,13 +140,29 @@ async def chat(req: Request):
                 {"label": "Kickstand Case for iPhone 17 Pro Max", "details": ["S$33.90"],
                  "source_url": "http://shop.test:8099/shop.html", "note": "带支架"}]})])
         return reply("CHOICES DONE: " + last_tool[:400])
+    if "PHONECALL" in goal:
+        if n == 0:
+            return reply("", [tc("phone_call", {"to": "+65 6123 4567", "language": "English",
+                                                "purpose": "Book a table for 2 at Aurora Restaurant tomorrow at 7 pm; get a reference number.",
+                                                "may_share": "Name: Lucas Lu; phone +65 8000 0000"})])
+        ids = re.findall(r"(call_[0-9a-f]{12})", " ".join(str(m["content"]) for m in tools_done))
+        if n > 12 or not ids:
+            return reply("PHONE GAVE UP: " + last_tool[:400])
+        if '"status": "ended"' in last_tool or '"status": "no_answer"' in last_tool:
+            return reply("CALL DONE: " + last_tool[:1500])
+        return reply("", [tc("phone_call_status", {"call_id": ids[0], "wait_seconds": 30})])
     if "WATCHPRICE" in goal:
         if n == 0:   # a keyword that isn't on the page: the watch must refuse to be created, and say what it saw
             return reply("", [tc("watch_create", {"name": "Aurora case price", "url": "http://shop.test:8099/watch.html",
                                                   "mode": "price_below", "threshold": 20, "keyword": "Zebra"})])
-        if n == 1:
+        if n == 1:   # the model thinks the price is 30: the watch reads 25 itself and refuses to watch "the wrong price"
             return reply("", [tc("watch_create", {"name": "Aurora case price", "url": "http://shop.test:8099/watch.html",
-                                                  "mode": "price_below", "threshold": 20, "keyword": "Aurora"})])
+                                                  "mode": "price_below", "threshold": 20, "keyword": "Aurora",
+                                                  "current_price": 30})])
+        if n == 2:
+            return reply("", [tc("watch_create", {"name": "Aurora case price", "url": "http://shop.test:8099/watch.html",
+                                                  "mode": "price_below", "threshold": 20, "keyword": "Aurora",
+                                                  "current_price": 25})])
         return reply("WATCH DONE: " + last_tool[:300])
     if "PDFFORM" in goal:
         if n == 0:
@@ -258,7 +274,7 @@ async def chat(req: Request):
         return reply("PDF 已发送 " + last_tool[:200])
     if "SENDFILE" in goal:   # make a report, then hand it to the user as a download
         if n == 0:
-            return reply("", [tc("files_write", {"path": "reports/brief.md", "content": "# Brief\n\nHello from Locius.\n"})])
+            return reply("", [tc("files_write", {"path": "reports/brief.md", "content": "# Brief\n\nHello from OMuse.\n"})])
         if n == 1:
             return reply("", [tc("send_file", {"path": "reports/brief.md", "note": "今天的简报 today's brief"})])
         return reply("文件已发送 File sent: " + last_tool[:200])
@@ -328,7 +344,7 @@ async def chat(req: Request):
         if n == 0:
             return reply("", [tc("notion_get_page", {"page_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"})])
         if n == 1:
-            return reply("", [tc("slack_send_message", {"channel": "#general", "text": "📌 *Q4 plan* — we ship Locius 0.2 in October. Goals: 1) launch on Olares Market 2) 100 beta users 3) Notion & Slack integrations. Full plan in Notion."})])
+            return reply("", [tc("slack_send_message", {"channel": "#general", "text": "📌 *Q4 plan* — we ship OMuse 0.2 in October. Goals: 1) launch on Olares Market 2) 100 beta users 3) Notion & Slack integrations. Full plan in Notion."})])
         return reply("Posted to #general ✓")
     if "Get John to confirm" in goal and "GOAL" not in goal and "goal_update" in json.dumps(b.get("tools") or []):
         if n == 0:
@@ -354,7 +370,7 @@ async def chat(req: Request):
         if n == 0:
             return reply("", [tc("notion_get_page", {"page_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"})])
         if n == 1:
-            return reply("", [tc("slack_send_message", {"channel": "#general", "text": "Q4 plan: Ship Locius 0.2"})])
+            return reply("", [tc("slack_send_message", {"channel": "#general", "text": "Q4 plan: Ship OMuse 0.2"})])
         return reply("Posted: " + last_tool[:200])
     if "MCPNOTES" in goal:
         names = [t["function"]["name"] for t in b.get("tools") or []]

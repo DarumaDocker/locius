@@ -1,13 +1,13 @@
 metadata:
-  title: 'Locius'
+  title: 'OMuse'
   description: 'Your private AI agent'
 spec:
   fullDescription: |
-    Locius is a private AI agent that lives on your Olares — local-first, private by default and always on. It doesn't just chat: it plans multi-step tasks and carries them out across your email, documents, team chat and the web, and it asks before doing anything that matters.
+    OMuse is a private AI agent that lives on your Olares — local-first, private by default and always on. It doesn't just chat: it plans multi-step tasks and carries them out across your email, documents, team chat and the web, and it asks before doing anything that matters.
 
     **What it does**
 
-    - **Chat → plan → act** – describe what you need; Locius makes a plan and works through it step by step, showing every tool call.
+    - **Chat → plan → act** – describe what you need; OMuse makes a plan and works through it step by step, showing every tool call.
     - **Gmail** – search, read, draft, reply and send across several mailboxes; one-click unsubscribe from newsletters. Sign-in codes and reset links are hidden from the model.
     - **Notion & Slack** – look things up, write reports into Notion, update task boards, read channels and threads, post messages.
     - **Web browser** – its own Chromium with a restricted API (no arbitrary JavaScript), live view, and human takeover for logins and CAPTCHAs.
@@ -25,6 +25,8 @@ spec:
 
     Runs on the local models served by your Olares by default — any OpenAI-compatible endpoint works. English and 中文 interface.
   upgradeDescription: |
+    0.2.15: Phone calls — OMuse can call a business for you from your own Telnyx number (bookings, customer service, order checks). A real-time voice AI (OpenAI Realtime) talks to whoever answers, navigates phone menus, says it's an AI calling on your behalf, and never pays or reads out card numbers, passwords or codes. Every call needs your approval; emergency, premium and non-allowed-country numbers are blocked; each call has a time limit and there's a daily cap. You get the transcript and a summary. Set it up under Connections → Phone calls.
+    0.2.14: Prices hidden from the eye but meant for screen readers (how Amazon writes its real price) are now read, so OMuse sees product prices as text, not only in screenshots. A price watch finds the item's own price after the page's title, and refuses to start if it reads a different price from the one OMuse saw. Forms on single-page sites no longer shift their element numbers while you type (OMuse had typed a first name into ANA's booking-number box), and typing over a field it already filled is caught. A link from an email that lands on an error page, or a site answering "busy / try later", is now explained as the site refusing the automated browser (enter via the home page; tell you plainly) instead of "maintenance" with endless retries, and the same job can no longer be scheduled twice. Locius is now called OMuse.
     0.2.13: Price watches that really read the price — prices shops draw in pieces (like Amazon's "S$ 31 43") are read as one price, a keyword picks the item's own price (not a related product's), and a new watch reads the page once right away and shows what it read ("Read S$31.43"); if it can't find the price it says so instead of watching silently. Choice cards accept long product names the page shortens.
     0.2.12: Choice cards you can trust — when Locius shows you options (restaurants, products…), every name, price and detail on the cards is checked against the pages it actually read, and you pick with one tap. Web page watches: "tell me when it drops below S$20 / is back in stock / changes" — each change is reported once, with no model calls; failed checks back off. PDF forms: save an email attachment, fill the form on your Olares, check the filled copy, then reply with it attached (after your approval).
     0.2.11: The agent can click what it can only see. New browser_locate finds a thing on screen with vision alone (a lettered grid, then a zoomed numbered grid, then a red marker the model must confirm) and browser_click_at clicks there and can type and send — so chat bubbles and chat windows inside iframes or widgets (Tidio, Intercom, Zendesk…) work. Snapshots, browser_find and browser_look now also see inside shadow roots and iframes. Opening a chat or menu button outside a form no longer asks for approval; sending messages still does. "Add to Cart" on Amazon goes through without an approval.

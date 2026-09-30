@@ -466,7 +466,7 @@ async def lifespan(app):
     await broker.stop()
 
 
-app = FastAPI(lifespan=lifespan, title="Locius Browser Broker")
+app = FastAPI(lifespan=lifespan, title="OMuse Browser Broker")
 
 
 def auth(x_browser_token: str | None = Header(default=None)):

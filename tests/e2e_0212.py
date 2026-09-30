@@ -84,9 +84,11 @@ watch = os.path.join(PAGES, "watch.html")
 def page(price):
     whole, frac = price.split(".")
     with open(watch, "w") as f:   # drawn the way big shops draw prices: symbol, whole and fraction in separate pieces
-        f.write(f"<!doctype html><meta charset=utf-8><title>Aurora case</title><h1>Aurora Glitter Case for iPhone 17 Pro Max</h1>"
+        f.write(f"<!doctype html><meta charset=utf-8><title>Aurora case</title><p>Customers also viewed: Aurora Mini Case S$9.90</p><h1>Aurora Glitter Case for iPhone 17 Pro Max</h1>"
                 f"<a href='/store'>Visit the Aurora Store</a><p>4.6 · 1,203 ratings</p>"
-                f"<p>Price: <span>S$</span><span>{whole}</span><span>.</span><span>{frac}</span></p>"
+                f"<ul>{'<li>Military grade drop protection, MagSafe compatible, translucent matte back</li>' * 12}</ul>"
+                f"<p>Price: <span class='a-price'><span class='a-offscreen' style='position:absolute;opacity:0'>S${price}</span>"
+                f"<span aria-hidden='true'><span>S$</span><span>{whole}</span><span>.</span><span>{frac}</span></span></span></p>"
                 f"<p>Other: Basic Case S$12.90</p><h2>Related</h2><p>Aurora Mini Case S$9.90</p>")
 
 
@@ -95,8 +97,10 @@ t, conv = run("WATCHPRICE tell me when the Aurora case is below S$20")
 wc = results(t, "watch_create")
 check("a keyword that isn't on the page -> no watch, and the agent is told what prices it did see",
       wc and not wc[0]["ok"] and "NOT created" in wc[0]["preview"] and "25" in wc[0]["preview"], wc[:1])
-check("watch: created by the agent on the second try, reporting what it read",
-      t["status"] == "COMPLETED" and len(wc) > 1 and wc[1]["ok"] and "S$25.00" in wc[1]["preview"], wc[1:2])
+check("the price the model saw (30) differs from what the watch reads (25) -> refused",
+      len(wc) > 1 and not wc[1]["ok"] and "not the 30" in wc[1]["preview"], wc[1:2])
+check("watch: created by the agent on the third try, reporting what it read",
+      t["status"] == "COMPLETED" and len(wc) > 2 and wc[2]["ok"] and "S$25.00" in wc[2]["preview"], wc[2:3])
 sch = [s for s in c.get(B + "/api/schedules", headers=H).json()["schedules"] if s["name"] == "Aurora case price"]
 check("it is a notify-only web watch", sch and "web.page" in sch[0]["spec"] and '"notify"' in sch[0]["spec"], sch)
 check("only one watch was made (the refused one left nothing behind)", len(sch) == 1, sch)

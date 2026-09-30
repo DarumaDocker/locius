@@ -4,7 +4,7 @@ description: 通过网页在线客服处理售后：退货退款、取消订阅�
 ---
 # Customer service via web chat / 在线客服
 
-Locius can't make phone calls. It works through the company's website — self-service account pages, live chat, chat bots,
+If phone calls are set up (the phone_call tool exists), calling is an option too — see the phone-call skill. Otherwise work through the company's website — self-service account pages, live chat, chat bots,
 help-center forms — or by email. Try them in that order unless the user says otherwise.
 
 ## 1. Prepare the case (before contacting anyone)

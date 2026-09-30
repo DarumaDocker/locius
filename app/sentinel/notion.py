@@ -1,7 +1,7 @@
 """Notion connector (official REST API, internal-integration token).
 
 The user creates an internal integration at notion.so/my-integrations, copies its secret (ntn_… / secret_…)
-and shares the pages/databases Locius may use with that integration ("Connections" menu on the page).
+and shares the pages/databases OMuse may use with that integration ("Connections" menu on the page).
 """
 from __future__ import annotations
 
@@ -222,7 +222,7 @@ class Notion:
             if r.status_code == 401:
                 raise NotionError("Notion 令牌无效或已被撤销 (invalid token)")
             if r.status_code == 404:
-                raise NotionError("找不到这个页面/数据库，或者还没有把它共享给 Locius 集成 "
+                raise NotionError("找不到这个页面/数据库，或者还没有把它共享给 OMuse 集成 "
                                   "(not found — share the page with your integration via ••• → Connections)")
             if r.status_code >= 400:
                 raise NotionError(f"Notion 错误 {r.status_code}: {str(data.get('message', ''))[:300]}")

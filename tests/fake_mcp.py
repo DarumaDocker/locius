@@ -17,7 +17,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 app = FastAPI()
 TOKEN = "Bearer test-mcp-token"
 CALLS: list[dict] = []
-NOTES = [{"id": "n1", "title": "Q3 plan", "text": "Launch Locius 0.2 in October."},
+NOTES = [{"id": "n1", "title": "Q3 plan", "text": "Launch OMuse 0.2 in October."},
          {"id": "n2", "title": "Groceries", "text": "milk, eggs"}]
 BASE_TOOLS = [
     {"name": "notes_search", "description": "Search the user's notes by keyword.",

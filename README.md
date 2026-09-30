@@ -1,10 +1,10 @@
-<p align="center"><img src="deploy/market/assets/icon.png" width="96" alt="Locius"></p>
+<p align="center"><img src="deploy/market/assets/icon.png" width="96" alt="OMuse"></p>
 
-<h1 align="center">Locius</h1>
+<h1 align="center">OMuse</h1>
 <p align="center"><b>Your private AI agent that lives on your Olares — and asks before it acts.</b><br>
 运行在你 Olares 上的私人 AI 智能体——重要的事，先问你。</p>
 
-![Locius](deploy/market/assets/featured.webp)
+![OMuse](deploy/market/assets/featured.webp)
 
 [English](#english) · [中文](#中文)
 
@@ -12,7 +12,7 @@
 
 ## English
 
-Locius is a local-first AI agent for [Olares](https://www.olares.com). It doesn't just chat: it turns a request into a plan and carries it out across your email, Notion, Slack and the web. Anything that sends, posts, pays or deletes waits for your approval.
+OMuse is a local-first AI agent for [Olares](https://www.olares.com). It doesn't just chat: it turns a request into a plan and carries it out across your email, Notion, Slack and the web. Anything that sends, posts, pays or deletes waits for your approval.
 
 ### Features
 
@@ -46,10 +46,10 @@ Locius is a local-first AI agent for [Olares](https://www.olares.com). It doesn'
 
 ### Install
 
-- **Olares Market**: search for *Locius* (after the listing is approved).
+- **Olares Market**: search for *OMuse* (after the listing is approved).
 - **Manual**: `python3 build.py locius` → upload `dist/locius-<version>.tgz` in Olares Market ▸ *Upload custom chart*.
 
-The model endpoint defaults to `https://router.<your-olares-name>.olares.com/v1`; change it in the app's settings or the `PERSONA_MODEL_URL` / `PERSONA_MODEL` environment values. If the configured model isn't served, Locius picks an available one.
+The model endpoint defaults to `https://router.<your-olares-name>.olares.com/v1`; change it in the app's settings or the `PERSONA_MODEL_URL` / `PERSONA_MODEL` environment values. If the configured model isn't served, OMuse picks an available one.
 
 ### Development
 
@@ -65,7 +65,7 @@ bash tests/stop_local.sh
 
 ## 中文
 
-Locius 是为 [Olares](https://www.olares.com) 打造的本地优先（local-first）AI 智能体（AI Agent）。它不只是聊天：会把你的需求拆成计划，在邮件、Notion、Slack 和网页之间把事情做完。凡是发送、发布、付款、删除这类操作，都会先等你批准。
+OMuse 是为 [Olares](https://www.olares.com) 打造的本地优先（local-first）AI 智能体（AI Agent）。它不只是聊天：会把你的需求拆成计划，在邮件、Notion、Slack 和网页之间把事情做完。凡是发送、发布、付款、删除这类操作，都会先等你批准。
 
 ### 功能
 
@@ -89,10 +89,10 @@ Locius 是为 [Olares](https://www.olares.com) 打造的本地优先（local-fir
 
 ### 安装
 
-- **Olares 应用商店**：审核通过后搜索 *Locius*。
+- **Olares 应用商店**：审核通过后搜索 *OMuse*。
 - **手动安装**：`python3 build.py locius`，然后在 Olares 应用商店 ▸ *上传自定义 Chart* 中上传 `dist/locius-<版本>.tgz`。
 
-模型接口默认是 `https://router.<你的 Olares 名称>.olares.com/v1`，可在应用设置或环境变量 `PERSONA_MODEL_URL` / `PERSONA_MODEL` 中修改；如果配置的模型不存在，Locius 会自动选择一个可用模型。
+模型接口默认是 `https://router.<你的 Olares 名称>.olares.com/v1`，可在应用设置或环境变量 `PERSONA_MODEL_URL` / `PERSONA_MODEL` 中修改；如果配置的模型不存在，OMuse 会自动选择一个可用模型。
 
 ---
 

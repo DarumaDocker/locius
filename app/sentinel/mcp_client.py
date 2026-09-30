@@ -5,9 +5,9 @@ Supports the two HTTP transports:
 * Legacy HTTP+SSE (spec 2024-11-05): GET an SSE stream, the first `endpoint` event says where to POST messages;
   replies arrive on the stream.
 
-Only the client features Locius needs are implemented: initialize, tools/list, tools/call, ping.
+Only the client features OMuse needs are implemented: initialize, tools/list, tools/call, ping.
 Server->client requests (sampling, elicitation, roots) are answered with "method not found" — a third-party
-server can never make Locius' LLM do anything through this channel.
+server can never make OMuse' LLM do anything through this channel.
 stdio servers are deliberately not supported: Sentinel holds the vault and must not spawn arbitrary commands.
 """
 from __future__ import annotations
@@ -23,7 +23,7 @@ from app.common.util import VERSION
 
 PROTOCOL_VERSION = "2025-06-18"
 MAX_BYTES = 4 * 1024 * 1024
-CLIENT_INFO = {"name": "Locius", "version": VERSION}
+CLIENT_INFO = {"name": "OMuse", "version": VERSION}
 
 
 class MCPError(Exception):
@@ -84,7 +84,7 @@ class _Base:
         self.protocol_version = PROTOCOL_VERSION
         self.instructions = ""
         self._client = httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0), follow_redirects=False,
-                                         headers={"User-Agent": f"Locius/{VERSION} (MCP client)"})
+                                         headers={"User-Agent": f"OMuse/{VERSION} (MCP client)"})
 
     def _next_id(self) -> int:
         self._id += 1
@@ -111,7 +111,7 @@ class _Base:
     def _answer_server_request(self, msg: dict) -> dict:
         if msg.get("method") == "ping":
             return {"jsonrpc": "2.0", "id": msg["id"], "result": {}}
-        return {"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32601, "message": "not supported by Locius"}}
+        return {"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32601, "message": "not supported by OMuse"}}
 
     async def initialize(self) -> dict:
         res = await self.request("initialize", {"protocolVersion": PROTOCOL_VERSION, "capabilities": {},

@@ -36,7 +36,7 @@ conv = c.get(f"{B}/api/conversations/{r['conversation_id']}").json()
 files = [m for m in conv["messages"] if m["role"] == "system" and '"type": "file"' in m["content"]]
 check("file card posted in the conversation", len(files) == 1 and "reports/brief.md" in files[0]["content"], conv["messages"][-3:])
 d = c.get(B + "/api/files/raw", params={"path": "reports/brief.md", "download": 1})
-check("download returns the file as an attachment", d.status_code == 200 and "Hello from Locius" in d.text
+check("download returns the file as an attachment", d.status_code == 200 and "Hello from OMuse" in d.text
       and "attachment" in d.headers.get("content-disposition", "") and "brief.md" in d.headers.get("content-disposition", ""),
       (d.status_code, dict(d.headers)))
 i = c.get(B + "/api/files/raw", params={"path": "reports/brief.md"})
@@ -69,7 +69,7 @@ async def ui():
             await pg.click(".filecard a[download]")
         f = await dl.value
         path = await f.path()
-        check("clicking Download saves the file", f.suggested_filename == "brief.md" and "Hello from Locius" in open(path).read(),
+        check("clicking Download saves the file", f.suggested_filename == "brief.md" and "Hello from OMuse" in open(path).read(),
               f.suggested_filename)
         await b.close()
 asyncio.run(ui())
@@ -89,7 +89,7 @@ else:
         docs = c.get(TG + "/_log").json().get("docs") or []
         time.sleep(0.5)
     check("file delivered to the Telegram owner chat", docs and docs[0]["name"] == "brief.md" and docs[0]["chat_id"] == "555"
-          and "Hello from Locius" in docs[0]["head"] and "简报" in (docs[0]["caption"] or ""), docs)
+          and "Hello from OMuse" in docs[0]["head"] and "简报" in (docs[0]["caption"] or ""), docs)
 
 print("ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}")
 sys.exit(1 if fails else 0)

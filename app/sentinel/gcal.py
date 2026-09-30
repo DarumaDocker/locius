@@ -1,7 +1,7 @@
 """Google Calendar connector (official REST API v3, OAuth 2.0 with the user's own Google Cloud client).
 
 Setup (Connections page): the user creates an OAuth client (type "Web application") in their own Google Cloud
-project, enables the Calendar API, adds Locius's callback URL as a redirect URI and pastes the client id/secret.
+project, enables the Calendar API, adds OMuse's callback URL as a redirect URI and pastes the client id/secret.
 "Connect with Google" runs the consent flow; the refresh token is stored in Sentinel's vault and never leaves it.
 The agent only ever sees event data, never tokens.
 """
@@ -41,7 +41,7 @@ def exchange_code(client_id: str, client_secret: str, code: str, redirect_uri: s
     if r.status_code != 200 or not d.get("access_token"):
         raise GCalError(f"Google 授权失败 (token exchange failed): {d.get('error_description') or d.get('error') or r.status_code}")
     if not d.get("refresh_token"):
-        raise GCalError("Google 没有返回 refresh token：请在 myaccount.google.com/permissions 移除 Locius 的旧授权后再连接一次")
+        raise GCalError("Google 没有返回 refresh token：请在 myaccount.google.com/permissions 移除 OMuse 的旧授权后再连接一次")
     return d
 
 

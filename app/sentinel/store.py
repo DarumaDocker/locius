@@ -71,6 +71,13 @@ DEFAULT_CONNECTIONS = {
         "permissions": {"read": True, "write": True},
         "enabled": 0,
     },
+    "phone": {
+        "config": {"from_number": "", "connection_id": "", "public_url": "", "owner_name": "",
+                   "allowed_prefixes": ["+65", "+1"], "max_minutes": 10, "daily_limit": 10, "voice": "marin",
+                   "model": "gpt-realtime"},
+        "permissions": {"call": True},
+        "enabled": 0,
+    },
 }
 
 

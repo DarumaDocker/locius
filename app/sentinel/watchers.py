@@ -3,7 +3,7 @@
 The runtime's scheduler polls Sentinel's /internal/watch with a source, its parameters and the cursor it
 got last time. Sentinel (which holds the credentials) looks for new items and returns them plus a new
 cursor. The first poll only sets the cursor, so existing backlog never fires a trigger.
-Items written by Locius itself (its own Slack messages, its own Notion edits) are skipped to avoid loops.
+Items written by OMuse itself (its own Slack messages, its own Notion edits) are skipped to avoid loops.
 """
 from __future__ import annotations
 
@@ -157,6 +157,7 @@ _CUR = r"(?:S\$|US\$|HK\$|A\$|C\$|RM|SGD|USD|HKD|RMB|CNY|¥|￥|€|£|\$)"
 # shops often draw a price as separate pieces ("S$ 31 . 43", "S$31\n.43", Amazon's "S$ 31 43"): glue them back
 _SPLIT = re.compile(r"(" + _CUR + r"\s?\d{1,3}(?:,\d{3})*|" + _CUR + r"\s?\d+)(?:\s+\.\s*|\s*\.\s+|\s+)(\d{2})(?![\d.,%])", re.I)
 KEYWORD_WINDOW = 600
+HEADING_WINDOW = 3500
 
 
 def _glue(text: str) -> str:
@@ -171,7 +172,7 @@ def price_hits(text: str, keyword: str = "") -> list[tuple[float, str]]:
     def hits(span: str, first_only: bool) -> list[tuple[float, str]]:
         out = []
         for m in _PRICE.finditer(span):
-            if first_only and len(span) >= KEYWORD_WINDOW and m.end() >= len(span) - 3:
+            if first_only and len(span) >= min(KEYWORD_WINDOW, HEADING_WINDOW) and m.end() >= len(span) - 3:
                 break                                   # cut off at the window's edge: don't read "31.4" out of "31.43"
             try:
                 out.append((float(m.group(1).replace(",", "")), m.group(0).strip()))
@@ -184,6 +185,12 @@ def price_hits(text: str, keyword: str = "") -> list[tuple[float, str]]:
     if not keyword:
         return hits(text, False)
     low = text.lower()
+    # a product page: the price that follows the page's own title (a heading naming the item) is the item's price, even
+    # when colour swatches and bullet points sit between them (Amazon's buy box comes ~2000 characters after the title)
+    for m in re.finditer(r"^#{1,3} [^\n]*" + re.escape(keyword.lower()), low, re.M):
+        got = hits(text[m.start(): m.start() + HEADING_WINDOW], True)
+        if got:
+            return got
     for m in re.finditer(re.escape(keyword.lower()), low):
         got = hits(text[m.start(): m.start() + KEYWORD_WINDOW], True)
         if got:

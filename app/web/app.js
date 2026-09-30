@@ -1,4 +1,4 @@
-/* Locius web UI — no build step. Talks to Sentinel (/sentinel/api) and, through it, the Runtime (/api). */
+/* OMuse web UI — no build step. Talks to Sentinel (/sentinel/api) and, through it, the Runtime (/api). */
 (() => {
 'use strict';
 
@@ -321,7 +321,7 @@ function renderThread(thread) {
   const msgs = h('div', { class: 'msgs', 'aria-live': 'polite' });
   if (!d || !d.messages.length) {
     msgs.append(h('div', { class: 'msg' }, h('div', { class: 'card' },
-      h('h3', null, T('你好，我是 Locius 👋')),
+      h('h3', null, T('你好，我是 OMuse 👋')),
       h('p', { class: 'sub' }, T('运行在你的 Olares One 上的私人 Agent。我可以读写 Gmail、操作浏览器、管理文件、记住你的偏好、定时执行任务。')
         + T('发送邮件、提交表单、付款、删除等高风险动作，都会由独立的 Sentinel（哨兵）弹出审批，你批准后才会执行。')),
       S.gmailReady === false ? h('p', { class: 'small muted' }, T('提示：先到「连接 Connections」配置 Gmail 应用专用密码 (App Password)。')) : null)));
@@ -370,7 +370,7 @@ function renderThread(thread) {
   const hadFocus = document.activeElement && document.activeElement.id === 'chatInput';
   const narrow = isNarrow();
   const ph = S.conv ? (narrow ? T('继续这个对话…') : T('继续这个对话… (Enter 发送，Shift+Enter 换行)'))
-    : (narrow ? T('告诉 Locius 要做什么…') : T('开始新对话：告诉 Locius 要做什么… (Enter 发送)'));
+    : (narrow ? T('告诉 OMuse 要做什么…') : T('开始新对话：告诉 OMuse 要做什么… (Enter 发送)'));
   const ta = h('textarea', { id: 'chatInput', rows: 1, placeholder: ph, enterkeyhint: isTouch() ? 'enter' : 'send', 'aria-label': T('消息 Message') });
   ta.value = S.draft || '';
   const grow = () => { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight + 2, narrow ? 140 : 200) + 'px'; };
@@ -518,7 +518,7 @@ async function viewTasks(root) {
     ['COMPLETED', T('已完成 Done')], ['FAILED,CANCELLED', T('失败 Failed')]];
   const left = h('div', null, h('div', { class: 'filters' }, filters.map(([v, l]) => h('button', { class: S.taskFilter === v ? 'on' : '', onclick: () => { S.taskFilter = v; route(); } }, l))));
   const list = h('div', { class: 'list' });
-  if (!r.tasks.length) list.append(h('div', { class: 'empty' }, T('还没有任务。去「对话」里给 Locius 布置一个吧。')));
+  if (!r.tasks.length) list.append(h('div', { class: 'empty' }, T('还没有任务。去「对话」里给 OMuse 布置一个吧。')));
   for (const t of r.tasks) list.append(h('button', { class: 'item' + (S.selTask === t.id ? ' active' : ''), onclick: () => { location.hash = 'tasks/' + t.id; } },
     h('div', { class: 'top' }, pill(t.status), h('span', { class: 'title' }, t.goal)),
     h('div', { class: 'small muted' }, Tf("{0} · {1} · {2} 步", (fmtTime(t.created_at)), (t.source === 'schedule' ? T('⏰ 定时') : T('💬 对话')), (t.steps || 0)))));
@@ -572,7 +572,7 @@ async function loadApprovals() {
   const fresh = S.approvals.filter(a => !S.seenApprovals.has(a.id));
   fresh.forEach(a => S.seenApprovals.add(a.id));
   if (fresh.length && !$('.modal-back')) openApproval(fresh[0].id);
-  document.title = n ? `(${n}) Locius` : 'Locius';
+  document.title = n ? `(${n}) OMuse` : 'OMuse';
 }
 
 function approvalForm(a, onDone) {
@@ -613,7 +613,7 @@ function approvalForm(a, onDone) {
     if (editable.has('message_ids')) inputs.message_ids = { get value() { return checks.filter(c => c.checked).map(c => c.dataset.id); } };
   }
   if (s.body !== undefined && s.body !== null) {
-    const bodyKey = a.tool === 'gmail_forward' ? 'note' : a.tool === 'browser_type' ? 'text' : (a.tool || '').startsWith('calendar_') ? 'description' : (a.tool || '').startsWith('notion_') ? 'content' : 'body';
+    const bodyKey = a.tool === 'phone_call' ? 'purpose' : a.tool === 'gmail_forward' ? 'note' : a.tool === 'browser_type' ? 'text' : (a.tool || '').startsWith('calendar_') ? 'description' : (a.tool || '').startsWith('notion_') ? 'content' : 'body';
     if (editable.has(bodyKey)) { const ta = h('textarea', { rows: 8 }); ta.value = s.body || ''; inputs[bodyKey] = ta; box.append(h('label', { class: 'field' }, h('span', null, T('内容（可修改后批准）Content — editable')), ta)); }
     else box.append(h('pre', { class: 'md', style: 'white-space:pre-wrap' }, s.body));
   }
@@ -655,7 +655,7 @@ function openApproval(id) {
   closeModal();
   const back = h('div', { class: 'modal-back', onclick: e => { if (e.target === back) closeModal(); } });
   const m = h('div', { class: 'modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': T('审批 Approval') },
-    h('div', { class: 'row' }, h('h2', { style: 'flex:1' }, T('Locius 请求执行操作')), h('button', { class: 'icon-btn', onclick: closeModal, 'aria-label': T('稍后 later') }, '✕')),
+    h('div', { class: 'row' }, h('h2', { style: 'flex:1' }, T('OMuse 请求执行操作')), h('button', { class: 'icon-btn', onclick: closeModal, 'aria-label': T('稍后 later') }, '✕')),
     h('p', { class: 'small muted', style: 'margin:0' }, T('此请求来自 Sentinel（独立于 Agent）。你决定前任务会暂停。')),
     approvalForm(a, closeModal));
   back.append(m); $('#modalRoot').append(back);
@@ -887,7 +887,7 @@ async function viewSchedules(root) {
   const scheds = r.schedules.filter(s => s.kind !== 'event'), triggers = r.schedules.filter(s => s.kind === 'event');
   // ---- goals
   const gTitle = h('input', { type: 'text', placeholder: T('例如：拿到 John 对合同的确认') });
-  const gObj = h('textarea', { rows: 3, placeholder: T('要达成什么？背景是什么？Locius 每次检查时会读这段话。例如：John 还没确认合同条款。每天检查他有没有回信；3 天没回就起草一封礼貌的跟进邮件（发送需要我批准）。') });
+  const gObj = h('textarea', { rows: 3, placeholder: T('要达成什么？背景是什么？OMuse 每次检查时会读这段话。例如：John 还没确认合同条款。每天检查他有没有回信；3 天没回就起草一封礼貌的跟进邮件（发送需要我批准）。') });
   const gCrit = h('input', { type: 'text', placeholder: T('怎样算完成？例如：John 回信确认同意') });
   const gDl = h('input', { type: 'date' });
   const gCheck = checkPicker('interval');
@@ -924,7 +924,7 @@ async function viewSchedules(root) {
   };
   const goals = h('div', { class: 'card stack' },
     h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, T('🎯 场景目标 Goals')), h('span', { class: 'chip' }, Tf("{0} 个进行中", (gr.goals.filter(g => g.status === 'active').length)))),
-    h('p', { class: 'sub' }, T('交给 Locius 一个需要几天才能完成的目标，它会按你设定的频率（或有新事件时）检查进展、推进下一步，直到达成或到截止时间。发送、提交等操作照常需要你审批；达成、失败或需要你帮忙时会通知你（包括 Telegram）。也可以直接在对话里说「帮我盯着……直到……」。')),
+    h('p', { class: 'sub' }, T('交给 OMuse 一个需要几天才能完成的目标，它会按你设定的频率（或有新事件时）检查进展、推进下一步，直到达成或到截止时间。发送、提交等操作照常需要你审批；达成、失败或需要你帮忙时会通知你（包括 Telegram）。也可以直接在对话里说「帮我盯着……直到……」。')),
     goalForm, gr.goals.length ? gr.goals.map(goalCard) : null);
   // ---- triggers
   const tName = h('input', { type: 'text', placeholder: T('例如：老板来信提醒') });
@@ -934,7 +934,7 @@ async function viewSchedules(root) {
     h('div', { class: 'stack', style: 'margin-top:10px' },
       h('label', { class: 'field' }, h('span', null, T('名称 Name')), tName), tCheck.el,
       h('label', { class: 'field' }, h('span', null, T('要做什么 Then do')), tGoal),
-      h('p', { class: 'small muted' }, T('创建后第一次检查只记录现状，之后出现的新邮件/消息/修改才会触发。Locius 自己发的消息、自己改的页面不会触发，避免循环。')),
+      h('p', { class: 'small muted' }, T('创建后第一次检查只记录现状，之后出现的新邮件/消息/修改才会触发。OMuse 自己发的消息、自己改的页面不会触发，避免循环。')),
       h('p', { class: 'small muted' }, T('网页监控：「要做什么」留空 = 只给你发通知（不运行 Agent）。同一个变化只提醒一次；检查失败会自动拉长间隔，连续失败会停用并告诉你。')),
       h('div', null, h('button', { class: 'btn primary', onclick: safe(async () => {
         const v = tCheck.value();
@@ -1060,7 +1060,7 @@ async function viewConnections(root) {
   });
   const telegram = h('div', { class: 'card stack' },
     h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, T('📱 Telegram 遥控 Remote control')), h('span', { class: 'chip ' + (tg.has_credential && tg.enabled ? 'ok' : '') }, tg.has_credential && tg.enabled ? T('已连接') : T('未配置'))),
-    h('p', { class: 'sub' }, T('在 Telegram 里直接给 Locius 发消息布置任务、看进度和结果；需要审批时点 ✅ 批准 / ❌ 拒绝；需要登录时发来浏览器接管链接。只响应下面这个 chat id（你本人），其他人发消息一律忽略。')),
+    h('p', { class: 'sub' }, T('在 Telegram 里直接给 OMuse 发消息布置任务、看进度和结果；需要审批时点 ✅ 批准 / ❌ 拒绝；需要登录时发来浏览器接管链接。只响应下面这个 chat id（你本人），其他人发消息一律忽略。')),
     h('ol', { class: 'steps-help' },
       h('li', null, T('在 Telegram 找 @BotFather，发 /newbot 创建机器人，复制它给的 Bot Token')),
       h('li', null, T('给你的新机器人发一条 /start')),
@@ -1107,10 +1107,10 @@ async function viewConnections(root) {
   };
   const notion = tokenCard(nt, {
     title: '📝 Notion', ph: 'ntn_…', label: T('集成令牌 Internal integration secret'), who: c => c.workspace || '',
-    desc: T('读写你的 Notion 页面和数据库：查资料、把报告写进 Notion、更新任务表。Locius 只能看到你主动共享给它的页面。'),
-    steps: [h('span', null, T('打开 '), h('a', { href: 'https://www.notion.so/my-integrations', target: '_blank', rel: 'noopener' }, 'notion.so/my-integrations'), T('，新建一个「内部集成 Internal integration」，名字填 Locius')),
+    desc: T('读写你的 Notion 页面和数据库：查资料、把报告写进 Notion、更新任务表。OMuse 只能看到你主动共享给它的页面。'),
+    steps: [h('span', null, T('打开 '), h('a', { href: 'https://www.notion.so/my-integrations', target: '_blank', rel: 'noopener' }, 'notion.so/my-integrations'), T('，新建一个「内部集成 Internal integration」，名字填 OMuse')),
       T('复制它的「密钥 Internal Integration Secret」（ntn_ 开头），粘贴到下面'),
-      T('在要给 Locius 用的页面或数据库右上角 ••• → 连接 Connections → 选择 Locius（子页面会自动继承）')],
+      T('在要给 OMuse 用的页面或数据库右上角 ••• → 连接 Connections → 选择 OMuse（子页面会自动继承）')],
     ok: r => Tf("Notion 已连接 ✓ {0}，能看到 {1} 个页面", (r.workspace), (r.visible.length)) + (r.visible.length ? '' : T('（记得把页面共享给集成）')),
     perms: [['read', T('读取与搜索'), 'read', 'low'], ['write', T('新建 / 追加 / 修改页面（归档需审批）'), 'write', 'medium']] });
   const slack = tokenCard(sl, {
@@ -1119,14 +1119,94 @@ async function viewConnections(root) {
     steps: [h('span', null, T('打开 '), h('a', { href: 'https://api.slack.com/apps', target: '_blank', rel: 'noopener' }, 'api.slack.com/apps'), ' → Create New App → From scratch'),
       T('OAuth & Permissions 里添加 Bot Token Scopes：channels:history, channels:read, groups:history, groups:read, im:history, im:read, users:read, chat:write（想用搜索：再加 User Token Scope search:read，并使用 xoxp- 用户令牌）'),
       T('Install to Workspace，复制 Bot User OAuth Token（xoxb- 开头）粘贴到下面'),
-      T('在要让 Locius 读取的频道里输入 /invite @你的应用名')],
+      T('在要让 OMuse 读取的频道里输入 /invite @你的应用名')],
     ok: r => Tf("Slack 已连接 ✓ {0}，已加入 {1} 个频道", (r.team), (r.member_of.length)),
     perms: [['read', T('读取频道 / 讨论串 / 搜索'), 'read', 'low'], ['send', T('发送消息（每次需审批）'), 'send — approval', 'high']] });
   const calendar = calendarCard(byName.calendar, permRow);
+  const phoneC = phoneCard(byName.phone);
   const mcp = await mcpCard();
   root.append(h('div', { class: 'grid2' }, gmail, h('div', { class: 'stack' }, browser, telegram)), h('div', { style: 'height:16px' }),
-    h('div', { class: 'grid2' }, notion, slack), h('div', { style: 'height:16px' }), calendar, h('div', { style: 'height:16px' }), mcp,
+    h('div', { class: 'grid2' }, notion, slack), h('div', { style: 'height:16px' }), calendar, h('div', { style: 'height:16px' }), phoneC, h('div', { style: 'height:16px' }), mcp,
     h('div', { style: 'height:16px' }), grants);
+}
+
+// --- Phone calls (Telnyx number + OpenAI Realtime voice); keys stay in Sentinel's vault
+function phoneCard(c) {
+  c = c || { name: 'phone', config: {}, permissions: {}, enabled: false, has_credential: false };
+  const cf = c.config || {};
+  const inp = (v, ph, type) => { const i = h('input', { type: type || 'text', placeholder: ph || '', autocomplete: 'off' }); i.value = v || ''; return i; };
+  const owner = inp(cf.owner_name, 'Lucas Lu');
+  const from = inp(cf.from_number, '+19793471777');
+  const connId = inp(cf.connection_id, '2xxxxxxxxxxxxxxxxxx');
+  const pub = inp(cf.public_url, 'https://xxxxxxxx.yourname.olares.com');
+  const tkey = inp('', c.has_credential ? T('已保存 saved — 不改可留空') : 'KEY0…', 'password');
+  const okey = inp('', c.has_credential ? T('已保存 saved — 不改可留空') : 'sk-…', 'password');
+  const pkey = inp('', T('可选 optional — Telnyx 公钥 (webhook 签名)'), 'password');
+  const prefixes = inp((cf.allowed_prefixes || ['+65', '+1']).join(', '), '+65, +1');
+  const maxm = inp(String(cf.max_minutes || 10), '10', 'number');
+  const daily = inp(String(cf.daily_limit || 10), '10', 'number');
+  const voice = h('select', null, ['marin', 'cedar', 'alloy', 'coral', 'sage', 'verse', 'shimmer', 'echo', 'ash', 'ballad'].map(v => h('option', { value: v, selected: (cf.voice || 'marin') === v }, v)));
+  const checks = h('div', { class: 'small stack' });
+  const LABEL = { telnyx: T('Telnyx API Key'), number: T('号码与 Voice API 应用'), openai: T('OpenAI API Key / 模型'), public_url: T('公开地址（Telnyx 连得上）') };
+  const showChecks = (r) => { checks.innerHTML = ''; Object.entries(r.checks || {}).forEach(([k, v]) => checks.append(h('div', null, (v === 'ok' ? '✅ ' : '⚠️ ') + (LABEL[k] || k) + (v === 'ok' ? '' : ' — ' + B(v))))); };
+  const body = () => ({ owner_name: owner.value, from_number: from.value, connection_id: connId.value, public_url: pub.value,
+    telnyx_api_key: tkey.value, openai_api_key: okey.value, telnyx_public_key: pkey.value, allowed_prefixes: prefixes.value,
+    max_minutes: maxm.value, daily_limit: daily.value, voice: voice.value });
+  const save = safe(async e => {
+    e.target.disabled = true;
+    try { const r = await sapi('connections/phone/credential', { method: 'POST', body: body() }); showChecks(r); toast(r.ready ? T('电话已配置 ✓') : T('已保存，但还有项目没通过检查')); }
+    finally { e.target.disabled = false; }
+  });
+  const check = safe(async () => showChecks(await sapi('connections/phone/test', { method: 'POST', body: {} })));
+  const testTo = inp('', '+65 8xxx xxxx');
+  const testCall = safe(async e => {
+    e.target.disabled = true;
+    try { const r = await sapi('phone/test_call', { method: 'POST', body: { to: testTo.value } }); toast(Tf("正在拨打 {0}，请接听", (r.to))); setTimeout(() => loadCalls(), 5000); }
+    finally { e.target.disabled = false; }
+  });
+  const calls = h('div', { class: 'stack small' });
+  const ST = { dialing: T('📞 拨号中'), connected: T('🟢 通话中'), ended: T('✔ 已结束'), no_answer: T('无人接听'), failed: T('❌ 失败') };
+  const loadCalls = async () => {
+    const r = await sapi('phone/calls?limit=10'); calls.innerHTML = '';
+    if (!r.calls.length) { calls.append(h('div', { class: 'muted' }, T('还没有通话记录'))); return; }
+    r.calls.forEach(x => calls.append(h('details', null,
+      h('summary', null, h('b', null, x.to), ' · ', ST[x.status] || x.status, ' · ', fmtTime(x.created_at), x.outcome ? ' · ' + x.outcome : ''),
+      h('div', { class: 'stack', style: 'margin:6px 0 10px' },
+        h('div', null, h('b', null, T('目的 Purpose')), ' ', x.purpose),
+        x.summary ? h('div', null, h('b', null, T('结果 Summary')), ' ', x.summary) : null,
+        (x.hangup_cause || x.error) ? h('div', { class: 'muted' }, B(x.error || x.hangup_cause)) : null,
+        h('pre', { class: 'md', style: 'white-space:pre-wrap;max-height:260px;overflow:auto' },
+          (x.transcript || []).map(t => `[${t.t}s] ${t.who === 'omuse' ? 'OMuse' : T('对方')}: ${t.text}`).join('\n') || T('（没有对话内容）'))))));
+  };
+  const ready = c.has_credential && c.enabled && cf.connection_id && cf.from_number && /^https?:\/\//.test(cf.public_url || '');
+  const field = (label, el, hint) => h('label', { class: 'field' }, h('span', null, label), el, hint ? h('small', { class: 'muted' }, hint) : null);
+  const card = h('div', { class: 'card stack' },
+    h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, T('☎️ 电话 Phone calls')), h('span', { class: 'chip ' + (ready ? 'ok' : '') }, ready ? Tf("已配置 {0}", (cf.from_number)) : T('未配置 Not set up'))),
+    h('p', { class: 'sub' }, T('让 OMuse 用你的 Telnyx 号码替你打电话（问客服、预约、确认订单）。语音由 OpenAI Realtime 实时对话；每通电话都要你批准，开头会说明自己是替你打电话的 AI；不会付款、不会报卡号密码验证码。')),
+    h('details', { open: !ready }, h('summary', null, h('b', null, ready ? T('修改设置 Settings') : T('设置 Set up'))),
+      h('div', { class: 'stack', style: 'margin-top:10px' },
+        h('ol', { class: 'steps-help' },
+          h('li', null, T('Telnyx 控制台 → Voice → Programmable Voice → 新建 Voice API 应用（Call Control），Webhook 填下面「公开地址」+ /voice/webhook；复制它的 Application ID')),
+          h('li', null, T('Numbers → 你的号码 → 分配给这个 Voice API 应用')),
+          h('li', null, T('Voice → Outbound Voice Profiles → 新建并关联这个应用，允许要拨打的国家（如新加坡、美国），建议设每日消费上限')),
+          h('li', null, T('Account → API Keys 新建一个 Key；OpenAI 平台新建一个 API Key')),
+          h('li', null, T('公开地址：Olares 设置 → 应用 → OMuse → 入口「OMuse Phone」的网址（公开访问，只提供通话音频接口）'))),
+        field(T('你的名字（AI 会说“替 … 打电话”）'), owner),
+        h('div', { class: 'grid2' }, field(T('外呼号码 From number'), from), field(T('Voice API 应用 ID (Connection ID)'), connId)),
+        field(T('公开地址 Public URL'), pub),
+        h('div', { class: 'grid2' }, field('Telnyx API Key', tkey), field('OpenAI API Key', okey)),
+        field(T('Telnyx 公钥（可选）Public key'), pkey, T('填了才会接受 Telnyx 的 webhook 状态通知；不填也能打电话')),
+        h('div', { class: 'grid2' }, field(T('允许拨打的国家码'), prefixes), field(T('声音 Voice'), voice)),
+        h('div', { class: 'grid2' }, field(T('每通最长（分钟）'), maxm), field(T('每天最多几通'), daily)),
+        h('div', { class: 'row' }, h('button', { class: 'btn primary', onclick: save }, T('保存并检查 Save & check')),
+          c.has_credential ? h('button', { class: 'btn small', onclick: check }, T('重新检查 Check')) : null), checks)),
+    ready ? h('div', { class: 'row', style: 'flex-wrap:nowrap' }, testTo, h('button', { class: 'btn small', style: 'white-space:nowrap', onclick: testCall }, T('打给我测试 Test call'))) : null,
+    h('div', null, h('b', null, T('最近通话 Recent calls')), ' ', h('button', { class: 'btn small', onclick: safe(loadCalls) }, T('刷新'))), calls,
+    c.has_credential ? h('div', { class: 'row' },
+      h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: c.enabled, onchange: safe(async e => { await sapi('connections/phone', { method: 'PUT', body: { enabled: e.target.checked } }); }) }), T('启用')),
+      h('button', { class: 'btn danger small', onclick: safe(async () => { if (!confirmInline(T('断开电话？密钥会被删除。'))) return; await sapi('connections/phone/credential', { method: 'DELETE' }); route(); }) }, T('断开 Disconnect'))) : null);
+  loadCalls().catch(() => {});
+  return card;
 }
 
 // --- Google Calendar (OAuth with the user's own Google Cloud client; tokens stay in Sentinel's vault)
@@ -1146,7 +1226,7 @@ function calendarCard(c, permRow) {
       h('summary', null, h('b', null, c.has_credential ? T('重新连接 Reconnect') : T('连接 Connect'))),
       h('div', { class: 'stack', style: 'margin-top:10px' },
         h('ol', { class: 'steps-help' },
-          h('li', null, T('打开 '), h('a', { href: 'https://console.cloud.google.com/projectcreate', target: '_blank', rel: 'noopener' }, 'Google Cloud Console'), T('，新建一个项目（名字随意，如 Locius）')),
+          h('li', null, T('打开 '), h('a', { href: 'https://console.cloud.google.com/projectcreate', target: '_blank', rel: 'noopener' }, 'Google Cloud Console'), T('，新建一个项目（名字随意，如 OMuse）')),
           h('li', null, T('在「API 和服务 → 库」里搜索并启用 '), h('a', { href: 'https://console.cloud.google.com/apis/library/calendar-json.googleapis.com', target: '_blank', rel: 'noopener' }, 'Google Calendar API')),
           h('li', null, T('「OAuth 同意屏幕 OAuth consent screen」：用户类型选「外部 External」，把你自己的 Gmail 加为测试用户；建议最后点「发布应用 Publish app」，否则授权 7 天就会过期')),
           h('li', null, T('「凭据 Credentials → 创建凭据 → OAuth 客户端 ID」：应用类型选「Web 应用 Web application」，在「已获授权的重定向 URI」里填下面这个地址：'),
@@ -1270,7 +1350,7 @@ async function mcpCard() {
     h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, T('🧩 MCP 连接器 MCP connectors')),
       pending ? h('span', { class: 'chip bad' }, Tf("{0} 个工具待检查", (pending))) : null,
       h('span', { class: 'chip ' + (list.length ? 'ok' : '') }, list.length ? Tf("{0} 个服务器", (list.length)) : T('未添加'))),
-    h('p', { class: 'sub' }, T('MCP（Model Context Protocol，模型上下文协议）是让 AI 连接外部工具的通用标准。添加一个 MCP 服务器后，它提供的工具（查文档、建任务、查代码…）就能被 Locius 使用。所有调用都经过 Sentinel：按你的设置自动执行或弹出审批，并写入活动审计。返回的内容一律当作不可信数据处理。')),
+    h('p', { class: 'sub' }, T('MCP（Model Context Protocol，模型上下文协议）是让 AI 连接外部工具的通用标准。添加一个 MCP 服务器后，它提供的工具（查文档、建任务、查代码…）就能被 OMuse 使用。所有调用都经过 Sentinel：按你的设置自动执行或弹出审批，并写入活动审计。返回的内容一律当作不可信数据处理。')),
     list.map(serverBox), addForm);
 }
 

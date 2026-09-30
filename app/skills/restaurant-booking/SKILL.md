@@ -26,7 +26,7 @@ a) **Reserve with Google** — the "Reserve a table" link (google.com/maps/reser
    (e.g. Chope, Quandoo, TableCheck).
 b) The booking provider's page for that restaurant: Chope (chope.co), TableCheck (tablecheck.com), Quandoo, SevenRooms,
    Inline, Eatigo, OpenTable, or the restaurant's own "Reservations / Book" page.
-c) No online booking → give the phone number and say the user has to call (Locius can't make phone calls).
+c) No online booking → give the phone number and say the user has to call (OMuse can't make phone calls).
 
 Rules:
 - Report a time as available **only** after you set that restaurant's date and party size on its booking page and saw the

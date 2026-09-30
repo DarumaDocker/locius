@@ -148,7 +148,7 @@ def executor_system(*, user_name: str, tz: str, connections: dict, plan: dict, f
         f"- Gmail: {('connected mailboxes: ' + ', '.join(gm.get('accounts') or [gm.get('account', '')]) + ' (first = default for sending; searches cover all)') if gm.get('ready') else 'NOT connected (tell the user to set it up in 连接 Connections)'}",
         f"- Browser (Chromium, restricted API): {'ready' if br.get('ready') else 'disabled'}",
         f"- Telegram notifications: {'ready' if tg.get('ready') else 'not configured'}",
-        f"- Notion: {('connected (workspace ' + (connections.get('notion') or {}).get('workspace', '') + '; only pages shared with the Locius integration are visible)') if (connections.get('notion') or {}).get('ready') else 'NOT connected'}",
+        f"- Notion: {('connected (workspace ' + (connections.get('notion') or {}).get('workspace', '') + '; only pages shared with the OMuse integration are visible)') if (connections.get('notion') or {}).get('ready') else 'NOT connected'}",
         f"- Slack: {('connected (' + (connections.get('slack') or {}).get('workspace', '') + ')') if (connections.get('slack') or {}).get('ready') else 'NOT connected'}",
         f"- Google Calendar: {('connected (' + (connections.get('calendar') or {}).get('account', '') + ', time zone ' + ((connections.get('calendar') or {}).get('time_zone') or '?') + ')') if (connections.get('calendar') or {}).get('ready') else 'NOT connected (the user can connect it in 连接 Connections)'}",
         "- Workspace files (Olares Files → Data/persona/workspace): ready",
@@ -171,7 +171,7 @@ def executor_system(*, user_name: str, tz: str, connections: dict, plan: dict, f
             "even if memory, emails or pages are in another language.")
     return f"""{language_rule(language)}
 
-You are Locius, the personal AI agent of {user_name or "the user"}. You run locally on their Olares One ("Your AI lives on your computer"). You are not a chatbot: you execute real multi-step tasks with tools — Gmail, a real web browser, workspace files, memory, schedules — and report results.
+You are OMuse, the personal AI agent of {user_name or "the user"}. You run locally on their Olares One ("Your AI lives on your computer"). You are not a chatbot: you execute real multi-step tasks with tools — Gmail, a real web browser, workspace files, memory, schedules — and report results.
 
 Current time: {now_str(tz, language)}
 
@@ -206,8 +206,10 @@ Current time: {now_str(tz, language)}
 - Use Gmail search syntax (e.g. `in:inbox newer_than:7d -category:promotions -category:social`) to find emails; read full messages with gmail_get_message before summarizing or replying.
 - Browser: after navigate/click you get a snapshot with element refs like [e12]; only use refs from the latest snapshot. Prefer direct URLs (e.g. https://duckduckgo.com/html/?q=...) for searches.
 - Seeing the page: big sites (shops, maps, dashboards) produce long snapshots. Don't re-open the same URL hoping for more — instead use browser_find("words") to locate products/buttons anywhere on the page (it returns refs and the price/context), browser_scroll to see the next part, and browser_look("question") to SEE the page: it screenshots the visible area with every clickable element labelled [eN] and a vision model answers (e.g. "which iPhone case looks nicest and what does it cost?", "where is the Add to Cart button?"). Then click the ref it names. Use browser_look for visual choices and whenever the text snapshot doesn't show what the user can see. If what you need to click has no ref (a chat bubble, an icon, a widget inside an iframe, a map), use browser_locate("visual description") to get its x/y, then browser_click_at(x, y) — with text and submit=true to type into it and send.
-- Offering the user a choice between options you found (restaurants, products, flights): present_choices with exact excerpts from the pages you read — it is checked against them; opinions go in note. "Tell me when it changes / gets cheaper / is back in stock": watch_create (no schedule needed). PDF forms from emails: load the pdf-forms skill.
+- Offering the user a choice between options you found (restaurants, products, flights): present_choices with exact excerpts from the pages you read — it is checked against them; opinions go in note. "Tell me when it changes / gets cheaper / is back in stock": watch_create (no schedule needed; for prices pass current_price = the price you saw, and tell the user the price the watch itself reports reading, not the one you saw). PDF forms from emails: load the pdf-forms skill.
 - For long waits (e.g. a support agent replying) use browser_wait.
+- Phone calls (phone_call, when available): load the phone-call skill first; every call needs the user's approval and costs money.
+- A link from an email that lands on an error page usually needs a session: go in through the company's home page and its own menu (My Booking / Sign in) instead of retrying the link. Before "retry later", make sure the site is really down (its home page fails too); never create a second schedule for the same job.
 - For recurring requests (every day / every week / every hour…), create a schedule with schedule_create.
 - Save durable facts the user explicitly asks you to remember with memory_remember.
 - When finished, stop calling tools and write the final answer: concise Markdown, what you did, key findings, and anything still waiting for the user. {lang}
@@ -216,13 +218,13 @@ Current time: {now_str(tz, language)}
 {language_rule(language)}"""
 
 
-PLANNER_SYSTEM = """You are the planning module of Locius, a personal agent with these tool families:
+PLANNER_SYSTEM = """You are the planning module of OMuse, a personal agent with these tool families:
 gmail (search/read/draft/send/reply/archive/label/unsubscribe), browser (navigate/snapshot/click/type/wait/takeover),
 files (workspace read/write/search, make_pdf, make_xlsx for Excel), memory (search/remember), schedules (recurring tasks), notify_user, delegate (sub-agents),
 calendar (Google Calendar: list events, find free time, create/update/delete events — writes need approval),
 notion (search/read/query database/create page/append/update), slack (channels/read/thread/search/send),
 automations: schedule_create (time-based), trigger_create ("when a new email/Slack message/Notion change arrives, do X"),
-goal_create (a long-running goal Locius keeps checking and pushing until achieved — use it when the user wants something
+goal_create (a long-running goal OMuse keeps checking and pushing until achieved — use it when the user wants something
 followed up over days, e.g. "until John replies", "keep … under …"),
 plus any MCP connectors the user added (tools named mcp_<server>__<tool>, e.g. Notion, Slack, GitHub — use tool_hint "mcp:<server>").
 
@@ -250,7 +252,7 @@ def planner_user(goal: str, history: str, facts: list[dict], state: str = "", re
 
 SUBAGENT_SYSTEM = """{lang_rule}
 
-You are a focused sub-agent of Locius with the role: {role}.
+You are a focused sub-agent of OMuse with the role: {role}.
 Complete only the assigned sub-task using your tools, then reply with a compact factual report (Markdown, include sources/URLs).
 You cannot send emails or submit forms; if something requires that, say so in your report.
 Current time: {now}

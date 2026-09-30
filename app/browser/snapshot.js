@@ -9,9 +9,24 @@
   // open shadow roots (chat widgets such as Tidio, many web components) are walked too
   const deepAll = sel => { const out = []; const visit = root => { root.querySelectorAll(sel).forEach(e => out.push(e));
     root.querySelectorAll('*').forEach(e => { if (e.shadowRoot) visit(e.shadowRoot); }); }; visit(document); return out; };
-  try { deepAll('[' + ATTR + ']').forEach(e => e.removeAttribute(ATTR)); } catch (e) {}
+  // Refs are STABLE while the page lives: an element keeps the ref it got in an earlier snapshot, and only new elements
+  // get new numbers. (Renumbering on every snapshot made single-page forms shift their refs after each keystroke, so the
+  // agent typed a name into the booking-number box.) Elements that are no longer shown lose their ref.
+  const PREV = 'data-persona-prev';
+  const KEY = '__personaRefMax_' + (prefix || 'main');
+  const used = new Set();
+  try { deepAll('[' + ATTR + ']').forEach(e => { e.setAttribute(PREV, e.getAttribute(ATTR)); e.removeAttribute(ATTR); }); } catch (e) {}
+  let maxN = window[KEY] || 0;
+  const nextRef = el => {
+    const old = el.getAttribute(PREV);
+    if (old && !used.has(old) && old.startsWith(prefix + 'e')) { used.add(old); return old; }
+    let r; do { r = prefix + 'e' + (++maxN); } while (used.has(r));
+    used.add(r);
+    return r;
+  };
   const clean = s => (s || '').replace(/\s+/g, ' ').trim();
   const cut = (s, k) => { s = clean(s); return s.length > k ? s.slice(0, k) + '…' : s; };
+  const SR_ONLY = /(^|\s)(a-offscreen|sr-only|visually-?hidden|visuallyhidden|screen-reader-text|screenreader-only|offscreen)(\s|$)/i;
   const SKIP = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'SVG', 'CANVAS', 'IFRAME', 'OBJECT', 'EMBED', 'HEAD', 'META', 'LINK']);
   const visible = el => {
     try {
@@ -71,7 +86,7 @@
   const glue = s => (s || '').replace(PRICE_PIECES, '$1$2.$3');
   const flush = () => { const t = glue(clean(buf)); if (t) lines.push('  ' + cut(t, 400)); buf = ''; };
   const emitEl = el => {
-    const ref = prefix + 'e' + (++n);
+    const ref = nextRef(el); n++;
     el.setAttribute(ATTR, ref);
     const role = roleOf(el);
     let line = `[${ref}] ${role} "${cut(glue(clean(nameOf(el))), 90)}"`;
@@ -111,7 +126,12 @@
       if (el.getAttribute('aria-hidden') === 'true') continue;
       if (!visible(el) && !['OPTION'].includes(el.tagName)) {
         // invisible containers can still hold visible fixed children; cheap check
-        if (el.children.length === 0 && !el.shadowRoot) continue;
+        if (el.children.length === 0 && !el.shadowRoot) {
+          // screen-reader-only text (Amazon's a-offscreen price, sr-only labels): hidden from the eye, but it IS the page's
+          // text — often the only readable copy of a price whose visible pieces are aria-hidden
+          if (SR_ONLY.test(typeof el.className === 'string' ? el.className : '') && getComputedStyle(el).display !== 'none') buf += ' ' + el.textContent;
+          continue;
+        }
         const r = el.getBoundingClientRect();
         if (r.width < 1 && r.height < 1 && getComputedStyle(el).display === 'none') continue;
       }
@@ -134,5 +154,7 @@
     }
   };
   try { walk(document.body || document.documentElement); flush(); } catch (e) { lines.push('(snapshot error: ' + e.message + ')'); }
+  window[KEY] = maxN;
+  try { deepAll('[' + PREV + ']').forEach(e => e.removeAttribute(PREV)); } catch (e) {}
   return lines.join('\n');
 }

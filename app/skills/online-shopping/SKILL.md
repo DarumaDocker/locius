@@ -26,6 +26,8 @@ description: 网购：搜索商品、用视觉挑选、加入购物车（不结�
 
 ## Comparing and watching
 - Showing several candidates: call present_choices(kind="comparison") with labels/prices copied exactly from the page
-  (e.g. from browser_find context). Locius checks them against what you read; put your opinion in note.
+  (e.g. from browser_find context). OMuse checks them against what you read; put your opinion in note.
 - "Tell me when it's cheaper / back in stock": watch_create(url=product page, mode="price_below", threshold=…, keyword=
-  product name) or mode="text", text="In stock". It notifies once per new drop; no need for a schedule.
+  a word from the product's own title, current_price=the price you saw) or mode="text", text="In stock". It notifies once
+  per new drop; no need for a schedule. The watch reads the page itself and says what it read — report THAT value to the
+  user; if it refuses (it read a different price), fix the keyword or say the page can't be watched reliably.

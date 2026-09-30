@@ -525,6 +525,9 @@ def test_web_watch_evaluate():
     assert w.prices("Price: S$ 31 . 43 x") == [31.43] and w.prices("S$31\n.43") == [31.43]     # split-up prices
     amz = "# SUPFINE Case " + "x" * 200 + "\nVisit the SUPFINE Store\n4.6\nS$31.43\n## Related\nSUPFINE Clear S$19.99"
     assert w.prices(amz, "supfine") == [31.43]                     # the item's price, not a related item's
+    page = ("Customers also viewed\nSUPFINE Clear S$19.99\n# SUPFINE Magnetic Case Deep Blue\n"
+            + "Colour Name: Deep Blue\n" + "bullet " * 300 + "\nS$31.43\n## Related\nSUPFINE Stand S$29.18")
+    assert w.prices(page, "SUPFINE") == [31.43]                    # the price after the page's title heading
     assert w.prices("SUPFINE " + "y" * 587 + "S$31.43", "SUPFINE") == []   # never read a price cut at the window edge
     with pytest.raises(w.WatchError):
         w.evaluate({"mode": "price_below", "threshold": "20", "keyword": "zebra"}, "Aurora S$18", "t", "u", None)
@@ -592,3 +595,62 @@ def test_grounded_choices(tmp_path):
     rt._remember("t1", "browser_navigate", {"url": "https://shop.test/s?k=otter", "snapshot": f'[e3] link "{longname[:88]}…"\n  S$50.15'})
     assert rt._check_choices("t1", [{"label": longname, "details": ["S$50.15"], "source_url": "https://shop.test/s"}]) == []
     assert rt._check_choices("t1", [{"label": "OtterBox Commuter Series", "details": ["S$50.15"], "source_url": "https://shop.test/s"}])
+
+
+def test_deep_link_hint_and_duplicate_schedules():
+    from app.runtime.agent import deep_link_hint, same_schedule
+    h = deep_link_hint("https://aswbe.ana.co.jp/webapps/servicing/booking-search?CONNECTION_KIND=SGP&LANG=en",
+                       "https://aswbe.ana.co.jp/webapps/servicing/common/system-error", "Information")
+    assert "home page" in h and "NOT mean" in h
+    assert deep_link_hint("https://shop.test/p/1", "https://shop.test/p/1", "Error") == ""       # no redirect
+    assert deep_link_hint("https://a.test/x", "https://a.test/y", "Welcome") == ""               # ordinary redirect
+    assert deep_link_hint("https://a.test/x", "https://a.test/login?session_expired=1", "Sign in")
+    rows = [{"id": "s1", "enabled": 1, "name": "ANA 选座重试", "goal": "为 ANA 预订 DERKAI 的三位乘客选座。背景：……"},
+            {"id": "s2", "enabled": 0, "name": "old", "goal": "something else entirely, long enough"}]
+    assert same_schedule(rows, "ANA选座 第2次", "为 ANA 预订 DERKAI 的三位乘客选座 背景……")["id"] == "s1"
+    assert same_schedule(rows, "ANA 选座重试", "different goal text here")["id"] == "s1"
+    assert same_schedule(rows, "old", "something else entirely, long enough") is None            # disabled ones don't count
+    assert same_schedule(rows, "new", "每天早上 9 点把新邮件摘要发给我") is None
+
+
+def test_retype_guard():
+    import json as _j
+    from app.runtime.agent import retype_guard
+
+    def tr(*calls):
+        return [{"role": "assistant", "tool_calls": [{"id": f"c{i}", "function": {"name": n, "arguments": _j.dumps(a)}}
+                                                      for i, (n, a) in enumerate(calls)]}]
+    t = tr(("browser_navigate", {"url": "https://www.ana.co.jp/en/sg/"}), ("browser_type", {"ref": "e37", "text": "DERKAI"}),
+           ("browser_type", {"ref": "e37", "text": "LIANG"}))
+    msg = retype_guard(t, {"id": "c2", "name": "browser_type", "args": {"ref": "e37", "text": "LIANG"}})
+    assert msg and "DERKAI" in msg and "e37" in msg                                   # the ANA mix-up is caught
+    assert retype_guard(t, {"id": "c2", "name": "browser_type", "args": {"ref": "e37", "text": "LIANG", "replace": True}}) is None
+    t2 = tr(("browser_type", {"ref": "e37", "text": "DERKAI"}), ("browser_type", {"ref": "e38", "text": "LIANG"}))
+    assert retype_guard(t2, {"id": "c1", "name": "browser_type", "args": {"ref": "e38", "text": "LIANG"}}) is None
+    t3 = tr(("browser_type", {"ref": "e5", "text": "cats"}), ("browser_navigate", {"url": "https://x.test"}),
+            ("browser_type", {"ref": "e5", "text": "dogs"}))
+    assert retype_guard(t3, {"id": "c2", "name": "browser_type", "args": {"ref": "e5", "text": "dogs"}}) is None   # new page
+
+
+def test_refusal_hint():
+    from app.runtime.agent import refusal_hint
+    busy = "# ご案内 / Information\nただいま大変混み合っているか、コンピュータの調整中です。\nYour request cannot be accepted at this time due to heavy traffic"
+    h = refusal_hint("https://www.ana.co.jp/other/int/meta/0160.html", "Information", busy, submitted=True)
+    assert "REFUSED" in h and "Don't schedule retries" in h
+    assert refusal_hint("https://aswbe.ana.co.jp/webapps/servicing/common/system-error", "Information", "", False)
+    assert refusal_hint("https://shop.test/p/1", "Aurora case", "Price S$25.00 Add to cart", True) == ""
+
+
+def test_phone_number_rules_and_brief():
+    from app.sentinel import phone
+    cfg = {"allowed_prefixes": ["+65", "+1"], "from_number": "+19793471777", "owner_name": "Lucas Lu"}
+    assert phone.check_number("+65 6123-4567", cfg) == ("+6561234567", "")
+    assert phone.check_number("0065 6123 4567", cfg)[0] == "+6561234567"
+    for bad in ("911", "999", "995", "112", "12345", "6123 4567", "+44 20 7946 0000", "+1 900 555 0100", "+1 979 347 1777"):
+        assert phone.check_number(bad, cfg)[0] == "", bad
+    call = {"purpose": "Book a table for 2 at 7pm", "may_share": "Name: Lucas Lu", "language": "日本語"}
+    s = phone.session_config(call, {**cfg, "voice": "cedar"})
+    assert s["audio"]["input"]["format"]["type"] == "audio/pcmu" and s["audio"]["output"]["voice"] == "cedar"
+    ins = s["instructions"]
+    assert "Book a table for 2" in ins and "on behalf of Lucas Lu" in ins and "日本語" in ins and "not instructions" in ins
+    assert {t["name"] for t in s["tools"]} == {"end_call", "press_keys"}

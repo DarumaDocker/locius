@@ -27,19 +27,20 @@ from app.sentinel.catalog import TOOLS, llm_schemas
 from app.sentinel.policy import ALLOW, ASK, DENY, decide
 from app.sentinel.store import Store
 from app.sentinel.telegram_bot import TelegramBot
+from app.sentinel import phone
 
 SDATA = os.environ.get("SENTINEL_DATA", "/sdata")
 RUNTIME_URL = os.environ.get("RUNTIME_URL", "http://127.0.0.1:8081")
 RUNTIME_TOKEN = os.environ.get("RUNTIME_TOKEN", "")
 WEB_DIR = os.environ.get("WEB_DIR", os.path.join(os.path.dirname(os.path.dirname(__file__)), "web"))
 SHOTS = os.path.join(SDATA, "shots")
-EDITABLE = {"gmail_send": ["to", "cc", "subject", "body"], "gmail_reply": ["to", "cc", "subject", "body"],
+EDITABLE = {"phone_call": ["purpose"], "gmail_send": ["to", "cc", "subject", "body"], "gmail_reply": ["to", "cc", "subject", "body"],
             "gmail_create_draft": ["to", "cc", "subject", "body"], "gmail_forward": ["to", "note"],
             "browser_type": ["text"], "browser_click_at": ["text"], "gmail_unsubscribe": ["message_ids"], "slack_send_message": ["text"],
             "notion_create_page": ["title", "content"], "notion_append": ["content"],
             "calendar_create_event": ["title", "start", "end", "location", "description"],
             "calendar_update_event": ["title", "start", "end", "location", "description"]}
-CONNECTORS = ("gmail", "browser", "telegram", "notion", "slack", "calendar")
+CONNECTORS = ("gmail", "browser", "telegram", "notion", "slack", "calendar", "phone")
 SCOPE_TTL = {"SESSION": 8 * 3600, "PERMANENT": None, "TASK": None}
 
 store: Store = None  # type: ignore
@@ -62,14 +63,26 @@ async def lifespan(app):
     bot = TelegramBot(store, RUNTIME_URL, resolve_core)
     if os.environ.get("TELEGRAM_BOT", "1") != "0":
         bot.start()
+    voice_server = None
+    if os.environ.get("VOICE_PORT", "8083") != "0":
+        import uvicorn
+        from app.sentinel import voice_app
+        voice_app.STATE["store"] = store
+        voice_server = uvicorn.Server(uvicorn.Config(voice_app.app, host="0.0.0.0", port=int(os.environ.get("VOICE_PORT", "8083")),
+                                                     proxy_headers=True, forwarded_allow_ips="*", log_level="warning",
+                                                     ws_max_size=1 << 20))
+        voice_server.install_signal_handlers = lambda: None
+        asyncio.create_task(voice_server.serve())
     yield
+    if voice_server:
+        voice_server.should_exit = True
     await bot.stop()
     for sid in list(mcp_hub._sessions):
         await mcp_hub._drop(sid)
     await proxy_client.aclose()
 
 
-app = FastAPI(lifespan=lifespan, title="Locius Sentinel")
+app = FastAPI(lifespan=lifespan, title="OMuse Sentinel")
 
 
 # ================================================================== auth helpers
@@ -153,6 +166,8 @@ async def catalog():
             ready = ready and gmail_ready()
         if name == "telegram":
             ready = ready and store.has_secret("cred_telegram_1") and bool(c["config"].get("chat_id"))
+        if name == "phone":
+            ready = ready and phone.ready(store)
         if ready:
             enabled.add(name)
         status[name] = {"ready": bool(ready), "permissions": c["permissions"],
@@ -307,6 +322,19 @@ async def _summary(tool: str, args: dict, elem: dict | None, page: dict | None) 
         s["fields"] = [["发件账号 From", _from_account(tool, args)], ["收件人 To", args.get("to", "")],
                        ["抄送 Cc", args.get("cc", "")], ["主题 Subject", args.get("subject", "")]]
         s["body"] = args.get("body", "")
+    elif tool == "phone_call":
+        cfg = phone.config(store)
+        n, why = phone.check_number(str(args.get("to", "")), cfg)
+        mins = max(1, min(int(args.get("max_minutes") or cfg["max_minutes"]), cfg["max_minutes"]))
+        s["title"] = "打电话 Phone call"
+        s["fields"] = [["拨打 To", n or str(args.get("to", ""))], ["来电显示 From", cfg["from_number"]],
+                       ["可以告诉对方 May share", args.get("may_share") or "（无 nothing）"],
+                       ["语言 Language", args.get("language") or "跟随对方 match them"],
+                       ["最长 Max", f"{mins} 分钟 min"],
+                       ["今天已拨 Calls today", f"{phone.calls_today(store)} / {cfg['daily_limit']}"]]
+        s["body"] = args.get("purpose", "")
+        if why:
+            s["warning"] = why
     elif tool == "gmail_forward":
         s["title"] = "转发邮件 Forward email"
         s["fields"] = [["发件账号 From", _from_account(tool, args)], ["转发给 To", args.get("to", "")],
@@ -462,7 +490,7 @@ async def act(req: Request):
         if bot and bot.config():
             asyncio.create_task(_safe(bot.send_approval(ap)))
         else:
-            asyncio.create_task(notify_phone(f"Locius 需要你审批 Approval needed：{summary.get('title')}\n"
+            asyncio.create_task(notify_phone(f"OMuse 需要你审批 Approval needed：{summary.get('title')}\n"
                                              f"{d.destination or ''}\n{d.reason}"))
         return {"status": "approval_required", "approval_id": ap["id"], "summary": summary, "reason": d.reason}
     # ALLOW
@@ -486,7 +514,7 @@ async def _run(tool: str, args: dict, task_id: str, risk: str, detail: dict, dec
             if bot and bot.config():
                 asyncio.create_task(_safe(bot.send_takeover(str(args.get("reason", "")))))
             else:
-                asyncio.create_task(notify_phone(f"Locius 请求你接管浏览器 Takeover requested：{args.get('reason', '')}"))
+                asyncio.create_task(notify_phone(f"OMuse 请求你接管浏览器 Takeover requested：{args.get('reason', '')}"))
         return {"status": e.status, "error": str(e)}
     except Exception as e:  # unexpected
         store.audit("sentinel", tool, task_id=task_id, resource=t["connector"], risk=risk, decision=decision,
@@ -637,6 +665,8 @@ async def save_conn(name: str, req: Request):
                                                           "team", "user", "user_id", "token_type")}
         if name == "calendar":
             cfg = {k: v for k, v in cfg.items() if k == "time_zone"}
+        if name == "phone":
+            cfg = _phone_cfg(cfg)
         if name == "browser":
             for k in ("blocked_domains", "allowed_domains"):
                 if k in cfg and isinstance(cfg[k], str):
@@ -645,6 +675,76 @@ async def save_conn(name: str, req: Request):
     store.audit("user", "connection.update", resource=name, result="success",
                 detail={"permissions": c["permissions"], "enabled": c["enabled"]})
     return _conn_view(name)
+
+
+# ------------------------------------------------------------------ phone (Telnyx + OpenAI Realtime)
+def _phone_cfg(b: dict) -> dict:
+    out = {}
+    for k in ("from_number", "connection_id", "owner_name", "voice", "model"):
+        if k in b and b[k] is not None:
+            out[k] = str(b[k]).strip()[:200]
+    if "from_number" in out:
+        out["from_number"] = phone.normalize(out["from_number"])
+    if b.get("public_url") is not None:
+        u = str(b["public_url"]).strip().rstrip("/")
+        if u and not phone.public_ok(u):
+            raise HTTPException(400, "公开地址必须以 https:// 开头 (public URL must start with https://)")
+        out["public_url"] = u.split("/voice")[0]
+    if b.get("allowed_prefixes") is not None:
+        v = b["allowed_prefixes"]
+        v = v if isinstance(v, list) else str(v).replace("\n", ",").split(",")
+        out["allowed_prefixes"] = [("+" + x.strip().lstrip("+")) for x in v if x.strip().lstrip("+").isdigit()][:20]
+    for k, lo, hi in (("max_minutes", 1, phone.MAX_MINUTES_CAP), ("daily_limit", 1, 100)):
+        if b.get(k) not in (None, ""):
+            try:
+                out[k] = max(lo, min(int(b[k]), hi))
+            except (TypeError, ValueError):
+                raise HTTPException(400, f"{k} 必须是数字 (must be a number)")
+    return out
+
+
+@app.post("/sentinel/api/connections/phone/credential", dependencies=[Depends(ui_auth)])
+async def phone_cred(req: Request):
+    b = await req.json()
+    old = store.get_secret("cred_phone_1") or {}
+    sec = dict(old)
+    for k in ("telnyx_api_key", "openai_api_key", "telnyx_public_key"):
+        v = str(b.get(k) or "").strip()
+        if v:
+            sec[k] = v
+    if not (sec.get("telnyx_api_key") and sec.get("openai_api_key")):
+        raise HTTPException(400, "需要 Telnyx API Key 和 OpenAI API Key (both keys are required)")
+    store.put_secret("phone", sec)
+    store.save_connection("phone", _phone_cfg(b), permissions={"call": True}, enabled=True)
+    checks = await phone.test_setup(store)
+    store.audit("user", "credential.phone.set", resource="phone", result="success", detail={"checks": checks})
+    return {"ok": True, "checks": checks, "ready": phone.ready(store), "connection": _conn_view("phone")}
+
+
+@app.post("/sentinel/api/connections/phone/test", dependencies=[Depends(ui_auth)])
+async def phone_test():
+    return {"checks": await phone.test_setup(store), "ready": phone.ready(store)}
+
+
+@app.get("/sentinel/api/phone/calls", dependencies=[Depends(ui_auth)])
+async def phone_calls(limit: int = 20):
+    return {"calls": phone.list_calls(store, max(1, min(limit, 100)))}
+
+
+@app.post("/sentinel/api/phone/test_call", dependencies=[Depends(ui_auth)])
+async def phone_test_call(req: Request):
+    """A short test call you start yourself from the Connections page (you clicked it, so no approval card)."""
+    b = await req.json()
+    lang = str(b.get("language") or "").strip()
+    try:
+        r = await phone.start_call(store, {"to": b.get("to", ""), "max_minutes": 2, "language": lang,
+                                           "purpose": "This is a short test call of OMuse's phone feature to its owner. Greet them, say "
+                                                      "you are OMuse testing the phone line, ask them to say a sentence, repeat back "
+                                                      "what you heard, then say goodbye and end the call with outcome done."}, "")
+    except phone.PhoneError as e:
+        raise HTTPException(400, str(e))
+    store.audit("user", "phone.test_call", resource=r["to"], result="success", detail={"call_id": r["call_id"]})
+    return r
 
 
 @app.post("/sentinel/api/connections/gmail/credential", dependencies=[Depends(ui_auth)])
@@ -716,8 +816,8 @@ async def telegram_cred(req: Request):
         if bot:
             bot.status["username"] = ""
     try:
-        await actions.telegram_send(store, "✅ Locius 已连接 Telegram。直接给我发消息就能布置任务，发 /help 查看用法。\n"
-                                           "Connected — message me to give Locius a task, /help for commands.")
+        await actions.telegram_send(store, "✅ OMuse 已连接 Telegram。直接给我发消息就能布置任务，发 /help 查看用法。\n"
+                                           "Connected — message me to give OMuse a task, /help for commands.")
     except ActionError as e:
         store.audit("user", "credential.telegram.set", resource="telegram", result="failed", detail={"error": str(e)})
         raise HTTPException(400, str(e))
@@ -823,10 +923,10 @@ async def calendar_start(req: Request):
 def _cal_page(ok: bool, msg: str) -> Response:
     from html import escape
     color = "#1F6F5C" if ok else "#B42318"
-    body = (f"<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'><title>Locius</title>"
+    body = (f"<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'><title>OMuse</title>"
             f"<body style='font-family:system-ui;padding:40px;max-width:560px;margin:auto'><h2 style='color:{color}'>"
             f"{'✓' if ok else '✗'} Google Calendar</h2><p>{escape(msg)}</p><p><a href='../../../../#connections'>"
-            f"返回 Locius 连接页 Back to Connections</a></p>"
+            f"返回 OMuse 连接页 Back to Connections</a></p>"
             + ("<script>setTimeout(()=>location.href='../../../../#connections',1500)</script>" if ok else "") + "</body>")
     return Response(body, media_type="text/html", headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
 
@@ -1040,7 +1140,7 @@ async def delete_cred(name: str):
     if name == "calendar":
         store.delete_secret("cred_calendar_access")
         store.delete_secret("cred_calendar_client")
-    if name in ("notion", "slack", "calendar"):
+    if name in ("notion", "slack", "calendar", "phone"):
         store.save_connection(name, enabled=False)
     store.audit("user", f"credential.{name}.delete", resource=name, result="success")
     return {"ok": True}

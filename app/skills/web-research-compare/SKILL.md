@@ -13,4 +13,4 @@ description: 网页调研并做对比（如酒店、产品）Research several op
 
 ## Presenting the comparison
 - For a pick-one decision, also call present_choices(kind="comparison") with exact excerpts (names, prices, specs) from the
-  pages you read and their source_url. Locius refuses details it can't find in those pages — copy, don't paraphrase.
+  pages you read and their source_url. OMuse refuses details it can't find in those pages — copy, don't paraphrase.

@@ -477,7 +477,7 @@ class Gmail:
             if ok:
                 try:
                     with httpx.Client(timeout=20, follow_redirects=True, max_redirects=5,
-                                      headers={"User-Agent": "Locius-Unsubscribe/1.0"}) as c:
+                                      headers={"User-Agent": "OMuse-Unsubscribe/1.0"}) as c:
                         resp = c.post(u["https"], data={"List-Unsubscribe": "One-Click"})
                     if resp.status_code < 400:
                         return {"status": "done", "via": "one-click", "note": f"已一键退订 ({domain_of(u['https'])})"}
@@ -506,7 +506,7 @@ class Gmail:
             if ok:
                 try:
                     with httpx.Client(timeout=20, follow_redirects=True, max_redirects=5,
-                                      headers={"User-Agent": "Mozilla/5.0 Locius-Unsubscribe/1.0"}) as c:
+                                      headers={"User-Agent": "Mozilla/5.0 OMuse-Unsubscribe/1.0"}) as c:
                         resp = c.get(u["https"])
                     if resp.status_code < 400:
                         return {"status": "link_opened", "via": "link",

@@ -42,7 +42,7 @@ check("catalog status lists MCP server", cat["connections"]["mcp"]["servers"][0]
 
 # --- calls
 res = act("mcp_notes__notes_search", {"query": "q3"})
-check("read tool runs without approval (SSE response parsed)", res.get("status") == "ok" and "Locius 0.2" in str(res), res)
+check("read tool runs without approval (SSE response parsed)", res.get("status") == "ok" and "OMuse 0.2" in str(res), res)
 check("result wrapped as untrusted", res.get("result", {}).get("trust") == "untrusted")
 res = act("mcp_notes__notes_create", {"title": "t", "text": "x"})
 check("write tool needs approval", res.get("status") == "approval_required", res)
