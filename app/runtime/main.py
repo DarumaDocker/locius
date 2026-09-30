@@ -172,7 +172,7 @@ async def schedules():
         st = x["state"] or {}
         x["describe"] = describe(x)
         x["state"] = {k: v for k, v in st.items() if not str(k).startswith("_")}
-        x["trigger"] = {k: st.get(k) for k in ("_error", "_error_at", "_checked", "_last_events") if st.get(k) is not None}
+        x["trigger"] = {k: st.get(k) for k in ("_error", "_error_at", "_checked", "_seen", "_last_events") if st.get(k) is not None}
         last = rt.store.task(x["last_task"]) if x.get("last_task") else None
         x["last_status"] = last["status"] if last else ""
         x["blocked"] = {k[1:]: st[k] for k in ("_skipped", "_superseded") if st.get(k)}

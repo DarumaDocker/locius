@@ -892,7 +892,9 @@ class Runtime:
                 problems.append(f"option {i} ({label}): {url} was not read in this task — open/read it first")
                 continue
             blob = self._norm("\n".join(texts))
-            if self._norm(label) not in blob:
+            nl = self._norm(label)
+            # long product names are shortened on the page/snapshot ("…"): the first 60 characters, exactly, are enough
+            if nl not in blob and not (len(nl) > 60 and nl[:60] in blob):
                 problems.append(f"option {i}: label \"{label}\" is not on {url} — copy the exact name from the page")
             for d in details:
                 if self._norm(d) not in blob:
@@ -1281,15 +1283,45 @@ class Runtime:
             spec = {"source": "web.page", "params": params, "every": every, "action": "run" if then else "notify"}
             goal = then or f"(notify only) {a.get('name', '')}"
             try:
+                from app.runtime.scheduler import event_spec
+                event_spec(dumps(spec))
+            except ValueError as e:
+                return f"ERROR: {e}"
+            # read the page once right now: the baseline, and proof that the watch can actually see what it watches
+            try:
+                base = await self.sentinel("POST", "/internal/watch", {"source": "web.page", "params": params, "cursor": None},
+                                           timeout=120)
+            except Exception as e:
+                base = {"error": f"{type(e).__name__}: {e}"}
+            if base.get("error"):
+                return (f"ERROR: 监控没有建立 — 第一次读取页面就失败了 the watch was NOT created, the first read of the page failed: "
+                        f"{truncate(str(base['error']), 400)}\n"
+                        "Fix it and call watch_create again (e.g. a keyword that appears right before the price on the page, "
+                        "such as a word from the product title; or the product page's own URL), or tell the user it can't be watched.")
+            cur = base.get("cursor") if isinstance(base.get("cursor"), dict) else {}
+            state = {"_cursor": cur, "_checked": time.strftime("%Y-%m-%d %H:%M")}
+            if cur.get("seen"):
+                state["_seen"] = truncate(str(cur["seen"]), 200)
+            try:
                 sch = create_schedule(self.store, str(a["name"]), goal, "event", dumps(spec), self.store.settings()["timezone"])
             except ValueError as e:
                 return f"ERROR: {e}"
-            self.store.db.execute("UPDATE schedules SET next_run=? WHERE id=?", (time.time(), sch["id"]))   # baseline now
+            self.store.db.execute("UPDATE schedules SET state=?, next_run=? WHERE id=?",
+                                  (dumps(state), time.time() + every * 60, sch["id"]))
             await self.publish({"kind": "schedule_update"})
             await self.audit("executor", "watch.create", tid, resource=sch["id"], detail={"name": sch["name"], "spec": sch["spec"]})
-            return (f"已创建网页监控 watch created: id={sch['id']}，每 {every:g} 分钟检查一次。第一次只记录当前内容作为基准，之后有新变化才提醒 "
-                    f"(the first check saves a baseline; you'll be told about new changes only). "
-                    f"{'触发时会运行任务 runs a task when it fires' if then else '触发时只发通知 notifies only'}.")
+            seen = cur.get("seen")
+            met_now = ""
+            if params["mode"] == "price_below" and cur.get("met"):
+                met_now = (" ⚠️ 现在的价格已经低于阈值，所以不会提醒（只在“新变成满足”时提醒）— tell the user, or pick a lower "
+                           "threshold. The price is ALREADY below the threshold, so no alert will come unless it drops further.")
+            elif params["mode"] == "text" and cur.get("met"):
+                met_now = " ⚠️ 这段文字现在已经在页面上了 the text is already on the page now — no alert will come for it."
+            return (f"已创建网页监控 watch created: id={sch['id']}，每 {every:g} 分钟检查一次。"
+                    + (f"刚才读到 just read: 「{seen}」。请核对这是不是用户要盯的那个值 — check it is the value the user means "
+                       f"(if not, tell the user and fix the keyword). " if seen else "已记录当前页面作为基准 baseline saved. ")
+                    + "之后只有新变化才提醒 (only new changes alert). "
+                    + ("触发时会运行任务 runs a task when it fires." if then else "触发时只发通知 notifies only.") + met_now)
         if name == "goal_create":
             from app.runtime import goals as G
             try:

@@ -948,7 +948,7 @@ async function viewSchedules(root) {
     h('div', { class: 'row' }, h('b', { style: 'flex:1' }, (isTrig ? '⚡ ' : '⏰ ') + s.name),
       h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: !!s.enabled, onchange: safe(async e => { await api('schedules/' + s.id, { method: 'PUT', body: { enabled: e.target.checked } }); }) }), T('启用'))),
     h('div', { class: 'small' }, s.goal),
-    h('div', { class: 'small muted' }, isTrig ? `${schedDesc(s)}` + (s.trigger._checked ? Tf(" · 上次检查 {0}", (s.trigger._checked)) : '') + (s.last_run ? Tf(" · 上次触发 {0}", (fmtTime(s.last_run))) : '')
+    h('div', { class: 'small muted' }, isTrig ? `${schedDesc(s)}` + (s.trigger._checked ? Tf(" · 上次检查 {0}", (s.trigger._checked)) : '') + (s.trigger._seen ? Tf(" · 读到 {0}", (s.trigger._seen)) : '') + (s.last_run ? Tf(" · 上次触发 {0}", (fmtTime(s.last_run))) : '')
       : Tf("{0} · {1} · 下次 next: {2} · 上次 last: {3}", (schedDesc(s)), (s.tz), (fmtTime(s.next_run)), (fmtTime(s.last_run) || '—'))),
     isTrig && s.trigger._error ? h('div', { class: 'small', style: 'color:var(--danger)' }, '⚠️ ' + B(s.trigger._error)) : null,
     schedNotice(s),

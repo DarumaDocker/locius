@@ -2,6 +2,7 @@
 window.LOCIUS_EN = {
 " · ⏳ 截止 {0}": " · ⏳ Due {0}",
 " · 上次检查 {0}": " · Last checked {0}",
+" · 读到 {0}": " · Read {0}",
 " · 上次触发 {0}": " · Last fired {0}",
 " · 下次检查 {0}": " · Next check {0}",
 " · 机器人": " · Bot",

@@ -153,21 +153,53 @@ def page_text(snapshot: str) -> str:
     return "\n".join(lines)
 
 
-def prices(text: str, keyword: str = "") -> list[float]:
-    spans = [text]
-    if keyword:
-        low = text.lower()
-        spans = [text[i:i + 250] for i in [m.start() for m in re.finditer(re.escape(keyword.lower()), low)]]
-    out = []
-    for sp in spans:
-        for m in _PRICE.finditer(sp):
+_CUR = r"(?:S\$|US\$|HK\$|A\$|C\$|RM|SGD|USD|HKD|RMB|CNY|¥|￥|€|£|\$)"
+# shops often draw a price as separate pieces ("S$ 31 . 43", "S$31\n.43", Amazon's "S$ 31 43"): glue them back
+_SPLIT = re.compile(r"(" + _CUR + r"\s?\d{1,3}(?:,\d{3})*|" + _CUR + r"\s?\d+)(?:\s+\.\s*|\s*\.\s+|\s+)(\d{2})(?![\d.,%])", re.I)
+KEYWORD_WINDOW = 600
+
+
+def _glue(text: str) -> str:
+    return _SPLIT.sub(lambda m: m.group(1) + "." + m.group(2), text)
+
+
+def price_hits(text: str, keyword: str = "") -> list[tuple[float, str]]:
+    """(value, what was read) for the prices on the page. With a keyword: only THE price of that item — the first
+    price after the first mention of the keyword that has one (later mentions are usually "related products")."""
+    text = _glue(text)
+
+    def hits(span: str, first_only: bool) -> list[tuple[float, str]]:
+        out = []
+        for m in _PRICE.finditer(span):
+            if first_only and len(span) >= KEYWORD_WINDOW and m.end() >= len(span) - 3:
+                break                                   # cut off at the window's edge: don't read "31.4" out of "31.43"
             try:
-                out.append(float(m.group(1).replace(",", "")))
+                out.append((float(m.group(1).replace(",", "")), m.group(0).strip()))
             except ValueError:
                 continue
-            if keyword:
-                break   # near a keyword: only the first price after it belongs to that item
-    return out
+            if first_only:
+                break
+        return out
+
+    if not keyword:
+        return hits(text, False)
+    low = text.lower()
+    for m in re.finditer(re.escape(keyword.lower()), low):
+        got = hits(text[m.start(): m.start() + KEYWORD_WINDOW], True)
+        if got:
+            return got
+    return []
+
+
+def prices(text: str, keyword: str = "") -> list[float]:
+    return [v for v, _ in price_hits(text, keyword)]
+
+
+def _around(text: str, needle: str, before: int = 70, after: int = 30) -> str:
+    i = text.find(needle)
+    if i < 0:
+        return ""
+    return re.sub(r"\s+", " ", text[max(0, i - before): i + len(needle) + after]).strip()
 
 
 def evaluate(params: dict, text: str, title: str, url: str, cursor: dict | None) -> tuple[list, dict]:
@@ -187,6 +219,7 @@ def evaluate(params: dict, text: str, title: str, url: str, cursor: dict | None)
         idx = text.lower().find(want.lower())
         met = idx >= 0
         cur["met"] = met
+        cur["seen"] = ("已出现 present: " if met else "还没有 not yet: ") + want[:60]
         if met and cursor is not None and not prev.get("met"):
             events.append({"url": url, "title": title, "condition": f"text appeared: {want}",
                            "excerpt": text[max(0, idx - 120): idx + len(want) + 200]})
@@ -195,18 +228,30 @@ def evaluate(params: dict, text: str, title: str, url: str, cursor: dict | None)
             limit = float(str(params.get("threshold") or "").replace(",", "").lstrip("$S"))
         except ValueError:
             raise WatchError("mode=price_below 需要数字阈值 threshold, e.g. 15")
-        found = prices(text, str(params.get("keyword") or ""))
-        low = min(found) if found else None
-        cur["low"], cur["met"] = low, bool(low is not None and low < limit)
+        kw = str(params.get("keyword") or "").strip()
+        got = price_hits(text, kw)
+        if not got:
+            other = sorted({v for v, _ in price_hits(text)})[:8]
+            if kw:
+                raise WatchError(f"页面上“{kw}”附近没找到价格 (no price found after '{kw}')"
+                                 + (f"；页面上的其他价格 other prices on the page: {', '.join(f'{v:g}' for v in other)}" if other else
+                                    "；整个页面都没有价格（可能缺货、需要选款式，或网站换了页面）no price anywhere on the page"))
+            raise WatchError("页面上没找到价格（可能缺货、需要先选款式，或网站换了页面）no price found on the page")
+        found = [v for v, _ in got]
+        low = min(found)
+        glued = _glue(text)
+        read = min(got)[1]
+        shown = re.sub(r"\s+", "", read)
+        ctx = _around(glued, read, 60, 0)
+        cur["seen"] = shown + (f" · …{ctx[:-len(read)].strip()[-60:]}" if kw and ctx.endswith(read) else "")
+        cur["low"], cur["met"] = low, bool(low < limit)
         alerted = prev.get("alerted")
         if cur["met"] and cursor is not None and (not prev.get("met") or (alerted is not None and low < alerted)):
             cur["alerted"] = low
             events.append({"url": url, "title": title, "condition": f"price {low:g} < {limit:g}",
-                           "prices_seen": sorted(set(found))[:10]})
+                           "prices_seen": sorted(set(found))[:10], "excerpt": _around(glued, read, 110, 0)})
         elif cur["met"]:
             cur["alerted"] = alerted if alerted is not None else low
-        if not found:
-            cur["note"] = "no prices found on the page"
     else:
         if cursor is not None and prev.get("hash") and prev["hash"] != h:
             old = set(prev.get("lines") or [])

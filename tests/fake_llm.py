@@ -141,7 +141,10 @@ async def chat(req: Request):
                  "source_url": "http://shop.test:8099/shop.html", "note": "带支架"}]})])
         return reply("CHOICES DONE: " + last_tool[:400])
     if "WATCHPRICE" in goal:
-        if n == 0:
+        if n == 0:   # a keyword that isn't on the page: the watch must refuse to be created, and say what it saw
+            return reply("", [tc("watch_create", {"name": "Aurora case price", "url": "http://shop.test:8099/watch.html",
+                                                  "mode": "price_below", "threshold": 20, "keyword": "Zebra"})])
+        if n == 1:
             return reply("", [tc("watch_create", {"name": "Aurora case price", "url": "http://shop.test:8099/watch.html",
                                                   "mode": "price_below", "threshold": 20, "keyword": "Aurora"})])
         return reply("WATCH DONE: " + last_tool[:300])

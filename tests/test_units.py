@@ -522,6 +522,14 @@ def test_web_watch_evaluate():
     from app.sentinel import watchers as w
     assert w.prices("Aurora Case\nPrice: S$18.00\nOther: Basic S$12.90", "aurora") == [18.0]
     assert w.prices("A $1,299.00 B S$15.50") == [1299.0, 15.5]
+    assert w.prices("Price: S$ 31 . 43 x") == [31.43] and w.prices("S$31\n.43") == [31.43]     # split-up prices
+    amz = "# SUPFINE Case " + "x" * 200 + "\nVisit the SUPFINE Store\n4.6\nS$31.43\n## Related\nSUPFINE Clear S$19.99"
+    assert w.prices(amz, "supfine") == [31.43]                     # the item's price, not a related item's
+    assert w.prices("SUPFINE " + "y" * 587 + "S$31.43", "SUPFINE") == []   # never read a price cut at the window edge
+    with pytest.raises(w.WatchError):
+        w.evaluate({"mode": "price_below", "threshold": "20", "keyword": "zebra"}, "Aurora S$18", "t", "u", None)
+    ev, c = w.evaluate({"mode": "price_below", "threshold": "20", "keyword": "aurora"}, "Aurora case S$18", "t", "u", None)
+    assert "S$18" in c["seen"]
     assert "[e3]" not in w.page_text('[e3] link "Buy" → https://x.test/a\n# Title')
     p = {"mode": "price_below", "threshold": "20"}
     ev, c = w.evaluate(p, "S$18", "t", "u", None)
@@ -579,3 +587,8 @@ def test_grounded_choices(tmp_path):
     assert rt._check_choices("t1", [{"label": "X", "details": ["S$21.90"], "source_url": "https://elsewhere.test/"}])
     # a product link seen on a page that was read counts, checked against that page's text
     assert rt._check_choices("t1", [{"label": "Aurora Case", "details": ["4.4 out of 5 stars"], "source_url": "https://shop.test/p/7"}]) == []
+    # a long product name the page/snapshot shortened with "…": its first 60 characters, exactly, are enough
+    longname = "OtterBox Defender Series Pro XT Clear MagSafe Case for iPhone 17 Pro Max, Shockproof, Drop proof"
+    rt._remember("t1", "browser_navigate", {"url": "https://shop.test/s?k=otter", "snapshot": f'[e3] link "{longname[:88]}…"\n  S$50.15'})
+    assert rt._check_choices("t1", [{"label": longname, "details": ["S$50.15"], "source_url": "https://shop.test/s"}]) == []
+    assert rt._check_choices("t1", [{"label": "OtterBox Commuter Series", "details": ["S$50.15"], "source_url": "https://shop.test/s"}])

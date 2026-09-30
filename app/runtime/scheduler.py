@@ -296,6 +296,9 @@ class Scheduler:
             st.pop("_fails", None)
             st["_cursor"] = res.get("cursor")
             st["_checked"] = time.strftime("%Y-%m-%d %H:%M")
+            seen = (res.get("cursor") or {}).get("seen") if isinstance(res.get("cursor"), dict) else None
+            if seen:
+                st["_seen"] = truncate(str(seen), 200)
         events = res.get("events") or []
         if events:
             fired = [x for x in st.get("_fired", []) if x > time.time() - 3600]

@@ -82,16 +82,26 @@ watch = os.path.join(PAGES, "watch.html")
 
 
 def page(price):
-    with open(watch, "w") as f:
-        f.write(f"<!doctype html><title>Aurora case</title><h1>Aurora Glitter Case</h1><p>Price: S${price}</p>"
-                f"<p>Other: Basic Case S$12.90</p>")
+    whole, frac = price.split(".")
+    with open(watch, "w") as f:   # drawn the way big shops draw prices: symbol, whole and fraction in separate pieces
+        f.write(f"<!doctype html><meta charset=utf-8><title>Aurora case</title><h1>Aurora Glitter Case for iPhone 17 Pro Max</h1>"
+                f"<a href='/store'>Visit the Aurora Store</a><p>4.6 · 1,203 ratings</p>"
+                f"<p>Price: <span>S$</span><span>{whole}</span><span>.</span><span>{frac}</span></p>"
+                f"<p>Other: Basic Case S$12.90</p><h2>Related</h2><p>Aurora Mini Case S$9.90</p>")
 
 
 page("25.00")
 t, conv = run("WATCHPRICE tell me when the Aurora case is below S$20")
-check("watch: created by the agent", t["status"] == "COMPLETED" and "watch created" in (t.get("result") or ""), t.get("result"))
+wc = results(t, "watch_create")
+check("a keyword that isn't on the page -> no watch, and the agent is told what prices it did see",
+      wc and not wc[0]["ok"] and "NOT created" in wc[0]["preview"] and "25" in wc[0]["preview"], wc[:1])
+check("watch: created by the agent on the second try, reporting what it read",
+      t["status"] == "COMPLETED" and len(wc) > 1 and wc[1]["ok"] and "S$25.00" in wc[1]["preview"], wc[1:2])
 sch = [s for s in c.get(B + "/api/schedules", headers=H).json()["schedules"] if s["name"] == "Aurora case price"]
 check("it is a notify-only web watch", sch and "web.page" in sch[0]["spec"] and '"notify"' in sch[0]["spec"], sch)
+check("only one watch was made (the refused one left nothing behind)", len(sch) == 1, sch)
+check("the watch card shows what it read (S$25.00, not the related item's S$9.90)",
+      sch and "S$25.00" in (sch[0]["trigger"].get("_seen") or ""), sch[:1])
 sid = sch[0]["id"] if sch else ""
 
 
@@ -104,7 +114,7 @@ def notes():
 
 
 p1 = poll()
-check("first check only saves the baseline (no alert)", p1.get("ok") and not p1.get("fired") and not notes(), (p1, notes()))
+check("the next check sees the same price (no alert)", p1.get("ok") and not p1.get("fired") and not notes(), (p1, notes()))
 page("18.00")
 p2 = poll()
 check("price drops below the threshold -> one notification", p2.get("fired") and len(notes()) == 1 and "18" in notes()[0]["body"],

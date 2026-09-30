@@ -66,12 +66,15 @@
     return ty === 'password' || ac.startsWith('cc-') || ac.includes('password') || ac === 'one-time-code' || /(card.?num|cvv|cvc|ssn|passw|otp)/.test(nm);
   };
   let buf = '';
-  const flush = () => { const t = clean(buf); if (t) lines.push('  ' + cut(t, 400)); buf = ''; };
+  // prices drawn in pieces (Amazon: "S$ 24 67", others "S$ 24 . 67") -> "S$24.67", so they read (and quote) as one price
+  const PRICE_PIECES = /((?:[A-Z]{1,3})?\$|€|£|¥|￥|RM)\s?(\d{1,3}(?:,\d{3})+|\d+)(?:\s*\.\s+|\s+\.\s*|\s+)(\d{2})(?![\d.,%])/g;
+  const glue = s => (s || '').replace(PRICE_PIECES, '$1$2.$3');
+  const flush = () => { const t = glue(clean(buf)); if (t) lines.push('  ' + cut(t, 400)); buf = ''; };
   const emitEl = el => {
     const ref = prefix + 'e' + (++n);
     el.setAttribute(ATTR, ref);
     const role = roleOf(el);
-    let line = `[${ref}] ${role} "${cut(nameOf(el), 90)}"`;
+    let line = `[${ref}] ${role} "${cut(glue(clean(nameOf(el))), 90)}"`;
     const ph = el.getAttribute('placeholder');
     if (ph && !clean(nameOf(el)).includes(clean(ph))) line += ` placeholder="${cut(ph, 60)}"`;
     if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
