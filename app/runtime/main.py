@@ -5,6 +5,7 @@ import asyncio
 import json
 import mimetypes
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 
@@ -323,17 +324,51 @@ async def run_schedule(sid: str):
 # ------------------------------------------------------------------ memory
 @app.get("/api/memory")
 async def memory():
-    return {"facts": rt.store.facts(), "episodes": rt.store.episodes(50)}
+    from app.runtime import memory_tidy as MT
+    from app.runtime.store import PROFILE_FIELDS
+    st = rt.store
+    runs = [{"id": r["id"], "ts": r["ts"], "kind": r["kind"], "lines": (r["report"] or {}).get("lines") or [],
+             "errors": (r["report"] or {}).get("errors") or [], "applied": (r["report"] or {}).get("applied")}
+            for r in st.memory_runs(10)]
+    return {"facts": st.facts(), "recent": st.facts(1000, tier="recent"), "episodes": st.episodes(50),
+            "profile": st.profile(), "profile_fields": [{"key": k, "zh": zh, "en": en} for k, zh, en in PROFILE_FIELDS],
+            "pending": st.profile_pending(), "runs": runs, "job": MT.job_state(),
+            "needs_first_review": MT.needs_first_review(st),
+            "settings": {k: st.settings().get(k) for k in ("memory_consolidation", "memory_consolidate_at", "memory_extraction")}}
 
 
 @app.post("/api/memory")
 async def add_memory(req: Request):
+    from app.runtime.store import looks_sensitive
     b = await req.json()
-    r = rt.store.add_fact(str(b.get("fact", "")), str(b.get("category") or "preference"), str(b.get("entity") or ""),
-                          source="user-ui", confidence=1.0)
+    fact = str(b.get("fact", ""))
+    if looks_sensitive(fact):
+        raise HTTPException(400, "证件号、卡号和密码请放进保险箱 (ID / card numbers and passwords belong in the vault)")
+    r = rt.store.add_fact(fact, str(b.get("category") or "preference"), str(b.get("entity") or ""),
+                          source="user-ui", confidence=1.0, tier="recent" if b.get("tier") == "recent" else "long")
     if not r:
         raise HTTPException(400, "empty fact")
     await rt.audit("user", "memory.add", detail={"fact": r["fact"]})
+    return r
+
+
+@app.put("/api/memory/{fid}")
+async def edit_memory(fid: str, req: Request):
+    from app.runtime.store import looks_sensitive
+    b = await req.json()
+    kw = {}
+    if isinstance(b.get("fact"), str) and b["fact"].strip():
+        if looks_sensitive(b["fact"]):
+            raise HTTPException(400, "证件号、卡号和密码请放进保险箱 (ID / card numbers and passwords belong in the vault)")
+        kw["fact"] = b["fact"].strip()[:500]
+    if b.get("tier") in ("long", "recent"):
+        kw["tier"] = b["tier"]
+    if isinstance(b.get("category"), str):
+        kw["category"] = b["category"][:30]
+    r = rt.store.update_fact(fid, **kw)
+    if not r:
+        raise HTTPException(404, "not found")
+    await rt.audit("user", "memory.edit", resource=fid, detail={k: v for k, v in kw.items()})
     return r
 
 
@@ -342,6 +377,53 @@ async def del_memory(fid: str):
     rt.store.delete_fact(fid)
     await rt.audit("user", "memory.forget", resource=fid)
     return {"ok": True}
+
+
+@app.put("/api/profile")
+async def set_profile(req: Request):
+    """The user's own edit on the Memory page (this is the confirmation)."""
+    from app.runtime.store import looks_sensitive, profile_key
+    b = await req.json()
+    key, val = profile_key(str(b.get("key", ""))), str(b.get("value") or "")
+    if not key:
+        raise HTTPException(400, "unknown field")
+    if looks_sensitive(val):
+        raise HTTPException(400, "证件号、卡号和密码请放进保险箱 (ID / card numbers and passwords belong in the vault)")
+    rt.store.set_profile(key, val, source="user-ui")
+    await rt.audit("user", "profile.set", resource=key)
+    return {"profile": rt.store.profile()}
+
+
+@app.post("/api/profile/pending/{pid}")
+async def resolve_profile(pid: str, req: Request):
+    b = await req.json()
+    val = b.get("value")
+    r = rt.store.resolve_profile(pid, bool(b.get("accept")), str(val) if isinstance(val, str) and val.strip() else None)
+    if not r:
+        raise HTTPException(409, "already resolved")
+    await rt.audit("user", "profile.accept" if r["status"] == "accepted" else "profile.reject", resource=r["key"])
+    await publish({"kind": "memory_update"})
+    return r
+
+
+@app.post("/api/memory/consolidate")
+async def consolidate(req: Request):
+    """{dry_run: true} → preview; {from_run: <id>} → apply that preview exactly; {} → plan and apply now."""
+    from app.runtime import memory_tidy as MT
+    b = await req.json()
+    from_run = int(b["from_run"]) if str(b.get("from_run") or "").isdigit() else None
+    ok = MT.start(rt, dry_run=bool(b.get("dry_run")) and not from_run, kind="manual", from_run=from_run)
+    if not ok:
+        raise HTTPException(409, "正在整理中 (a tidy run is already in progress)")
+    return {"started": True}
+
+
+@app.get("/api/memory/runs/{rid}")
+async def memory_run(rid: int):
+    r = next((x for x in rt.store.memory_runs(50) if x["id"] == rid), None)
+    if not r:
+        raise HTTPException(404, "not found")
+    return r
 
 
 # ------------------------------------------------------------------ notifications
@@ -365,6 +447,8 @@ async def get_settings():
 @app.put("/api/settings")
 async def put_settings(req: Request):
     b = await req.json()
+    if "memory_consolidate_at" in b and not re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", str(b["memory_consolidate_at"]).strip()):
+        raise HTTPException(400, "整理时间格式应为 HH:MM (time must be HH:MM)")
     s = rt.store.set_settings(b)
     await rt.audit("user", "settings.update", detail={k: v for k, v in b.items() if k != "extra_body"})
     return {"settings": s}

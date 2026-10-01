@@ -309,10 +309,24 @@ async def _browser(store, tool: str, args: dict, task_id: str) -> dict:
     if action == "request_takeover":
         await broker("POST", "/agent/request_takeover", {"task_id": task_id, "reason": args.get("reason", "")})
         raise ActionError(f"已请求用户接管浏览器：{args.get('reason', '')}", status="waiting_user")
+    from app.sentinel import vault
+    if action in ("look", "locate") and vault.filled_here(task_id, await _task_url(task_id)):
+        raise ActionError("这个页面上已经填了保险箱里的号码，为保护隐私不能截图给视觉模型看；请用 browser_snapshot / browser_find "
+                          "(vision is disabled on a page holding a vault value — use the text snapshot)", status="denied")
     payload = dict(args)
     payload["task_id"] = task_id
+    if action == "fill_secret":
+        val = vault.value(store, str(args.get("item_id", "")), str(args.get("field", "")))
+        if not val:
+            raise ActionError("保险箱里没有这个内容 (vault value missing)", status="denied")
+        snap = await broker("POST", "/agent/type", {"task_id": task_id, "ref": args.get("ref", ""), "text": val}, timeout=90.0)
+        vault.mark_used(store, str(args.get("item_id", "")))
+        vault.note_fill(task_id, snap.get("url", ""))
+        out = vault.scrub(store, _snap_envelope(store, task_id, snap))
+        out["filled"] = f"已填写 filled: {vault.summary_text(vault.item(store, str(args.get('item_id', ''))) or {'label': '?', 'masked': ''}, str(args.get('field', '')))}"
+        return out
     snap = await broker("POST", f"/agent/{action}", payload, timeout=180.0 if action == "wait" else 90.0)
-    out = _snap_envelope(store, task_id, snap)
+    out = vault.scrub(store, _snap_envelope(store, task_id, snap))
     if action == "locate" and snap.get("image_b64"):
         # grid screenshot for the runtime's vision model (browser_locate); the agent only gets the resulting x/y
         out.update({k: snap[k] for k in ("image_b64", "image_type", "region", "cols", "rows", "labels", "viewport", "at") if k in snap})
@@ -322,6 +336,17 @@ async def _browser(store, tool: str, args: dict, task_id: str) -> dict:
         out["image_type"] = snap.get("image_type", "image/jpeg")
         out["marks"] = len(snap.get("marks") or [])
     return out
+
+
+async def _task_url(task_id: str) -> str:
+    try:
+        st = await broker("GET", "/state", timeout=10)
+    except ActionError:
+        return ""
+    for t in st.get("tasks") or []:
+        if t.get("task_id") == task_id:
+            return t.get("url", "")
+    return ""
 
 
 # ------------------------------------------------------------------ telegram

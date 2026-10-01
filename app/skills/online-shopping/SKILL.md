@@ -21,7 +21,7 @@ description: 网购：搜索商品、用视觉挑选、加入购物车（不结�
    the user explicitly asked to buy.
 6. **Verify**: browser_look("Was the item added to the cart? What does the confirmation say and how many items are in the cart?")
    or check the cart count in the snapshot.
-7. **Login / CAPTCHA / robot check** → browser_request_takeover. Never type passwords or card numbers.
+7. **Login / CAPTCHA / robot check** → browser_request_takeover. Never type passwords. Shipping name / phone / address: profile_get. Card details at checkout: vault_list + browser_fill_secret (each fill approved by the user), otherwise take over; the final Pay / Place order click is approved separately.
 8. **Final answer**: product title, price, seller/rating, link, and "added to cart ✓ (not checked out)"; mention anything uncertain.
 
 ## Comparing and watching

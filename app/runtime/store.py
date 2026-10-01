@@ -39,6 +39,11 @@ CREATE TABLE IF NOT EXISTS goals (
   id TEXT PRIMARY KEY, title TEXT, objective TEXT, criteria TEXT, status TEXT, deadline REAL, schedule_id TEXT,
   conv_id TEXT, progress TEXT, result TEXT, created_at REAL, updated_at REAL, finished_at REAL
 );
+CREATE TABLE IF NOT EXISTS profile (key TEXT PRIMARY KEY, value TEXT, updated_at REAL, source TEXT);
+CREATE TABLE IF NOT EXISTS profile_pending (
+  id TEXT PRIMARY KEY, key TEXT, value TEXT, old TEXT, reason TEXT, source TEXT, status TEXT, created_at REAL, resolved_at REAL
+);
+CREATE TABLE IF NOT EXISTS memory_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, kind TEXT, report TEXT);
 CREATE TABLE IF NOT EXISTS notifications (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, title TEXT, body TEXT, task_id TEXT, level TEXT, read INTEGER DEFAULT 0
 );
@@ -56,10 +61,67 @@ DEFAULT_SETTINGS = {
     "user_name": "",
     "language": "",          # "" = not chosen yet: the web UI fills it from the browser language on first visit
     "memory_extraction": True,
+    "memory_consolidation": True,     # tidy memory once a day (merge, promote, expire) and send a short report
+    "memory_consolidate_at": "03:30",  # local time (Settings → Timezone)
     "disable_thinking": False,
     "extra_body": "",
     "llm_timeout": 600,
 }
+
+
+PROFILE_FIELDS = [   # key, 中文, English
+    ("name_zh", "中文姓名", "Chinese name"),
+    ("name_en", "英文姓名（证件拼写）", "Name as on passport"),
+    ("preferred_name", "称呼", "Preferred name"),
+    ("phone", "手机", "Mobile phone"),
+    ("email_personal", "私人邮箱", "Personal email"),
+    ("email_work", "工作邮箱", "Work email"),
+    ("address_home", "家庭地址", "Home address"),
+    ("address_work", "公司地址", "Work address"),
+    ("company", "公司", "Company"),
+    ("job_title", "职位", "Job title"),
+    ("birthday", "生日", "Date of birth"),
+    ("nationality", "国籍", "Nationality"),
+]
+PROFILE_KEYS = {k for k, _, _ in PROFILE_FIELDS}
+
+
+def profile_key(key: str) -> str:
+    """A fixed field, or a custom one written as 'custom:<label>'."""
+    key = (key or "").strip()
+    if key in PROFILE_KEYS:
+        return key
+    if key.startswith("custom:") and 1 < len(key) <= 60:
+        return "custom:" + re.sub(r"\s+", " ", key[7:]).strip()[:50]
+    return ""
+
+
+def norm_fact(s: str) -> str:
+    return re.sub(r"\W+", "", (s or "").lower())
+
+
+_SENSITIVE = re.compile(r"(?<![+\d])(?:\d[ -]?){12,19}|\b[A-Z]{1,2}\d{6,9}\b|\b[STFGM]\d{7}[A-Z]\b|(?i:password|密码|cvv|cvc)")
+
+
+_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$")
+
+
+def profile_value_ok(key: str, value: str) -> bool:
+    """Basic shape checks so a suggestion like email_work = 'bytetrade' never reaches the user."""
+    v = (value or "").strip()
+    if not v:
+        return False
+    if key.startswith("email"):
+        return bool(_EMAIL.match(v))
+    if key == "phone":
+        digits = re.sub(r"\D", "", v)
+        return 6 <= len(digits) <= 15 and bool(re.fullmatch(r"[+\d\s().-]+", v))
+    return True
+
+
+def looks_sensitive(text: str) -> bool:
+    """Card / ID / passport-looking numbers and passwords never go into memory — they belong in the vault."""
+    return bool(_SENSITIVE.search(text or ""))
 
 
 class RStore:
@@ -73,6 +135,11 @@ class RStore:
         cols = {r["name"] for r in self.db.all("PRAGMA table_info(schedules)")}
         if "goal_id" not in cols:
             self.db.execute("ALTER TABLE schedules ADD COLUMN goal_id TEXT DEFAULT ''")
+        fcols = {r["name"] for r in self.db.all("PRAGMA table_info(facts)")}
+        for col, ddl in (("tier", "TEXT DEFAULT 'long'"), ("uses", "INTEGER DEFAULT 0"), ("last_used", "REAL"),
+                         ("expires_at", "REAL"), ("history", "TEXT DEFAULT ''")):
+            if col not in fcols:
+                self.db.execute(f"ALTER TABLE facts ADD COLUMN {col} {ddl}")
 
     # ------------------------------------------------------------ settings
     def settings(self) -> dict:
@@ -170,60 +237,168 @@ class RStore:
         return rows
 
     # ------------------------------------------------------------ memory
+    # Three layers: the profile (fixed fields for forms and emails; changes need the user's OK), long-term facts
+    # (preferences, people, companies, projects, habits) and recent facts/episodes (one-off details, kept 30 days).
+    RECENT_DAYS = 30
+
     def add_fact(self, fact: str, category: str = "general", entity: str = "", source: str = "user",
-                 confidence: float = 0.9, ttl_days: int | None = None) -> dict | None:
+                 confidence: float = 0.9, ttl_days: int | None = None, tier: str = "long") -> dict | None:
         fact = fact.strip()
         if not fact:
             return None
-        norm = re.sub(r"\W+", "", fact.lower())
-        for r in self.db.all("SELECT id, fact FROM facts"):
-            if re.sub(r"\W+", "", r["fact"].lower()) == norm:
-                self.db.execute("UPDATE facts SET last_verified=? WHERE id=?", (now_ts(), r["id"]))
+        tier = "recent" if tier == "recent" else "long"
+        norm = norm_fact(fact)
+        for r in self.db.all("SELECT id, fact, tier FROM facts"):
+            if norm_fact(r["fact"]) == norm:
+                upd = {"last_verified": now_ts()}
+                if tier == "long" and r["tier"] == "recent":     # said again / asked to remember: keep it for good
+                    upd.update(tier="long", expires_at=None)
+                self.db.update("facts", "id", r["id"], upd)
                 return {"id": r["id"], "fact": r["fact"], "duplicate": True}
         fid = new_id("fact")
+        exp = now_ts() + self.RECENT_DAYS * 86400 if tier == "recent" else None
         self.db.insert("facts", {"id": fid, "fact": fact, "category": category, "entity": entity, "source": source,
                                  "confidence": confidence, "created_at": now_ts(), "last_verified": now_ts(),
-                                 "ttl_days": ttl_days})
+                                 "ttl_days": ttl_days, "tier": tier, "uses": 0, "expires_at": exp, "history": ""})
         self.db.execute("INSERT INTO facts_fts(id, fact, entity) VALUES (?,?,?)", (fid, fact, entity))
-        return {"id": fid, "fact": fact}
+        return {"id": fid, "fact": fact, "tier": tier}
+
+    def fact(self, fid: str) -> dict | None:
+        return self.db.one("SELECT * FROM facts WHERE id=?", (fid,))
+
+    def update_fact(self, fid: str, **kw) -> dict | None:
+        r = self.fact(fid)
+        if not r:
+            return None
+        data = {k: v for k, v in kw.items() if k in ("fact", "category", "entity", "tier", "uses", "last_used", "expires_at",
+                                                    "history", "last_verified", "confidence")}
+        if data.get("tier") == "long":
+            data.setdefault("expires_at", None)
+        elif data.get("tier") == "recent" and r["tier"] != "recent":
+            data.setdefault("expires_at", now_ts() + self.RECENT_DAYS * 86400)
+        if "fact" in data and data["fact"] != r["fact"]:
+            data["history"] = ((r.get("history") or "") + "\n" + r["fact"]).strip()[-2000:]
+            self.db.execute("DELETE FROM facts_fts WHERE id=?", (fid,))
+            self.db.execute("INSERT INTO facts_fts(id, fact, entity) VALUES (?,?,?)", (fid, data["fact"], data.get("entity", r["entity"])))
+        if data:
+            self.db.update("facts", "id", fid, data)
+        return self.fact(fid)
 
     def delete_fact(self, fid: str):
         self.db.execute("DELETE FROM facts WHERE id=?", (fid,))
         self.db.execute("DELETE FROM facts_fts WHERE id=?", (fid,))
 
-    def facts(self, limit=500) -> list[dict]:
-        rows = self.db.all("SELECT * FROM facts ORDER BY created_at DESC LIMIT ?", (limit,))
-        out = []
-        for r in rows:
-            if r["ttl_days"] and r["created_at"] + r["ttl_days"] * 86400 < now_ts():
-                continue
-            out.append(r)
-        return out
+    def _live(self, r: dict) -> bool:
+        if r.get("expires_at") and r["expires_at"] < now_ts():
+            return False
+        return not (r["ttl_days"] and r["created_at"] + r["ttl_days"] * 86400 < now_ts())
 
-    def search_facts(self, query: str, limit=12) -> list[dict]:
+    def facts(self, limit=500, tier: str | None = "long") -> list[dict]:
+        q, p = "SELECT * FROM facts", []
+        if tier:
+            q += " WHERE COALESCE(tier,'long')=?"
+            p.append(tier)
+        rows = self.db.all(q + " ORDER BY created_at DESC LIMIT ?", (*p, limit))
+        return [r for r in rows if self._live(r)]
+
+    def search_facts(self, query: str, limit=12, tier: str | None = "long") -> list[dict]:
         terms = [t for t in re.split(r"[\s,，。.!?？！;；:：]+", query or "") if len(t) >= 2][:12]
         rows: list[dict] = []
         if terms:
             q = " OR ".join('"' + t.replace('"', "") + '"' for t in terms)
             try:
-                ids = [r["id"] for r in self.db.all("SELECT id FROM facts_fts WHERE facts_fts MATCH ? LIMIT ?", (q, limit))]
+                ids = [r["id"] for r in self.db.all("SELECT id FROM facts_fts WHERE facts_fts MATCH ? LIMIT ?", (q, limit * 3))]
             except Exception:
                 ids = []
             if not ids:
                 like = [f"%{t}%" for t in terms]
                 cond = " OR ".join("fact LIKE ?" for _ in like)
-                ids = [r["id"] for r in self.db.all(f"SELECT id FROM facts WHERE {cond} LIMIT ?", (*like, limit))]
+                ids = [r["id"] for r in self.db.all(f"SELECT id FROM facts WHERE {cond} LIMIT ?", (*like, limit * 3))]
             for i in ids:
-                r = self.db.one("SELECT * FROM facts WHERE id=?", (i,))
-                if r:
+                r = self.fact(i)
+                if r and self._live(r) and (not tier or (r.get("tier") or "long") == tier):
                     rows.append(r)
-        return rows
+        return rows[:limit]
+
+    def mark_used(self, ids: list[str]):
+        for fid in ids:
+            self.db.execute("UPDATE facts SET uses=COALESCE(uses,0)+1, last_used=? WHERE id=?", (now_ts(), fid))
+
+    def prune_memory(self) -> dict:
+        """Drop expired recent facts and episodes older than RECENT_DAYS."""
+        gone = [r["id"] for r in self.db.all("SELECT id FROM facts WHERE expires_at IS NOT NULL AND expires_at < ?", (now_ts(),))]
+        for fid in gone:
+            self.delete_fact(fid)
+        cut = now_ts() - self.RECENT_DAYS * 86400
+        n_ep = self.db.one("SELECT COUNT(*) AS n FROM episodes WHERE ts < ?", (cut,))["n"]
+        self.db.execute("DELETE FROM episodes WHERE ts < ?", (cut,))
+        return {"facts": len(gone), "episodes": n_ep}
 
     def add_episode(self, task_id: str, summary: str):
         self.db.insert("episodes", {"ts": now_ts(), "task_id": task_id, "summary": summary[:1000]})
 
     def episodes(self, limit=50) -> list[dict]:
-        return self.db.all("SELECT * FROM episodes ORDER BY id DESC LIMIT ?", (limit,))
+        cut = now_ts() - self.RECENT_DAYS * 86400
+        return self.db.all("SELECT * FROM episodes WHERE ts >= ? ORDER BY id DESC LIMIT ?", (cut, limit))
+
+    # ------------------------------------------------------------ profile (fixed fields; every change needs the user)
+    def profile(self) -> dict:
+        return {r["key"]: r["value"] for r in self.db.all("SELECT key, value FROM profile") if (r["value"] or "").strip()}
+
+    def set_profile(self, key: str, value: str, source: str = "user"):
+        key = profile_key(key)
+        if not key:
+            raise ValueError("unknown profile field")
+        value = (value or "").strip()[:500]
+        if value:
+            self.db.execute("INSERT OR REPLACE INTO profile(key, value, updated_at, source) VALUES (?,?,?,?)",
+                            (key, value, now_ts(), source))
+        else:
+            self.db.execute("DELETE FROM profile WHERE key=?", (key,))
+        # a pending suggestion for this field is settled by the user's own edit
+        self.db.execute("UPDATE profile_pending SET status='superseded', resolved_at=? WHERE key=? AND status='pending'",
+                        (now_ts(), key))
+
+    def suggest_profile(self, key: str, value: str, reason: str = "", source: str = "") -> dict | None:
+        """Queue a change for the user to confirm. Never changes the profile by itself."""
+        key = profile_key(key)
+        value = (value or "").strip()[:500]
+        if not key or not value or looks_sensitive(value) or not profile_value_ok(key, value):
+            return None
+        cur = self.profile().get(key, "")
+        if norm_fact(cur) == norm_fact(value):
+            return None
+        for r in self.db.all("SELECT * FROM profile_pending WHERE key=? AND status='pending'", (key,)):
+            if norm_fact(r["value"]) == norm_fact(value):
+                return None
+        pid = new_id("pp")
+        self.db.insert("profile_pending", {"id": pid, "key": key, "value": value, "old": cur, "reason": reason[:300],
+                                           "source": source[:80], "status": "pending", "created_at": now_ts(),
+                                           "resolved_at": None})
+        return self.db.one("SELECT * FROM profile_pending WHERE id=?", (pid,))
+
+    def profile_pending(self, status: str = "pending") -> list[dict]:
+        return self.db.all("SELECT * FROM profile_pending WHERE status=? ORDER BY created_at DESC LIMIT 100", (status,))
+
+    def resolve_profile(self, pid: str, accept: bool, value: str | None = None) -> dict | None:
+        r = self.db.one("SELECT * FROM profile_pending WHERE id=?", (pid,))
+        if not r or r["status"] != "pending":
+            return None
+        if accept:
+            self.set_profile(r["key"], value if value is not None else r["value"], source=f"confirmed:{r['source']}")
+        self.db.execute("UPDATE profile_pending SET status=?, resolved_at=? WHERE id=?",
+                        ("accepted" if accept else "rejected", now_ts(), pid))
+        return self.db.one("SELECT * FROM profile_pending WHERE id=?", (pid,))
+
+    # ------------------------------------------------------------ memory housekeeping runs
+    def add_memory_run(self, kind: str, report: dict) -> int:
+        return self.db.insert("memory_runs", {"ts": now_ts(), "kind": kind, "report": dumps(report)})
+
+    def memory_runs(self, limit=10) -> list[dict]:
+        rows = self.db.all("SELECT * FROM memory_runs ORDER BY id DESC LIMIT ?", (limit,))
+        for r in rows:
+            r["report"] = loads(r["report"], {})
+        return rows
 
     # ------------------------------------------------------------ schedules
     def schedules(self) -> list[dict]:

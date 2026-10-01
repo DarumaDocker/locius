@@ -442,7 +442,9 @@ class Broker:
             info = await loc.evaluate("""el => ({
                 tag: el.tagName.toLowerCase(),
                 role: el.getAttribute('role') || '',
-                name: (el.getAttribute('aria-label') || (el.labels && el.labels[0] && el.labels[0].innerText) || el.innerText || el.value || el.getAttribute('placeholder') || el.getAttribute('title') || '').trim().slice(0,200),
+                name: (el.getAttribute('aria-label') || (el.labels && el.labels[0] && el.labels[0].innerText) || el.innerText || (['submit','button','reset'].includes((el.type||'').toLowerCase()) ? el.value : '') || el.getAttribute('placeholder') || el.getAttribute('name') || el.getAttribute('title') || '').trim().slice(0,200),
+                editable: !!el.isContentEditable,
+                autocomplete: (el.getAttribute('autocomplete') || '').toLowerCase().slice(0,40),
                 input_type: (el.type || '').toLowerCase(),
                 is_password: (el.type || '').toLowerCase() === 'password' || (el.getAttribute('autocomplete')||'').includes('password'),
                 in_form: !!el.closest('form'),

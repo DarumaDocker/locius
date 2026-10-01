@@ -12,8 +12,9 @@ Everything happens on this Olares — never upload the user's documents to onlin
 2. **Read the fields.** pdf_form_fields(path). No fields = it's a scan/flat PDF: tell the user; offer to write the answers
    as a document (make_pdf) instead of pretending to fill it.
 3. **Collect the values.**
-   - Use only facts the user gave you in this chat, facts stated in the email itself (e.g. the trip date), and memories the
-     user explicitly saved (memory_search). Never invent names, phone numbers, IDs, allergies or medical details.
+   - Use only facts the user gave you in this chat, facts stated in the email itself (e.g. the trip date), the user's
+     profile (profile_get: name, phone, email, address…) and memories they saved (memory_search). Never invent names,
+     phone numbers, IDs, allergies or medical details; leave ID / passport numbers for the user to add.
    - Ask ONE short question listing every missing field (e.g. "emergency phone? lunch: regular or vegetarian?").
    - Signature fields: leave empty — the user signs. Don't type ID/passport/bank numbers unless the user typed them
      to you for this form.

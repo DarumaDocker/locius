@@ -497,7 +497,11 @@ function evLine(e) {
     case 'subagent_start': body = h('span', null, Tf("🧩 子 Agent ({0})：{1}", (d.role), (d.task))); break;
     case 'subagent_done': body = h('details', null, h('summary', null, Tf("🧩 子 Agent 完成 ({0})", (d.role))), h('pre', null, d.report)); break;
     case 'final': body = h('span', null, T('🏁 完成 Final')); break;
-    case 'memory_saved': body = h('span', null, T('🧠 记住了：') + (d.facts || []).join(T('；'))); break;
+    case 'memory_saved': body = h('span', null, [
+      (d.facts || []).length ? T('🧠 记住了：') + d.facts.join(T('；')) : '',
+      (d.recent || []).length ? ' ' + T('⏳ 近期记忆：') + d.recent.join(T('；')) : '',
+      (d.profile_suggestions || []).length ? ' ' + T('📝 档案修改待你确认（记忆页）：') + d.profile_suggestions.join(T('；')) : ''].join('').trim()); break;
+    case 'profile_read': body = h('span', { class: 'muted' }, Tf("🪪 读取档案：{0}", (d.fields || []).join(', ') || T('全部'))); break;
     case 'replanning': body = h('span', { style: 'color:var(--warn)' }, T('🔄 重新规划 Re-plan')); break;
     case 'error': case 'planner_error': body = h('span', { style: 'color:var(--danger)' }, '❌ ' + (d.message || '')); break;
     default: body = h('span', { class: 'muted' }, e.type + ' ' + JSON.stringify(d).slice(0, 200));
@@ -624,6 +628,7 @@ function approvalForm(a, onDone) {
     h('option', { value: 'SESSION' }, T('8 小时内 For this session (8h)')),
     h('option', { value: 'TIME_BOUND' }, T('24 小时内 For 24 hours')),
     h('option', { value: 'PERMANENT' }, T('以后总是允许（同一目标）Always allow')));
+  if (a.tool === 'browser_fill_secret') { scope.value = 'ONCE'; scope.disabled = true; }
   const note = h('input', { type: 'text', placeholder: T('拒绝原因（可选，会告诉 Agent）Reason for denying (optional)') });
   const approve = h('button', { class: 'btn approve' }, T('✓ 批准 Approve'));
   const deny = h('button', { class: 'btn danger' }, T('✕ 拒绝 Deny'));
@@ -1355,21 +1360,179 @@ async function mcpCard() {
 }
 
 // ================================================================== MEMORY
+const MEM_CATS = ['preference', 'person', 'company', 'project', 'habit', 'other'];
+const CAT_LABEL = { preference: T('偏好'), person: T('人物'), company: T('公司'), project: T('项目'), habit: T('习惯'), other: T('其他'), general: T('其他') };
+
 async function viewMemory(root) {
-  const r = await api('memory');
+  const [r, v] = await Promise.all([api('memory'), sapi('vault').catch(() => ({ items: [], kinds: {}, field_labels: {} }))]);
+  root.append(
+    h('div', { class: 'grid2' }, memProfileCard(r), h('div', { class: 'stack' }, memPendingCard(r), memTidyCard(r))),
+    h('div', { class: 'grid2', style: 'margin-top:16px' }, memFactsCard(r), memRecentCard(r)),
+    h('div', { class: 'grid2', style: 'margin-top:16px' }, memVaultCard(v), memEpisodesCard(r)));
+}
+
+function memProfileCard(r) {
+  const prof = r.profile || {};
+  const inputs = {};
+  const rows = (r.profile_fields || []).map(f => {
+    const i = h('input', { type: 'text', value: prof[f.key] || '', autocomplete: 'off' }); inputs[f.key] = i;
+    return h('label', { class: 'field' }, h('span', null, LANG === 'en' ? f.en : f.zh), i);
+  });
+  for (const k of Object.keys(prof).filter(k => k.startsWith('custom:'))) {
+    const i = h('input', { type: 'text', value: prof[k], autocomplete: 'off' }); inputs[k] = i;
+    rows.push(h('label', { class: 'field' }, h('span', null, k.slice(7)), i));
+  }
+  const cLabel = h('input', { type: 'text', placeholder: T('自定义字段名，如：常用航空公司'), style: 'flex:1' });
+  const cVal = h('input', { type: 'text', placeholder: T('内容'), style: 'flex:1' });
+  const save = safe(async () => {
+    let n = 0;
+    for (const [k, el] of Object.entries(inputs)) {
+      if ((el.value || '').trim() !== (prof[k] || '')) { await api('profile', { method: 'PUT', body: { key: k, value: el.value } }); n++; }
+    }
+    if (cLabel.value.trim() && cVal.value.trim()) { await api('profile', { method: 'PUT', body: { key: 'custom:' + cLabel.value.trim(), value: cVal.value } }); n++; }
+    toast(n ? Tf("已保存 {0} 项", n) : T('没有改动 No changes')); route();
+  });
+  return h('div', { class: 'card stack' }, h('h3', null, T('🪪 档案 Profile')),
+    h('p', { class: 'sub' }, T('填表、写邮件时才会用到的固定信息。Agent 只在需要时读取；它发现的新信息会先放到「待确认」，你同意后才会修改。证件号、会员号、卡号请放进下面的保险箱。')),
+    h('div', { class: 'grid2', style: 'gap:4px 12px;grid-template-columns:repeat(auto-fit,minmax(200px,1fr))' }, rows),
+    h('div', { class: 'row' }, cLabel, cVal),
+    h('div', null, h('button', { class: 'btn primary', onclick: save }, T('保存档案 Save profile'))));
+}
+
+function memPendingCard(r) {
+  const list = r.pending || [];
+  const label = (k) => { const f = (r.profile_fields || []).find(x => x.key === k); return f ? (LANG === 'en' ? f.en : f.zh) : k.replace(/^custom:/, ''); };
+  return h('div', { class: 'card stack' },
+    h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, T('📝 待确认的档案修改 Pending')), list.length ? h('span', { class: 'chip bad' }, String(list.length)) : h('span', { class: 'chip ok' }, T('无 None'))),
+    list.length ? list.map(p => {
+      const val = h('input', { type: 'text', value: p.value });
+      const go = (accept) => safe(async () => { await api('profile/pending/' + p.id, { method: 'POST', body: { accept, value: val.value } }); route(); });
+      return h('div', { class: 'stack', style: 'border-bottom:1px solid var(--line-2);padding-bottom:8px' },
+        h('div', null, h('b', null, label(p.key)), h('span', { class: 'muted small' }, ' · ' + (p.old ? Tf("原来：{0}", p.old) : T('原来为空')))),
+        val, p.reason ? h('div', { class: 'small muted' }, p.reason) : null,
+        h('div', { class: 'row' }, h('button', { class: 'btn approve small', onclick: go(true) }, T('✓ 确认修改 Accept')), h('button', { class: 'btn danger small', onclick: go(false) }, T('✕ 不改 Reject'))));
+    }) : h('div', { class: 'muted small' }, T('Agent 提出的档案修改会出现在这里，由你决定是否采纳。')));
+}
+
+function memTidyCard(r) {
+  const job = r.job || {};
+  const detail = h('div', { class: 'stack' });
+  const start = (body) => safe(async () => { await api('memory/consolidate', { method: 'POST', body }); toast(T('已开始，整理需要几分钟 Started')); route(); });
+  const show = (id) => safe(async () => { const run = await api('memory/runs/' + id); detail.replaceChildren(memPlanView(run.report || {})); });
+  const runs = (r.runs || []).map(x => h('div', { class: 'small', style: 'border-bottom:1px solid var(--line-2);padding-bottom:6px' },
+    h('div', { class: 'row' }, h('b', null, { dry_run: T('预览'), daily: T('每日整理'), manual: T('手动整理'), applied: T('按预览执行') }[x.kind] || x.kind),
+      h('span', { class: 'muted' }, fmtTime(x.ts)), x.applied ? h('span', { class: 'chip ok' }, T('已执行')) : null,
+      h('span', { style: 'flex:1' }),
+      h('button', { class: 'btn small', onclick: show(x.id) }, T('详情 Details')),
+      x.kind === 'dry_run' && !x.applied ? h('button', { class: 'btn primary small', disabled: !!job.running, onclick: start({ from_run: x.id }) }, T('按此执行 Apply')) : null),
+    (x.lines || []).map(l => h('div', { class: 'muted' }, l)),
+    (x.errors || []).length ? h('div', { class: 'small', style: 'color:var(--danger)' }, Tf("模型出错，部分未整理：{0}", x.errors.join('; '))) : null));
+  return h('div', { class: 'card stack' }, h('h3', null, T('🧹 记忆整理 Memory tidy')),
+    h('p', { class: 'sub' }, Tf("每天 {0} 自动合并重复、清理过期、把一次性的内容降为近期，并把报告发到 Telegram。不会直接改档案，也不会直接删除长期记忆（降为近期后 30 天才过期）。", (r.settings || {}).memory_consolidate_at || '03:30')),
+    r.needs_first_review ? h('div', { class: 'small', style: 'color:var(--warn, #b7791f)' }, T('第一次整理前请先预览，确认没问题再执行；之后才会每天自动整理。')) : null,
+    (r.settings || {}).memory_consolidation === false ? h('div', { class: 'small muted' }, T('每日自动整理已在设置中关闭。')) : null,
+    h('div', { class: 'row' },
+      h('button', { class: 'btn', disabled: !!job.running, onclick: start({ dry_run: true }) }, job.running ? T('整理中… Running') : T('预览整理 Preview')),
+      job.error ? h('span', { class: 'small', style: 'color:var(--danger)' }, job.error) : null),
+    runs.length ? runs : h('div', { class: 'muted small' }, T('还没有整理记录。')), detail);
+}
+
+function memPlanView(rep) {
+  const p = rep.plan || {}; const L = p.local || {}; const M = p.llm || {};
+  const sec = (title, items, fn) => items && items.length ? h('details', { open: items.length <= 8 }, h('summary', null, `${title} (${items.length})`),
+    h('ul', { class: 'small' }, items.map(x => h('li', null, fn(x))))) : null;
+  return h('div', { class: 'stack', style: 'border:1px solid var(--line);border-radius:10px;padding:10px' },
+    h('b', null, rep.applied || rep.done ? T('整理内容 What changed') : T('预览：将会做的修改 Preview')),
+    sec(T('合并重复'), [...(L.dups || []).map(d => ({ before: [d.fact], fact: d.fact, n: d.drop.length + 1 })), ...(M.merge || [])],
+      x => h('span', null, (x.before || []).map(b => h('div', { class: 'muted' }, '− ' + b)), h('div', null, '→ ' + x.fact + (x.n ? Tf("（{0} 条相同）", x.n) : '')))),
+    sec(T('改写'), M.rewrite, x => h('span', null, h('div', { class: 'muted' }, '− ' + x.before), h('div', null, '→ ' + x.fact))),
+    sec(T('降为近期（30 天后过期）'), M.demote, x => h('span', null, x.fact, h('span', { class: 'muted' }, ' — ' + (x.reason || '')))),
+    sec(T('升为长期'), [...(L.auto_promote || []).map(id => ({ fact: id, reason: T('经常被用到') })), ...(M.promote || [])], x => h('span', null, x.fact, h('span', { class: 'muted' }, ' — ' + (x.reason || '')))),
+    sec(T('删除（含证件号/卡号/密码）'), L.sensitive, x => x.preview),
+    sec(T('档案修改建议（需要你确认）'), M.profile, x => `${x.field} → ${x.value}`),
+    h('div', { class: 'small muted' }, Tf("过期清理：记忆 {0} 条，经历 {1} 条", (L.prune_facts || []).length, L.prune_episodes || 0)));
+}
+
+function memFactRow(f, recent) {
+  const edit = safe(async () => {
+    const t = prompt(T('修改这条记忆'), f.fact); if (t === null || !t.trim()) return;
+    await api('memory/' + f.id, { method: 'PUT', body: { fact: t } }); route();
+  });
+  const move = safe(async () => { await api('memory/' + f.id, { method: 'PUT', body: { tier: recent ? 'long' : 'recent' } }); route(); });
+  const del = safe(async () => { await api('memory/' + f.id, { method: 'DELETE' }); route(); });
+  const left = recent && f.expires_at ? Math.max(0, Math.ceil((f.expires_at * 1000 - Date.now()) / 86400000)) : null;
+  return h('tr', null, h('td', null, f.fact, f.history ? h('div', { class: 'small faint', title: f.history }, T('（有修改记录）')) : null),
+    h('td', { class: 'small' }, CAT_LABEL[f.category] || f.category || ''),
+    h('td', { class: 'small muted', style: 'white-space:nowrap' }, recent ? Tf("{0} 天后过期", left ?? '?') : String(f.uses || 0)),
+    h('td', { class: 'row', style: 'gap:4px;flex-wrap:nowrap;white-space:nowrap' },
+      h('button', { class: 'btn small', onclick: edit }, T('改')),
+      h('button', { class: 'btn small', onclick: move, title: recent ? T('保留为长期记忆') : T('降为近期（30 天后过期）') }, recent ? T('保留') : T('降级')),
+      h('button', { class: 'btn danger small', onclick: del }, T('忘记'))));
+}
+
+function memFactsCard(r) {
   const inp = h('input', { type: 'text', placeholder: T('例如：我偏好直飞航班；John Smith 是 Acme 的 CFO') });
-  root.append(h('div', { class: 'grid2' },
-    h('div', { class: 'card stack' }, h('h3', null, T('我知道的关于你的事 What I know about you')),
-      h('p', { class: 'sub' }, T('长期事实 (Semantic memory)。Agent 只从你自己说的话里提取，不会从邮件或网页里学习。你可以随时删除。')),
-      h('div', { class: 'row' }, inp, h('button', { class: 'btn primary', onclick: safe(async () => { await api('memory', { method: 'POST', body: { fact: inp.value } }); route(); }) }, T('记住 Remember'))),
-      r.facts.length ? h('div', { class: 'tablewrap' }, h('table', { class: 'data memtable' },
-        h('thead', null, h('tr', null, [T('事实 Fact'), T('类别'), T('来源 Source'), T('可信度'), ''].map(x => h('th', null, x)))),
-        h('tbody', null, r.facts.map(f => h('tr', null, h('td', null, f.fact), h('td', null, f.category), h('td', { class: 'small muted' }, f.source), h('td', null, Math.round((f.confidence || 0) * 100) + '%'),
-          h('td', null, h('button', { class: 'btn danger small', onclick: safe(async () => { await api('memory/' + f.id, { method: 'DELETE' }); route(); }) }, T('忘记 Forget'))))))))
-        : h('div', { class: 'muted small' }, T('还没有记忆。'))),
-    h('div', { class: 'card stack' }, h('h3', null, T('经历 Episodes')), h('p', { class: 'sub' }, T('已完成任务的摘要 (Episodic memory)，用于回溯。')),
-      r.episodes.length ? r.episodes.map(e => h('div', { class: 'small', style: 'border-bottom:1px solid var(--line-2);padding-bottom:8px' },
-        h('div', { class: 'muted' }, fmtTime(e.ts)), e.summary)) : h('div', { class: 'muted small' }, T('暂无')))));
+  const cat = h('select', { 'aria-label': T('类别'), style: 'width:auto;flex:0 0 auto' }, MEM_CATS.map(c => h('option', { value: c }, CAT_LABEL[c])));
+  return h('div', { class: 'card stack' }, h('h3', null, Tf("🧠 长期记忆 Long-term（{0}）", r.facts.length)),
+    h('p', { class: 'sub' }, T('偏好、人物、公司、项目、习惯。Agent 只从你自己说的话里提取，不会从邮件或网页里学习；需要时按相关度取用，不会每次全部带上。')),
+    h('div', { class: 'row' }, inp, cat, h('button', { class: 'btn primary', onclick: safe(async () => { await api('memory', { method: 'POST', body: { fact: inp.value, category: cat.value } }); route(); }) }, T('记住 Remember'))),
+    r.facts.length ? h('div', { class: 'tablewrap' }, h('table', { class: 'data memtable' },
+      h('thead', null, h('tr', null, [T('事实 Fact'), T('类别'), T('用过'), ''].map(x => h('th', null, x)))),
+      h('tbody', null, r.facts.map(f => memFactRow(f, false))))) : h('div', { class: 'muted small' }, T('还没有记忆。')));
+}
+
+function memRecentCard(r) {
+  const list = r.recent || [];
+  return h('div', { class: 'card stack' }, h('h3', null, Tf("⏳ 近期记忆 Recent（{0}）", list.length)),
+    h('p', { class: 'sub' }, T('一次性的细节（订单号、这周的行程…），保留 30 天后自动清除。经常用到的会自动升为长期。')),
+    list.length ? h('div', { class: 'tablewrap' }, h('table', { class: 'data memtable' },
+      h('thead', null, h('tr', null, [T('事实 Fact'), T('类别'), T('剩余'), ''].map(x => h('th', null, x)))),
+      h('tbody', null, list.map(f => memFactRow(f, true))))) : h('div', { class: 'muted small' }, T('暂无')));
+}
+
+function memVaultCard(v) {
+  const kinds = v.kinds || {}; const FL = v.field_labels || {};
+  const form = h('div', { class: 'stack', style: 'display:none;border:1px solid var(--line);border-radius:10px;padding:10px' });
+  const openForm = (it) => {
+    form.replaceChildren(); form.style.display = '';
+    const kind = h('select', { 'aria-label': T('类型'), disabled: !!it }, Object.entries(kinds).map(([k, x]) => h('option', { value: k }, T(x.label))));
+    if (it) kind.value = it.kind;
+    const label = h('input', { type: 'text', value: it ? it.label : '', placeholder: T('名称，如：护照、新航会员、Visa 卡') });
+    const domains = h('input', { type: 'text', value: it ? (it.domains || []).join(', ') : '', placeholder: T('只允许在这些网站使用（可选），如 singaporeair.com') });
+    const vals = h('div', { class: 'grid2', style: 'gap:8px' }); const inputs = {};
+    const drawFields = () => {
+      vals.replaceChildren();
+      for (const f of (kinds[kind.value] || {}).fields || []) {
+        const i = h('input', { type: 'password', autocomplete: 'new-password', placeholder: it ? T('留空 = 不修改') : '' }); inputs[f] = i;
+        vals.append(h('label', { class: 'field' }, h('span', null, T(FL[f] || f)), i));
+      }
+    };
+    kind.onchange = drawFields; drawFields();
+    const show = h('label', { class: 'toggle small' }, h('input', { type: 'checkbox', onchange: e => Object.values(inputs).forEach(i => i.type = e.target.checked ? 'text' : 'password') }), T('显示内容'));
+    const saveBtn = h('button', { class: 'btn primary', onclick: safe(async () => {
+      const values = {}; for (const [k, i] of Object.entries(inputs)) values[k] = i.value;
+      await sapi(it ? 'vault/' + it.id : 'vault', { method: it ? 'PUT' : 'POST', body: { kind: kind.value, label: label.value, domains: domains.value, values } });
+      toast(T('已存入保险箱 Saved')); route();
+    }) }, T('保存 Save'));
+    form.append(h('div', { class: 'row' }, kind, label), domains, vals, h('div', { class: 'row' }, show, h('span', { style: 'flex:1' }),
+      h('button', { class: 'btn', onclick: () => { form.style.display = 'none'; } }, T('取消')), saveBtn));
+  };
+  const items = (v.items || []).map(it => h('div', { class: 'row', style: 'border-bottom:1px solid var(--line-2);padding-bottom:6px' },
+    h('div', { style: 'flex:1;min-width:0' }, h('b', null, it.label), h('span', { class: 'muted small' }, ` · ${T(it.kind_label || it.kind)} · ${it.masked}`),
+      h('div', { class: 'small muted' }, (it.domains || []).length ? Tf("仅限：{0}", it.domains.join(', ')) : T('任何网站（每次都要你批准）'),
+        it.uses ? ' · ' + Tf("已用 {0} 次，最近 {1}", it.uses, fmtTime(it.last_used)) : '')),
+    h('button', { class: 'btn small', onclick: () => openForm(it) }, T('改')),
+    h('button', { class: 'btn danger small', onclick: safe(async () => { if (!confirm(Tf("从保险箱删除「{0}」？", it.label))) return; await sapi('vault/' + it.id, { method: 'DELETE' }); route(); }) }, T('删除'))));
+  return h('div', { class: 'card stack' }, h('h3', null, T('🔐 保险箱 Vault')),
+    h('p', { class: 'sub' }, T('证件号、会员号、信用卡加密保存在 Sentinel 里。Agent 看不到内容，只能请求「把某一项填进某个输入框」，每一次都要你批准；填完后页面文字里的号码也会被遮住。')),
+    items.length ? items : h('div', { class: 'muted small' }, T('保险箱是空的。')),
+    h('div', null, h('button', { class: 'btn', onclick: () => openForm(null) }, T('＋ 添加 Add'))), form);
+}
+
+function memEpisodesCard(r) {
+  return h('div', { class: 'card stack' }, h('h3', null, T('经历 Episodes')), h('p', { class: 'sub' }, T('最近 30 天已完成任务的摘要 (Episodic memory)，用于回溯，到期自动清除。')),
+    r.episodes.length ? h('details', null, h('summary', null, Tf("{0} 条", r.episodes.length)), r.episodes.map(e => h('div', { class: 'small', style: 'border-bottom:1px solid var(--line-2);padding:6px 0' },
+      h('div', { class: 'muted' }, fmtTime(e.ts)), e.summary))) : h('div', { class: 'muted small' }, T('暂无')));
 }
 
 // ================================================================== ACTIVITY / AUDIT
@@ -1422,6 +1585,8 @@ async function viewSettings(root) {
       field('user_name', T('你的名字'), 'Your name'), field('timezone', T('时区（定时任务）'), 'Timezone'),
       field('max_steps', T('每个任务最多步数'), 'Max steps', 'number'),
       tog('memory_extraction', T('任务结束后自动提取长期记忆 Auto memory extraction')),
+      tog('memory_consolidation', T('每天自动整理记忆并发送报告到 Telegram Daily memory tidy')),
+      field('memory_consolidate_at', T('每天整理时间（HH:MM）'), 'Tidy at'),
       h('div', null, h('b', null, T('技能 Skills')), h('ul', { class: 'small' }, r.skills.map(k => h('li', null, h('span', { class: 'mono' }, k.name), ' — ', B(k.description)))))),
   ), h('div', { style: 'margin-top:16px' }, h('button', { class: 'btn primary', onclick: safe(async () => {
     const body = {};
@@ -1465,7 +1630,7 @@ function onEvent(ev) {
     takeoverToast(ev);
   } else if (ev.kind === 'notification') {
     toast('🔔 ' + ev.notification.title + T('：') + ev.notification.body);
-  } else if (ev.kind === 'memory_update' && S.view === 'memory') route();
+  } else if (ev.kind === 'memory_update' && S.view === 'memory') { const a = document.activeElement; if (!(a && /INPUT|TEXTAREA|SELECT/.test(a.tagName) && a.closest('#view'))) route(); }
   else if ((ev.kind === 'schedule_update' || ev.kind === 'goal_update') && S.view === 'schedules') route();
 }
 

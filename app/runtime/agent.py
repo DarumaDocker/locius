@@ -189,9 +189,21 @@ LOCAL_TOOLS = [
         "missing ones, never invent); never fill signatures. Then send_file it for the user to check before any email.",
         {"path": S, "values": {"type": "object"}, "output": {"type": "string", "description": "default: <name>-filled.pdf next to it"}},
         ["path", "values"]),
-    _fn("memory_search", "搜索长期记忆 Search long-term memory about the user.", {"query": S}, ["query"]),
-    _fn("memory_remember", "记住用户明确要求记住的事实 Save a durable fact the user explicitly asked to remember.",
+    _fn("memory_search", "搜索记忆 Search memory about the user (long-term facts, recent details and past tasks).", {"query": S}, ["query"]),
+    _fn("memory_remember", "记住用户明确要求记住的事实 Save a durable fact the user explicitly asked to remember. Not for profile "
+        "fields (name, phone, email, address… → profile_suggest) and never for ID / membership / card numbers or passwords "
+        "(those live in the Sentinel vault, which the user manages).",
         {"fact": S, "category": S, "entity": S}, ["fact"]),
+    _fn("profile_get", "读取用户档案 Read the user's profile (name as on passport, phone, emails, addresses, company, title, "
+        "birthday, nationality…). Call it ONLY when filling in a form or writing an email/message that needs these details; "
+        "use just the fields you need.", {"fields": {"type": "array", "items": S, "description": "optional: only these fields"}}),
+    _fn("profile_suggest", "建议修改档案 Propose a change to a profile field when the user told you a new value (e.g. a new phone "
+        "number). It is NOT applied until the user confirms it on the Memory page. field = one of: name_zh, name_en, "
+        "preferred_name, phone, email_personal, email_work, address_home, address_work, company, job_title, birthday, "
+        "nationality, or custom:<label>.", {"field": S, "value": S, "reason": S}, ["field", "value"]),
+    _fn("vault_list", "列出保险箱条目 List the items in the user's Sentinel vault (ID documents, membership numbers, payment "
+        "cards) — labels and the last 4 characters only, never the values. Use with browser_fill_secret to fill one into a "
+        "web form; each fill needs the user's approval.", {}),
     _fn("memory_forget", "删除一条记忆 Forget a memory by id (from memory_search).", {"id": S}, ["id"]),
     _fn("schedule_create", "创建定时/周期任务 Create a recurring background task. kind=cron (spec like '0 8 * * *') or "
         "interval (spec = minutes). goal = full standalone instruction for each run.",
@@ -526,14 +538,22 @@ class Runtime:
         return out
 
     def _facts_for(self, goal: str) -> list[dict]:
+        """Long-term facts for this task: the ones related to the goal, then the most used preferences / people.
+        Recent one-off details and the profile are not included (memory_search / profile_get fetch them on demand)."""
         found = self.store.search_facts(goal, 10)
-        prefs = [f for f in self.store.facts(60) if f["category"] in ("preference", "person", "profile")][:10]
+        prefs = sorted((f for f in self.store.facts(300) if f["category"] in ("preference", "person", "habit")),
+                       key=lambda f: (-(f.get("uses") or 0), -(f.get("last_verified") or 0)))[:10]
         seen, out = set(), []
         for f in found + prefs:
             if f["id"] not in seen:
                 seen.add(f["id"])
                 out.append(f)
-        return out[:15]
+        out = out[:15]
+        try:
+            self.store.mark_used([f["id"] for f in found if f["id"] in seen][:10])
+        except Exception:
+            pass
+        return out
 
     @staticmethod
     def reply_lang(task: dict, settings: dict) -> str:
@@ -1306,12 +1326,45 @@ class Runtime:
                         break
             return "\n".join(hits[:60]) or "没有找到 no matches"
         if name == "memory_search":
-            rows = self.store.search_facts(str(a.get("query", "")), 15)
+            rows = self.store.search_facts(str(a.get("query", "")), 15, tier=None)
             eps = [e for e in self.store.episodes(200) if any(w in e["summary"] for w in str(a.get("query", "")).split() if len(w) > 1)][:5]
-            out = [f"[{r['id']}] {r['fact']}" for r in rows]
+            out = [f"[{r['id']}]{' (recent)' if r.get('tier') == 'recent' else ''} {r['fact']}" for r in rows]
             out += [f"(episode {time.strftime('%Y-%m-%d', time.localtime(e['ts']))}) {truncate(e['summary'], 300)}" for e in eps]
             return "\n".join(out) or "没有相关记忆 no memories found"
+        if name == "profile_get":
+            from app.runtime.store import PROFILE_FIELDS
+            prof = self.store.profile()
+            want = {str(x) for x in (a.get("fields") or []) if x}
+            labels = {k: en for k, _, en in PROFILE_FIELDS}
+            lines = [f"{labels.get(k, k.removeprefix('custom:'))} ({k}): {v}" for k, v in prof.items() if not want or k in want]
+            await self.event(tid, "profile_read", {"fields": [k for k in prof if not want or k in want]})
+            if not lines:
+                return ("档案里还没有这些信息 — the profile has none of these yet. Ask the user for what is missing (and you can "
+                        "profile_suggest it for them to confirm).")
+            return ("The user's profile (use only what this form / message needs; never paste it elsewhere):\n" + "\n".join(lines))
+        if name == "profile_suggest":
+            r = self.store.suggest_profile(str(a.get("field", "")), str(a.get("value", "")), str(a.get("reason", "")),
+                                           source=f"task:{tid}")
+            if not r:
+                return ("没有提交：字段名不对、值和现在一样、已有同样的待确认建议，或看起来是证件/卡号（那些放保险箱）"
+                        " — not queued (unknown field, same value, already pending, or an ID/card number that belongs in the vault).")
+            await self.publish({"kind": "memory_update"})
+            return f"已提交，等用户在「记忆」页确认 — queued for the user to confirm on the Memory page: {r['key']} → {r['value']}"
+        if name == "vault_list":
+            try:
+                res = await self.sentinel("GET", "/internal/vault", None, timeout=20)
+            except Exception as e:
+                return f"ERROR: 保险箱不可用 vault unavailable: {e}"
+            items = res.get("items") or []
+            if not items:
+                return "保险箱是空的 — the vault is empty. The user can add items in Memory page → Vault (记忆 → 保险箱); otherwise ask them to fill the field themselves (browser_request_takeover)."
+            return "\n".join(f"- id={i['id']} · {i['label']} · {i['kind']} · {i['masked']} · fields: {', '.join(i['fields'])}"
+                             + (f" · only on: {', '.join(i['domains'])}" if i.get("domains") else "") for i in items)
         if name == "memory_remember":
+            from app.runtime.store import looks_sensitive
+            if looks_sensitive(str(a.get("fact", ""))):
+                return ("ERROR: 证件号、会员号、卡号和密码不存进记忆 — ID / membership / card numbers and passwords are not kept in "
+                        "memory. Tell the user to add it to the vault (Memory page → Vault (记忆 → 保险箱)); you can then fill it with browser_fill_secret.")
             r = self.store.add_fact(str(a["fact"]), str(a.get("category") or "other"), str(a.get("entity") or ""),
                                     source=f"user-request:{tid}", confidence=0.95)
             await self.publish({"kind": "memory_update"})
@@ -1567,21 +1620,43 @@ class Runtime:
             return
         try:
             r = await self.llm.chat([{"role": "user", "content": prompts.MEMORY_EXTRACT + text}], purpose="memory",
-                                    task_id=t["id"], max_tokens=800, temperature=0.1, no_think=True)
+                                    task_id=t["id"], max_tokens=900, temperature=0.1, no_think=True)
             data = extract_json(r["content"]) or {}
         except Exception:
             return
-        added = []
-        for f in (data.get("facts") if isinstance(data, dict) else []) or []:
-            if isinstance(f, dict) and f.get("fact") and len(str(f["fact"])) < 300:
-                res = self.store.add_fact(str(f["fact"]), str(f.get("category") or "other"), str(f.get("entity") or ""),
-                                          source=f"extracted:{t['id']}", confidence=0.7)
-                if res and not res.get("duplicate"):
-                    added.append(res["fact"])
-        if added:
-            await self.event(t["id"], "memory_saved", {"facts": added})
-            await self.audit("memory", "memory.extract", t["id"], result="success", detail={"facts": added})
+        await self.file_memory_items(t["id"], data)
+
+    async def file_memory_items(self, task_id: str, data) -> dict:
+        """Write-time sorting: profile details become suggestions the user confirms, one-off details go to recent memory
+        (30 days), the rest to long-term memory. ID / card numbers and passwords are dropped (they belong in the vault)."""
+        from app.runtime.store import looks_sensitive
+        items = (data.get("items") or data.get("facts") or []) if isinstance(data, dict) else []
+        added, recent, suggested = [], [], []
+        for f in items[:8]:
+            if not isinstance(f, dict):
+                continue
+            kind = str(f.get("kind") or f.get("category") or "other").lower()
+            fact = str(f.get("fact") or "").strip()
+            if kind == "profile":
+                val = str(f.get("value") or "").strip()
+                r = self.store.suggest_profile(str(f.get("field") or ""), val, reason=fact[:200], source=f"chat:{task_id}")
+                if r:
+                    suggested.append(f"{r['key']} → {r['value']}")
+                continue
+            if not fact or len(fact) > 300 or looks_sensitive(fact):
+                continue
+            tier = "recent" if kind == "ephemeral" else "long"
+            cat = kind if kind in ("preference", "person", "company", "project", "habit") else "other"
+            res = self.store.add_fact(fact, cat, str(f.get("entity") or ""), source=f"extracted:{task_id}",
+                                      confidence=0.7, tier=tier)
+            if res and not res.get("duplicate"):
+                (recent if tier == "recent" else added).append(res["fact"])
+        if added or recent or suggested:
+            await self.event(task_id, "memory_saved", {"facts": added, "recent": recent, "profile_suggestions": suggested})
+            await self.audit("memory", "memory.extract", task_id, result="success",
+                             detail={"facts": added, "recent": recent, "profile_suggestions": suggested})
             await self.publish({"kind": "memory_update"})
+        return {"facts": added, "recent": recent, "profile_suggestions": suggested}
 
 
 def agent_lang(settings: dict) -> str:

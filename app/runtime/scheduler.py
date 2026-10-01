@@ -156,6 +156,7 @@ class Scheduler:
         store = self.rt.store
         now = time.time()
         await G.check_deadlines(self.rt)
+        await self.memory_tidy(now)
         for sch in store.schedules():
             if not sch["enabled"] or not sch["next_run"] or sch["next_run"] > now:
                 continue
@@ -184,6 +185,14 @@ class Scheduler:
                 await self.poll_event(sch)
             else:
                 await self.run_now(sch["id"])
+
+    async def memory_tidy(self, now: float):
+        """Once a day after Settings → memory_consolidate_at (retry at most hourly if it fails)."""
+        from app.runtime import memory_tidy as MT
+        if now - getattr(self, "_mem_try", 0) < 3600 or not MT.due(self.rt.store, now):
+            return
+        self._mem_try = now
+        MT.start(self.rt, dry_run=False, kind="daily")
 
     # ---------------------------------------------------------------- blocked runs
     def is_stale(self, t: dict, now: float) -> bool:

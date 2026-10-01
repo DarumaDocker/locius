@@ -71,6 +71,15 @@ async def chat(req: Request):
         return reply('```json\n{"objective": "test objective", "steps": [{"id":"s1","description":"do the thing","tool_hint":"x","risk":"read"}, {"id":"s2","description":"report","tool_hint":"x","risk":"read"}]}\n```')
     if msgs and "Extract durable facts" in msgs[-1]["content"]:
         return reply('{"facts": [{"fact": "Lucas prefers direct flights.", "category": "preference", "entity": ""}]}')
+    if msgs and str(msgs[-1]["content"]).startswith("Sort what the USER says"):
+        items = [{"kind": "preference", "fact": "Lucas prefers direct flights.", "entity": ""}]
+        if "PROFILEFACT" in msgs[-1]["content"]:
+            items += [{"kind": "profile", "fact": "Lucas's mobile is +65 9000 1111", "field": "phone", "value": "+65 9000 1111"},
+                      {"kind": "ephemeral", "fact": "Lucas has a dentist booking on Friday", "entity": ""}]
+        return reply(json.dumps({"items": items}))
+    if msgs and str(msgs[-1]["content"]).startswith("You are tidying"):
+        ids = re.findall(r"^(fact_\w+) \| long \| .*Opened zipair", msgs[-1]["content"], re.M)
+        return reply(json.dumps({"demote": [{"id": i, "reason": "process log"} for i in ids]}))
     users = [m["content"] for m in msgs if m["role"] == "user" and not str(m["content"]).startswith(("（系统）", "(System)"))]
     goal = users[-1] if users else ""
     tools_done = [m for m in msgs if m["role"] == "tool"]
@@ -300,6 +309,21 @@ async def chat(req: Request):
             m = re.search(r"\[(e\d+)\] textbox \\\"Password", last_tool)
             return reply("", [tc("browser_type", {"ref": m.group(1) if m else "e1", "text": "hunter2"})])
         return reply(f"Typed. {last_tool[:300]}")
+    if "VAULTFILL" in goal:   # fill a membership number from the vault (approved), then try to look at the page
+        if n == 0:
+            return reply("", [tc("browser_navigate", {"url": PAGE.replace("page.html", "checkout.html")})])
+        if n == 1:
+            return reply("", [tc("vault_list", {})])
+        if n == 2:
+            m = re.search(r"id=(vlt_\w+) · KrisFlyer", last_tool)
+            snap = tools_done[0]["content"]
+            r = re.search(r"\[(e\d+)\] textbox \\\"Membership", snap)
+            return reply("", [tc("browser_fill_secret", {"ref": r.group(1) if r else "e2", "item_id": m.group(1) if m else "x", "field": "number"})])
+        if n == 3:
+            return reply("", [tc("browser_snapshot", {})])
+        if n == 4:
+            return reply("", [tc("browser_look", {"question": "what is in the membership field?"})])
+        return reply(f"VAULTDONE {last_tool[:400]}")
     if "TAKEOVERLOOP" in goal:   # the site is still blocked after a hand-back: asks once more, then gives up
         if n < 2:
             return reply("", [tc("browser_request_takeover", {"reason": "still blocked on zipair"})])

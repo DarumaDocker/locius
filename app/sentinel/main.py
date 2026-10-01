@@ -24,10 +24,11 @@ from app.common.util import VERSION, token_ok, truncate
 from app.sentinel import actions, guard, mailboxes, mcp_hub, watchers
 from app.sentinel.actions import ActionError
 from app.sentinel.catalog import TOOLS, llm_schemas
-from app.sentinel.policy import ALLOW, ASK, DENY, decide
+from app.sentinel.policy import ALLOW, ASK, DENY, PER_USE_TOOLS, decide
 from app.sentinel.store import Store
 from app.sentinel.telegram_bot import TelegramBot
 from app.sentinel import phone
+from app.sentinel import vault
 
 SDATA = os.environ.get("SENTINEL_DATA", "/sdata")
 RUNTIME_URL = os.environ.get("RUNTIME_URL", "http://127.0.0.1:8081")
@@ -184,6 +185,8 @@ async def catalog():
             return True  # sync_catalog only publishes enabled, reviewed, non-"off" tools
         return bool(store.connection(t["connector"])["permissions"].get(t["capability"]))
     schemas = [s for s in llm_schemas(enabled) if allowed(s["function"]["name"])]
+    if not vault.list_items(store):
+        schemas = [s for s in schemas if s["function"]["name"] != "browser_fill_secret"]
     return {"tools": schemas, "connections": status,
             "risk": {k: v["risk"] for k, v in TOOLS.items()}}
 
@@ -287,7 +290,7 @@ async def internal_browser_state():
 
 async def _context_for(tool: str, args: dict, task_id: str) -> tuple[dict | None, dict | None]:
     """Ask the broker what a ref points to so the policy can judge the click/type."""
-    if tool in ("browser_click", "browser_type", "browser_select", "browser_upload"):
+    if tool in ("browser_click", "browser_type", "browser_select", "browser_upload", "browser_fill_secret"):
         info = await actions.broker("POST", "/agent/describe", {"task_id": task_id, "ref": args.get("ref", "")}, timeout=20)
         return info, {"url": info.get("page_url", ""), "title": info.get("page_title", "")}
     if tool == "browser_click_at":
@@ -353,7 +356,8 @@ async def _summary(tool: str, args: dict, elem: dict | None, page: dict | None) 
         s["fields"] = [["邮件数 Emails", str(len(ids))], ["同时归档 Also archive", "是 Yes" if args.get("archive") else "否 No"]]
     elif tool.startswith("browser_"):
         verb = {"browser_click": "点击 Click", "browser_click_at": "按位置点击 Click at position", "browser_type": "输入 Type", "browser_select": "选择 Select",
-                "browser_press": "按键 Press key", "browser_upload": "上传文件 Upload", "browser_navigate": "打开网页 Open page"}
+                "browser_press": "按键 Press key", "browser_upload": "上传文件 Upload", "browser_navigate": "打开网页 Open page",
+                "browser_fill_secret": "从保险箱填写 Fill from vault"}
         s["title"] = f"浏览器操作：{verb.get(tool, tool)}"
         s["fields"] = [["网站 Site", (page or {}).get("url") or args.get("url", "")], ["页面 Page", (page or {}).get("title", "")]]
         if elem:
@@ -366,6 +370,12 @@ async def _summary(tool: str, args: dict, elem: dict | None, page: dict | None) 
                 s["body"] = args.get("text", "")
                 if args.get("submit"):
                     s["fields"].append(["提交 Submit", "输入后按回车 Enter"])
+        if tool == "browser_fill_secret":
+            s["title"] = "从保险箱填写 Fill from vault"
+            it = vault.item(store, str(args.get("item_id", "")))
+            if it:
+                s["fields"].append(["填写内容 Value", vault.summary_text(it, str(args.get("field", "")))])
+            s["fields"].append(["授权 Approval", "仅这一次（每次使用都要批准）Once only"])
         if tool == "browser_type":
             s["body"] = args.get("text", "")
             if args.get("submit"):
@@ -564,6 +574,8 @@ async def _resolve(aid: str, b: dict, via: str) -> dict:
     if scope not in ("ONCE", "TASK", "SESSION", "TIME_BOUND", "PERMANENT"):
         scope = "ONCE"
     tool, args, task_id = ap["tool"], dict(ap["args"]), ap["task_id"]
+    if tool in PER_USE_TOOLS:
+        scope = "ONCE"
     if decision != "approve":
         store.resolve_approval(aid, "denied", scope, {"status": "denied"})
         store.audit("user", "approval.deny", task_id=task_id, resource=tool, risk=ap["risk"], decision=DENY,
@@ -621,6 +633,48 @@ async def _resolve(aid: str, b: dict, via: str) -> dict:
     asyncio.create_task(notify_runtime("/internal/approval_resolved", {
         "approval_id": aid, "task_id": task_id, "call_id": ap["call_id"], "decision": "approved", "result": result}))
     return {"ok": True, "status": "approved", "result": result}
+
+
+# ================================================================== vault (values never leave Sentinel)
+@app.get("/internal/vault", dependencies=[Depends(runtime_auth)])
+async def internal_vault():
+    return {"items": [{k: it[k] for k in ("id", "label", "kind", "masked", "fields", "domains")} for it in vault.list_items(store)]}
+
+
+@app.get("/sentinel/api/vault", dependencies=[Depends(ui_auth)])
+async def vault_list():
+    return {"items": vault.list_items(store), "kinds": vault.KINDS, "field_labels": vault.FIELD_LABELS}
+
+
+def _vault_save(b: dict, iid: str | None):
+    try:
+        it = vault.save_item(store, b, iid)
+    except KeyError:
+        raise HTTPException(404, "not found")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    store.audit("user", "vault.update" if iid else "vault.add", resource=it["id"],
+                detail={"label": it["label"], "kind": it["kind"], "fields": it["fields"], "domains": it["domains"]})
+    return {"item": it}
+
+
+@app.post("/sentinel/api/vault", dependencies=[Depends(ui_auth)])
+async def vault_add(req: Request):
+    return _vault_save(await req.json(), None)
+
+
+@app.put("/sentinel/api/vault/{iid}", dependencies=[Depends(ui_auth)])
+async def vault_update(iid: str, req: Request):
+    return _vault_save(await req.json(), iid)
+
+
+@app.delete("/sentinel/api/vault/{iid}", dependencies=[Depends(ui_auth)])
+async def vault_delete(iid: str):
+    it = vault.item(store, iid)
+    if not vault.delete_item(store, iid):
+        raise HTTPException(404, "not found")
+    store.audit("user", "vault.delete", resource=iid, detail={"label": it["label"]})
+    return {"ok": True}
 
 
 # ================================================================== user API: grants

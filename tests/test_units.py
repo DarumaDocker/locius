@@ -654,3 +654,121 @@ def test_phone_number_rules_and_brief():
     ins = s["instructions"]
     assert "Book a table for 2" in ins and "on behalf of Lucas Lu" in ins and "日本語" in ins and "not instructions" in ins
     assert {t["name"] for t in s["tools"]} == {"end_call", "press_keys"}
+
+
+# ---------------------------------------------------------------- 0.2.17: profile / tiers / vault fills / memory tidy
+def test_memory_tiers_profile_and_sensitive(tmp_path):
+    from app.runtime.store import RStore, looks_sensitive
+    st = RStore(str(tmp_path))
+    assert looks_sensitive("card 4111 1111 1111 1111") and looks_sensitive("passport E12345678")
+    assert looks_sensitive("my password is x") and not looks_sensitive("call me at +65 9123 4567")
+    r = st.add_fact("Booking ref ABC for Friday", "other", tier="recent")
+    assert r["tier"] == "recent" and st.facts(tier="long") == [] and len(st.facts(tier="recent")) == 1
+    again = st.add_fact("Booking ref ABC for Friday", "other")          # said again as long-term → promoted
+    assert again["duplicate"] and st.fact(r["id"])["tier"] == "long"
+    assert st.suggest_profile("phone", "+65 9123 4567", "said in chat")
+    assert st.suggest_profile("phone", "+65 9123 4567") is None          # same pending twice
+    assert st.suggest_profile("passport", "E1") is None                  # not a profile field
+    assert st.suggest_profile("custom:Loyalty", "4111 1111 1111 1111") is None   # sensitive
+    assert st.profile() == {}                                            # nothing changes without the user
+    p = st.profile_pending()[0]
+    st.resolve_profile(p["id"], True)
+    assert st.profile() == {"phone": "+65 9123 4567"}
+    st.set_profile("phone", "+65 8000 0000")
+    assert st.profile()["phone"] == "+65 8000 0000"
+
+
+def test_vault_fill_policy_and_scrub(store):
+    from app.sentinel import vault
+    from app.sentinel.policy import PER_USE_TOOLS
+    it = vault.save_item(store, {"kind": "card", "label": "Visa", "domains": "shop.test",
+                                 "values": {"number": "4111 1111 1111 1234", "expiry": "12/28", "cvc": "123"}})
+    assert it["masked"] == "•••• 1234" and "4111" not in json.dumps(vault.list_items(store))
+    args = {"ref": "e1", "item_id": it["id"], "field": "number"}
+    el = {"tag": "input", "input_type": "text", "name": "Card number"}
+    d = decide(store, "browser_fill_secret", args, "t1", elem=el, page={"url": "https://shop.test/pay", "title": ""})
+    assert d.decision == ASK and "•••• 1234" in d.reason and "4111" not in d.reason
+    assert decide(store, "browser_fill_secret", args, "t1", elem=el, page={"url": "https://evil.example/pay"}).decision == DENY
+    assert decide(store, "browser_fill_secret", args, "t1", elem={"tag": "input", "input_type": "password"},
+                  page={"url": "https://shop.test/"}).decision == DENY
+    assert decide(store, "browser_fill_secret", {**args, "field": "pin"}, "t1", elem=el, page={"url": "https://shop.test/"}).decision == DENY
+    store.add_grant("browser_fill_secret", "PERMANENT", None, {}, None)   # grants never cover vault fills
+    assert "browser_fill_secret" in PER_USE_TOOLS
+    assert decide(store, "browser_fill_secret", args, "t1", elem=el, page={"url": "https://shop.test/pay"}).decision == ASK
+    out = vault.scrub(store, {"snapshot": "Card 4111-1111-1111-1234 / 4111111111111234 total 123", "image_b64": "4111111111111234"})
+    assert "1234" not in out["snapshot"].replace("[VAULT_VALUE]", "") and "total 123" in out["snapshot"]
+    assert out["image_b64"] == "4111111111111234"
+    vault.note_fill("t1", "https://shop.test/pay#x")
+    assert vault.filled_here("t1", "https://shop.test/pay") and not vault.filled_here("t1", "https://shop.test/done")
+    vault.save_item(store, {"kind": "card", "label": "Visa 2", "values": {"number": ""}}, it["id"])   # empty keeps value
+    assert vault.value(store, it["id"], "number") == "4111 1111 1111 1234"
+    assert vault.delete_item(store, it["id"]) and not store.has_secret(f"vault_{it['id']}")
+
+
+def test_memory_tidy_plan_and_apply(tmp_path):
+    import asyncio
+    from app.runtime import memory_tidy as MT
+    from app.runtime.store import RStore
+    st = RStore(str(tmp_path))
+    a = st.add_fact("The user prefers aisle seats on flights.", "preference")
+    b = st.add_fact("The user prefers an aisle seat on flights.", "preference")
+    c = st.add_fact("Opened zipair.net and clicked search", "other")
+    s = st.add_fact("Card 4111 1111 1111 1234", "other")
+    keep = st.add_fact("The user's sister Anna lives in Tokyo", "person", "Anna")
+    other = st.add_fact("The user's sister Anna lives in Osaka", "person", "Anna")
+    assert not MT._near_dup("The user is a vegetarian", "The user is not a vegetarian")
+
+    class LLM:
+        async def chat(self, msgs, **kw):
+            return {"content": json.dumps({"demote": [{"id": c["id"], "reason": "log"}, {"id": "nope"}],
+                                           "profile": [{"field": "phone", "value": "+65 9123 4567"}],
+                                           "rewrite": [{"id": keep["id"], "fact": "x" * 400}]})}
+
+    sent = []
+
+    class RT:
+        store = st
+        llm = LLM()
+        async def audit(self, *a, **k): pass
+        async def publish(self, *a): pass
+        async def sentinel(self, m, path, body, **k): sent.append(body["text"])
+
+    async def go():
+        prev = await MT.run(RT(), dry_run=True)
+        assert st.fact(b["id"]) and st.fact(s["id"]) and not sent        # preview changes nothing
+        done = await MT.run(RT(), dry_run=False, from_run=prev["id"])
+        return prev, done
+    prev, done = asyncio.run(go())
+    assert done["done"]["merged"] == 1 and done["done"]["sensitive"] == 1 and done["done"]["demoted"] == 1
+    assert st.fact(a["id"]) and not st.fact(b["id"]) and "an aisle seat" in st.fact(a["id"])["history"]
+    assert st.fact(c["id"])["tier"] == "recent" and st.fact(keep["id"]) and st.fact(other["id"])
+    assert st.fact(keep["id"])["fact"] == "The user's sister Anna lives in Tokyo"      # over-long rewrite ignored
+    assert st.profile() == {} and st.profile_pending()[0]["value"] == "+65 9123 4567"
+    assert sent and "4111" not in sent[0]
+    with pytest.raises(ValueError):
+        asyncio.run(MT.run(RT(), dry_run=False, from_run=prev["id"]))   # a preview applies once
+
+
+def test_profile_suggestion_shapes_and_one_per_field(tmp_path):
+    import asyncio
+    from app.runtime import memory_tidy as MT
+    from app.runtime.store import RStore, profile_value_ok
+    assert profile_value_ok("email_work", "lucas@bytetradelab.io") and not profile_value_ok("email_work", "bytetrade")
+    assert profile_value_ok("phone", "+65 9123 4567") and not profile_value_ok("phone", "call me")
+    st = RStore(str(tmp_path))
+    f = st.add_fact("The user prefers metal pens.", "preference")
+    assert st.suggest_profile("email_work", "bytetrade") is None
+
+    class LLM:
+        async def chat(self, msgs, **kw):
+            return {"content": json.dumps({"rewrite": [{"id": f["id"], "fact": "The user prefers metal pens, such as Parker pens and Lamy."}],
+                                           "profile": [{"field": "address_work", "value": "20 Anson Rd"},
+                                                       {"field": "address_work", "value": "#1001 20 Anson Rd, Singapore 079912"},
+                                                       {"field": "email_work", "value": "bytetrade"}]})}
+
+    class RT:
+        store = st
+        llm = LLM()
+    plan = asyncio.run(MT.plan(RT()))
+    assert plan["llm"]["rewrite"] == []                               # rewrites may not grow / add details
+    assert [(s["field"], s["value"]) for s in plan["llm"]["profile"]] == [("address_work", "#1001 20 Anson Rd, Singapore 079912")]

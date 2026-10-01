@@ -96,6 +96,8 @@ class Store:
                     "name": name, "config": dumps(d["config"]), "permissions": dumps(d["permissions"]),
                     "enabled": d["enabled"], "updated_at": now_ts(),
                 })
+        from app.sentinel import vault
+        vault.init(self)
 
     # ------------------------------------------------------------ vault
     def _load_key(self) -> bytes:

@@ -123,6 +123,17 @@ TOOLS: dict[str, dict] = {
                             "replace": {"type": "boolean", "description": "true only when you mean to overwrite text you already typed into this field"}},
                            ["ref", "text"]),
     },
+    "browser_fill_secret": {
+        "connector": "browser", "capability": "interact", "operation": "type", "risk": "high", "data_class": "PUBLIC",
+        "description": "从保险箱填写证件号/会员号/信用卡（每次都要用户批准，你看不到实际内容）。Fill a value stored in the user's "
+                       "vault (ID/passport number, membership number, credit card number/expiry/CVC, holder name) into an input "
+                       "by ref. You never see the value; the user approves every single fill. Get item_id and field names from "
+                       "vault_list. Use one call per field. Never ask the user to type these numbers in chat.",
+        "parameters": _obj({"ref": {"type": S, "description": "input ref from the latest snapshot"},
+                            "item_id": {"type": S, "description": "vault item id from vault_list"},
+                            "field": {"type": S, "description": "which field of the item, e.g. number / expiry / cvc / holder / name"}},
+                           ["ref", "item_id", "field"]),
+    },
     "browser_select": {
         "connector": "browser", "capability": "interact", "operation": "select", "risk": "low", "data_class": "PUBLIC",
         "description": "选择下拉框选项。Select an option (by label or value) in a <select> element by ref.",

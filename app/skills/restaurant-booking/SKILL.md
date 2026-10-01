@@ -46,12 +46,13 @@ Recommend 1–2 with a short reason. If the user already said "just book the bes
 (one short question) and stop.
 
 ## 4. Book
-- Open the chosen booking page, set date / time / party, fill name, phone, email and special requests.
+- Open the chosen booking page, set date / time / party, fill name, phone, email (profile_get) and special requests.
 - Click the final Confirm / Book / Reserve button yourself — Sentinel shows the user an approval dialog with the details.
   Don't ask for confirmation in chat.
 - Login needed (Google account, Chope account…) → browser_request_takeover("请登录 … 以完成订位"). Never type passwords.
-- Credit card, deposit or prepayment needed → do NOT enter card details. Call browser_request_takeover so the user pays
-  themselves; say the amount and the cancellation terms first.
+- Credit card guarantee, deposit or prepayment → say the amount and the cancellation terms first. If a card is in the vault
+  (vault_list), fill it with browser_fill_secret (the user approves each field); otherwise browser_request_takeover so the
+  user enters it. Never type card numbers yourself.
 - Read the confirmation page: reference number, date, time, party size, address. "Request received / pending" means NOT
   confirmed yet — say so.
 

@@ -9,6 +9,7 @@ from app.sentinel.catalog import TOOLS
 
 ALLOW, DENY, ASK = "ALLOW", "DENY", "ASK_USER"
 RISK_ORDER = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+PER_USE_TOOLS = {"browser_fill_secret"}   # always ASK, approval scope forced to ONCE
 
 
 @dataclass
@@ -110,6 +111,34 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
             reasons.append("本任务读取过机密数据，正在把较长文本输入网页 (possible data egress)")
         elif not is_search:
             risk = _bump(risk, "medium")
+    if tool == "browser_fill_secret":
+        from app.sentinel import vault
+        it = vault.item(store, str(args.get("item_id", "")))
+        field = str(args.get("field", ""))
+        if not it:
+            return Decision(DENY, "high", "保险箱里没有这一项，请先用 vault_list 查看 (unknown vault item)")
+        if field not in it["fields"]:
+            return Decision(DENY, "high", f"「{it['label']}」没有字段 {field}，可用字段：{', '.join(it['fields'])} (unknown field)")
+        if not elem or not page:
+            return Decision(DENY, "high", "找不到要填写的输入框，请先获取页面快照 (input not found — take a snapshot first)")
+        tag = str(elem.get("tag", "")).lower()
+        if elem.get("input_type", "").lower() == "password" or elem.get("is_password"):
+            return Decision(DENY, "high", "不能把保险箱内容填进密码框 (never into a password field)")
+        if tag not in ("input", "textarea") and not elem.get("editable"):
+            return Decision(DENY, "high", f"目标元素不是输入框（{tag}）(target is not a text input)")
+        dom = guard.domain_of(page.get("url", ""))
+        if not dom:
+            return Decision(DENY, "high", "无法确定当前网站 (unknown site)")
+        if dom in set(conn["config"].get("blocked_domains") or []):
+            return Decision(DENY, "high", f"域名 {dom} 在黑名单中 (blocked domain)")
+        if not vault.domain_ok(it, dom):
+            return Decision(DENY, "high", f"「{it['label']}」只允许在 {', '.join(it['domains'])} 使用，当前网站是 {dom} "
+                                          "(item restricted to other sites)")
+        risk = "high"
+        reasons.append(f"把保险箱里的「{vault.summary_text(it, field)}」填到 {dom} 的输入框（每次使用都需要你批准）"
+                       "(fills a vault value — approved per use)")
+        if urlparse(page.get("url", "")).scheme != "https" and not (dom.endswith(".test") or dom in ("localhost", "127.0.0.1")):
+            reasons.append("⚠ 这个页面不是 HTTPS 加密连接 (page is not HTTPS)")
     if tool == "browser_press" and str(args.get("key", "")).lower() in ("enter", "return"):
         if elem and not guard.looks_like_search(elem.get("role", ""), elem.get("name", "")) and elem.get("in_form"):
             risk = _bump(risk, "high")
@@ -178,7 +207,8 @@ def _finish(store, tool: str, task_id: str, risk: str, reasons: list[str], dest:
         return Decision(ALLOW, risk, reason, dest)
 
     # ---------------------------------------------------------------- grants for high-risk actions
-    if not ctx["injection"]:
+    # vault fills are approved one by one, never by a standing grant
+    if not ctx["injection"] and tool not in PER_USE_TOOLS:
         for g in store.active_grants():
             if g["tool"] != tool:
                 continue
