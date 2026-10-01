@@ -89,10 +89,11 @@ spec:
         - {name: HOME, value: /tmp}
         - {name: RUNTIME_TOKEN, value: "{{ $rt }}"}
         - {name: RUNTIME_DATA, value: /data}
+        - {name: APP_ID, value: persona}
         - {name: WORKSPACE, value: /workspace}
         - {name: SENTINEL_URL, value: "http://127.0.0.1:8080"}
-        - {name: PERSONA_MODEL_URL, value: {{ (.Values.olaresEnv).PERSONA_MODEL_URL | default (printf "https://router.%s.olares.com/v1" (.Values.bfl).username) | quote }}}
-        - {name: PERSONA_MODEL, value: {{ (.Values.olaresEnv).PERSONA_MODEL | default "Olares/unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL" | quote }}}
+        - {name: PERSONA_MODEL_URL, value: {{ (.Values.olaresEnv).OMUSE_MODEL_URL | default (printf "https://router.%s.olares.com/v1" (.Values.bfl).username) | quote }}}
+        - {name: PERSONA_MODEL, value: {{ (.Values.olaresEnv).OMUSE_MODEL | default "Olares/unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL" | quote }}}
         - {name: PATCH_DIR, value: /cache/patch}
         resources:
           requests: {cpu: 100m, memory: 256Mi}

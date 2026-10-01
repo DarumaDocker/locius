@@ -24,6 +24,7 @@ from app.runtime.store import RStore
 SENTINEL_URL = os.environ.get("SENTINEL_URL", "http://127.0.0.1:8080")
 RUNTIME_TOKEN = os.environ.get("RUNTIME_TOKEN", "")
 WORKSPACE = os.path.realpath(os.environ.get("WORKSPACE", "/workspace"))
+APP_ID = os.environ.get("APP_ID", "omuse")   # Olares app id: the workspace shows up in Files under Data/<APP_ID>/workspace
 SKILLS_DIR = os.environ.get("SKILLS_DIR", os.path.join(os.path.dirname(os.path.dirname(__file__)), "skills"))
 
 TERMINAL = {"COMPLETED", "FAILED", "CANCELLED"}
@@ -136,7 +137,7 @@ LOCAL_TOOLS = [
         {"steps": {"type": "array", "items": {"type": "object", "properties": {
             "id": S, "description": S, "status": {"type": "string", "enum": ["pending", "running", "done", "failed", "skipped"]}}}},
          "objective": S, "note": S}, ["steps"]),
-    _fn("files_list", "列出工作区文件 List files in the workspace (Olares Files → Data/persona/workspace).", {"path": S}),
+    _fn("files_list", f"列出工作区文件 List files in the workspace (Olares Files → Data/{APP_ID}/workspace).", {"path": S}),
     _fn("files_read", "读取工作区文件（文本/Markdown/CSV/JSON/PDF）Read a workspace file.", {"path": S, "max_chars": {"type": "integer"}}, ["path"]),
     _fn("files_write", "写入工作区文件（报告、笔记、数据）Write a text file in the workspace (creates folders).",
         {"path": S, "content": S, "append": {"type": "boolean"}}, ["path", "content"]),
@@ -468,9 +469,13 @@ class Runtime:
         self.start(task_id)
 
     async def on_takeover_ended(self, payload: dict):
+        """The user handed the browser back. Resume (a) tasks that were only paused because the user had the browser and
+        (b) the task(s) the takeover was actually for. Other tasks that asked for their own takeover keep waiting:
+        resuming them too used to make every one of them ask again at once — a burst of "take over" pop-ups."""
+        for_tasks = {payload.get("task_id") or "", payload.get("requested_task") or ""} - {"", "default"}
         for t in self.store.tasks(status="WAITING_EXTERNAL", limit=50):
             w = t.get("waiting") or {}
-            if w.get("type") in ("takeover", "takeover_requested"):
+            if w.get("type") == "takeover" or (w.get("type") == "takeover_requested" and t["id"] in for_tasks):
                 full = self.store.task(t["id"])
                 pend = full["pending"] or {}
                 pend["resolved"] = {"call_id": pend.get("call_id"), "decision": "takeover_ended",

@@ -47,7 +47,7 @@ OMuse is a local-first AI agent for [Olares](https://www.olares.com). It doesn't
 ### Install
 
 - **Olares Market**: search for *OMuse* (after the listing is approved).
-- **Manual**: `python3 build.py locius` → upload `dist/locius-<version>.tgz` in Olares Market ▸ *Upload custom chart*.
+- **Manual**: `python3 build.py omuse` → upload `dist/omuse-<version>.tgz` in Olares Market ▸ *Upload custom chart*.
 
 The model endpoint defaults to `https://router.<your-olares-name>.olares.com/v1`; change it in the app's settings or the `PERSONA_MODEL_URL` / `PERSONA_MODEL` environment values. If the configured model isn't served, OMuse picks an available one.
 
@@ -90,7 +90,7 @@ OMuse 是为 [Olares](https://www.olares.com) 打造的本地优先（local-firs
 ### 安装
 
 - **Olares 应用商店**：审核通过后搜索 *OMuse*。
-- **手动安装**：`python3 build.py locius`，然后在 Olares 应用商店 ▸ *上传自定义 Chart* 中上传 `dist/locius-<版本>.tgz`。
+- **手动安装**：`python3 build.py omuse`，然后在 Olares 应用商店 ▸ *上传自定义 Chart* 中上传 `dist/omuse-<版本>.tgz`。
 
 模型接口默认是 `https://router.<你的 Olares 名称>.olares.com/v1`，可在应用设置或环境变量 `PERSONA_MODEL_URL` / `PERSONA_MODEL` 中修改；如果配置的模型不存在，OMuse 会自动选择一个可用模型。
 

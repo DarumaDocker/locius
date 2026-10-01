@@ -8,6 +8,7 @@
     </radialGradient>
   </defs>
   <rect width="512" height="512" rx="112" fill="url(#bg)"/>
-  <path d="M184 124 V372 H352" stroke="#FFFFFF" stroke-width="52" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="338" cy="170" r="42" fill="url(#glow)"/>
+  <circle cx="246" cy="270" r="118" stroke="#FFFFFF" stroke-width="52" fill="none"/>
+  <circle cx="352" cy="160" r="46" fill="#075C45"/>
+  <circle cx="352" cy="160" r="38" fill="url(#glow)"/>
 </svg>

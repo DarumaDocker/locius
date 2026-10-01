@@ -1,5 +1,5 @@
 /* English strings for the OMuse UI (keys = Chinese source strings in app.js). */
-window.LOCIUS_EN = {
+window.OMUSE_EN = {
 "刷新": "Refresh",
 "已保存 saved — 不改可留空": "saved — leave empty to keep",
 "可选 optional — Telnyx 公钥 (webhook 签名)": "optional — Telnyx public key (webhook signatures)",
@@ -487,6 +487,7 @@ window.LOCIUS_EN = {
 "🔄 重新规划 Re-plan": "🔄 Re-plan",
 "🔍 立即检查 Check now": "🔍 Check now",
 "🖐 Agent 请求你接管浏览器：": "🖐 The Agent asks you to take over the browser: ",
+"🖐 {0} 个任务在等你接管浏览器（点这里打开浏览器）": "🖐 {0} tasks are waiting for you to take over the browser (click to open the browser)",
 "🖐 你正在控制浏览器（Agent 已暂停）。完成登录/验证后点击「交还给 Agent」。": "🖐 You are controlling the browser (Agent paused). When you've finished logging in / verifying, click \"Hand back to Agent\".",
 "🖐 去浏览器接管 Take over": "🖐 Take over in Browser",
 "🖐 接管 Take over": "🖐 Take over",

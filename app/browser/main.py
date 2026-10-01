@@ -68,7 +68,7 @@ class Broker:
         self.mode = "agent"                      # agent | user
         self.takeover_reason = ""
         self.takeover_task = ""
-        self.requested = None                    # {"task_id","reason","ts"} when agent asked for help
+        self.requests: dict[str, dict] = {}      # task_id -> {"task_id","reason","ts"}: tasks that asked the user for help
         self.downloads: list[dict] = []
         self.lock = asyncio.Lock()
         self.input_lock = asyncio.Lock()
@@ -228,6 +228,18 @@ class Broker:
         self.last_used[task_id] = time.time()
         self.view_task = task_id
         return p
+
+    def open_requests(self) -> list[dict]:
+        """Takeover requests still waiting, newest first (requests older than 6 h are dropped)."""
+        now = time.time()
+        for k in [k for k, v in self.requests.items() if now - v.get("ts", 0) > 6 * 3600]:
+            self.requests.pop(k, None)
+        return sorted(self.requests.values(), key=lambda r: -r.get("ts", 0))
+
+    @property
+    def requested(self) -> dict | None:
+        reqs = self.open_requests()
+        return reqs[0] if reqs else None
 
     def view_page(self):
         p = self.pages.get(self.view_task)
@@ -593,10 +605,11 @@ async def agent_action(action: str, req: Request):
     if action == "describe_at":
         return await broker.at(task_id, float(body.get("x", 0)), float(body.get("y", 0)))
     if action == "request_takeover":
-        broker.requested = {"task_id": task_id, "reason": str(body.get("reason", ""))[:300], "ts": time.time()}
+        broker.requests[task_id] = {"task_id": task_id, "reason": str(body.get("reason", ""))[:300], "ts": time.time()}
         await broker.page_for(task_id)
         return {"ok": True, "status": "takeover_requested"}
     broker.check_agent()
+    broker.requests.pop(task_id, None)   # the task is working again, so it is no longer waiting for the user
     if action in ("find", "look", "locate"):
         async with broker.lock:
             try:
@@ -751,7 +764,7 @@ async def state():
     popup = p is not None and p in broker.parent
     return {"mode": broker.mode, "url": p.url if p is not None else "", "title": title, "view_task": broker.view_task,
             "popup": popup, "popup_opener_url": broker.parent[p].url if popup else "", "headless": broker.headless,
-            "requested": broker.requested, "takeover_task": broker.takeover_task,
+            "requested": broker.requested, "requests": broker.open_requests(), "takeover_task": broker.takeover_task,
             "tasks": [{"task_id": k, "url": v.url} for k, v in broker.pages.items() if not v.is_closed()],
             "viewport": VIEWPORT}
 
@@ -791,9 +804,13 @@ async def user_takeover(req: Request):
 
 @app.post("/user/release", dependencies=[Depends(auth)])
 async def user_release():
-    released = {"task_id": broker.takeover_task, "requested": broker.requested}
+    # only the request this takeover answered is cleared; other tasks' requests stay open (they still need the user)
+    tid = broker.takeover_task
+    req = broker.requests.pop(tid, None)
+    if req is None and tid in ("", "default") and broker.requests:
+        req = broker.requests.pop(broker.requested["task_id"])   # untargeted takeover: it answered the latest request
+    released = {"task_id": tid, "requested": req}
     broker.mode = "agent"
-    broker.requested = None
     broker.takeover_task = ""
     return {"ok": True, "released": released}
 

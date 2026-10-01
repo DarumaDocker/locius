@@ -1,9 +1,12 @@
 """Prompt templates for planner, executor, sub-agents and memory extraction."""
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
+
+APP_ID = os.environ.get("APP_ID", "omuse")   # Olares app id (Files → Data/<APP_ID>/workspace)
 
 
 def now_str(tz: str, language: str = "zh") -> str:
@@ -151,7 +154,7 @@ def executor_system(*, user_name: str, tz: str, connections: dict, plan: dict, f
         f"- Notion: {('connected (workspace ' + (connections.get('notion') or {}).get('workspace', '') + '; only pages shared with the OMuse integration are visible)') if (connections.get('notion') or {}).get('ready') else 'NOT connected'}",
         f"- Slack: {('connected (' + (connections.get('slack') or {}).get('workspace', '') + ')') if (connections.get('slack') or {}).get('ready') else 'NOT connected'}",
         f"- Google Calendar: {('connected (' + (connections.get('calendar') or {}).get('account', '') + ', time zone ' + ((connections.get('calendar') or {}).get('time_zone') or '?') + ')') if (connections.get('calendar') or {}).get('ready') else 'NOT connected (the user can connect it in 连接 Connections)'}",
-        "- Workspace files (Olares Files → Data/persona/workspace): ready",
+        f"- Workspace files (Olares Files → Data/{APP_ID}/workspace): ready",
     ]
     mcp = connections.get("mcp") or {}
     live = [x for x in mcp.get("servers") or [] if x.get("enabled") and x.get("tools")]

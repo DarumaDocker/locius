@@ -300,6 +300,10 @@ async def chat(req: Request):
             m = re.search(r"\[(e\d+)\] textbox \\\"Password", last_tool)
             return reply("", [tc("browser_type", {"ref": m.group(1) if m else "e1", "text": "hunter2"})])
         return reply(f"Typed. {last_tool[:300]}")
+    if "TAKEOVERLOOP" in goal:   # the site is still blocked after a hand-back: asks once more, then gives up
+        if n < 2:
+            return reply("", [tc("browser_request_takeover", {"reason": "still blocked on zipair"})])
+        return reply(f"Gave up: {last_tool[:200]}")
     if "TAKEOVER" in goal:
         if n == 0:
             return reply("", [tc("browser_request_takeover", {"reason": "please log in"})])

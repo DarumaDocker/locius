@@ -2,7 +2,7 @@
 import base64, hashlib, io, os, re, shutil, subprocess, sys, tarfile
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-APP = (sys.argv[1] if len(sys.argv) > 1 else "persona").strip().lower()  # app id: persona (dev install) or locius (Market)
+APP = (sys.argv[1] if len(sys.argv) > 1 else "omuse").strip().lower()  # app id: omuse (current install); persona = the old pre-2026-10 install
 if not re.fullmatch(r"[a-z][a-z0-9]{1,29}", APP):
     sys.exit("app id must be lowercase letters/digits")
 ver = re.search(r"VERSION = \"(.+?)\"", open(f"{ROOT}/app/common/util.py").read()).group(1)
@@ -26,6 +26,7 @@ if APP != "persona":
     out = out.replace("persona-voice", f"{APP}-voice")
     out = out.replace("persona-bundle", f"{APP}-bundle").replace(".Values.workloads.persona.", f".Values.workloads.{APP}.")
     out = re.sub(r"^(\s*(?:name|app): )persona$", rf"\g<1>{APP}", out, flags=re.M)
+    out = out.replace("{name: APP_ID, value: persona}", f"{{name: APP_ID, value: {APP}}}")
 dist = f"{ROOT}/dist/{APP}"
 shutil.rmtree(dist, ignore_errors=True); os.makedirs(f"{ROOT}/dist", exist_ok=True)
 shutil.copytree(f"{ROOT}/chart/persona", dist)

@@ -5,10 +5,10 @@
 // ------------------------------------------------------------------ i18n
 // UI strings are written in Chinese in the source and wrapped in T()/Tf(); English comes from i18n.js.
 const LANG = (() => {
-  try { const v = localStorage.getItem('locius_lang'); if (v === 'zh' || v === 'en') return v; } catch (e) { /* storage blocked */ }
+  try { const v = localStorage.getItem('omuse_lang'); if (v === 'zh' || v === 'en') return v; } catch (e) { /* storage blocked */ }
   return /^zh/i.test(navigator.language || '') ? 'zh' : 'en';
 })();
-const EN = window.LOCIUS_EN || {};
+const EN = window.OMUSE_EN || {};
 const CJK_RE = /[一-鿿]/;
 // Fallback for dynamic bilingual text from the server, e.g. "发送邮件 Send email" or "已拒绝 (user denied)".
 function biEn(s) {
@@ -34,7 +34,7 @@ async function syncLang() {
     const r = await api('settings');
     const srv = (r.settings || {}).language;
     if (srv === 'en' || srv === 'zh') {
-      if (srv !== LANG) { try { localStorage.setItem('locius_lang', srv); } catch (e) { /* ignore */ } location.reload(); }
+      if (srv !== LANG) { try { localStorage.setItem('omuse_lang', srv); } catch (e) { /* ignore */ } location.reload(); }
     } else {
       await api('settings', { method: 'PUT', body: { language: LANG } });
     }
@@ -176,13 +176,13 @@ async function viewChat(root) {
 const CONV_W = { min: 180, max: 560, def: 240 };
 function convResizer(wrap) {
   let saved = 0;
-  try { saved = parseInt(localStorage.getItem('locius.convW') || '0', 10); } catch (e) {}
+  try { saved = parseInt(localStorage.getItem('omuse.convW') || '0', 10); } catch (e) {}
   const set = (w, save) => {
     const max = Math.min(CONV_W.max, Math.max(CONV_W.min, (wrap.clientWidth || 1200) * 0.6));
     w = Math.round(Math.min(max, Math.max(CONV_W.min, w)));
     wrap.style.setProperty('--conv-w', w + 'px');
     bar.setAttribute('aria-valuenow', w);
-    if (save) { try { localStorage.setItem('locius.convW', String(w)); } catch (e) {} }
+    if (save) { try { localStorage.setItem('omuse.convW', String(w)); } catch (e) {} }
     return w;
   };
   const cur = () => parseInt(getComputedStyle(wrap).getPropertyValue('--conv-w')) || CONV_W.def;
@@ -1427,7 +1427,7 @@ async function viewSettings(root) {
     const body = {};
     for (const [k, el] of Object.entries(f)) body[k] = el.type === 'checkbox' ? el.checked : el.type === 'number' ? Number(el.value) : el.value;
     await api('settings', { method: 'PUT', body }); toast(T('已保存 Saved')); refreshModelChip();
-    if (body.language && body.language !== LANG) { try { localStorage.setItem('locius_lang', body.language); } catch (e) { /* ignore */ } location.reload(); }
+    if (body.language && body.language !== LANG) { try { localStorage.setItem('omuse_lang', body.language); } catch (e) { /* ignore */ } location.reload(); }
   }) }, T('保存设置 Save settings'))));
 }
 
@@ -1462,11 +1462,28 @@ function onEvent(ev) {
   } else if (ev.kind === 'approval_requested') {
     loadApprovals();
   } else if (ev.kind === 'takeover_requested') {
-    toast(T('🖐 Agent 请求你接管浏览器：') + (ev.reason || ''), false, () => { location.hash = 'browser'; });
+    takeoverToast(ev);
   } else if (ev.kind === 'notification') {
     toast('🔔 ' + ev.notification.title + T('：') + ev.notification.body);
   } else if (ev.kind === 'memory_update' && S.view === 'memory') route();
   else if ((ev.kind === 'schedule_update' || ev.kind === 'goal_update') && S.view === 'schedules') route();
+}
+
+// Takeover requests arriving close together (several tasks blocked on the same site) become ONE pop-up, and the same
+// task never pops up twice within a minute.
+const TK = { q: new Map(), timer: null, last: new Map() };
+function takeoverToast(ev) {
+  const now = Date.now();
+  if (now - (TK.last.get(ev.task_id) || 0) < 60000) return;
+  TK.last.set(ev.task_id, now);
+  TK.q.set(ev.task_id, ev.reason || '');
+  clearTimeout(TK.timer);
+  TK.timer = setTimeout(() => {
+    const reasons = [...TK.q.values()]; TK.q.clear();
+    const go = () => { location.hash = 'browser'; };
+    if (reasons.length === 1) toast(T('🖐 Agent 请求你接管浏览器：') + reasons[0], false, go);
+    else if (reasons.length) toast(Tf("🖐 {0} 个任务在等你接管浏览器（点这里打开浏览器）", reasons.length), false, go);
+  }, 800);
 }
 
 // The stream can drop without the page noticing (laptop sleep, network change, Olares session refresh): the browser

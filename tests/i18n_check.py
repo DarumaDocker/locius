@@ -2,7 +2,7 @@
 import json, re, subprocess, sys
 sys.path.insert(0, '/tmp/claude-0')
 src = open('app/web/app.js', encoding='utf-8').read()
-en = json.loads(re.search(r'window\.LOCIUS_EN = (\{.*\});', open('app/web/i18n.js', encoding='utf-8').read(), re.S).group(1))
+en = json.loads(re.search(r'window\.OMUSE_EN = (\{.*\});', open('app/web/i18n.js', encoding='utf-8').read(), re.S).group(1))
 keys = set()
 for m in re.finditer(r"\bT\((['`])((?:\\.|(?!\1).)*)\1\)", src):
     keys.add(m.group(2))
