@@ -1009,3 +1009,21 @@ def test_chinese_requests_for_text_to_use_stay_chinese():
     assert P.wants_cjk_output("帮 Olares One 想 5 个产品 slogan")
     assert not P.wants_cjk_output("帮我写一封英文求职信") and not P.wants_cjk_output("帮我查一下邮件里的账单")
     assert not P.wants_cjk_output("总结一下这份报告") and not P.wants_cjk_output("Write a poem about rain")
+
+
+def test_gantt_one_day_items_and_sg_tickers():
+    from app.common import charts as CH
+    svg = CH.render({"type": "gantt", "title": "t", "tasks": [{"name": "Deadline", "start": "2026-10-03", "end": "2026-10-03"},
+                                                              {"name": "Work", "start": "2026-10-01", "end": "2026-10-05"}]})
+    assert "<svg" in svg and "Deadline" in svg
+    from app.sentinel.market import NAMES
+    assert NAMES["Mapletree Pan Asia Commercial Trust"] == "N2IU.SI" and NAMES["CICT"] == "C38U.SI"
+
+
+def test_data_query_rejects_unknown_keys(tmp_path):
+    from app.common import dataq as D
+    import pytest
+    p = tmp_path / "x.csv"
+    p.write_text("a,b\n1,2\n", encoding="utf-8")
+    with pytest.raises(D.DataError, match="unknown query key"):
+        D.run(str(p), {"queries": [{"col": "a", "op": ">", "value": 0}]})

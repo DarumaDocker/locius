@@ -111,6 +111,13 @@ check("match: a Chinese request gets the Chinese rule", "RULE=语言：简体中
 c.put(B + "/api/settings", json={"language": "en", "reply_language": "match"}, headers=H)
 t, res = langcheck()
 check("match + English UI: a Chinese request is answered in Chinese", "RULE=语言：简体中文" in res, res)
+# 0.2.34: English app, but a Chinese request for text to use as written (a poem) runs in Chinese
+c.put(B + "/api/settings", json={"language": "en", "reply_language": ""}, headers=H)
+r = c.post(B + "/api/chat", json={"message": "LANGCHECK 帮我写一首关于新加坡雨季的现代诗"}, headers=H).json()
+t = wait(r["task_id"])
+check("en app + Chinese poem request: the task runs in Chinese", "RULE=语言：简体中文" in (t.get("result") or ""), t.get("result"))
+t, res = langcheck()
+check("en app + ordinary Chinese request: still English", "RULE=LANGUAGE: ENGLISH" in res, res)
 c.put(B + "/api/settings", json={"language": "zh", "reply_language": ""}, headers=H)
 
 print("\n" + ("ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}"))

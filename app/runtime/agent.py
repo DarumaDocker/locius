@@ -588,8 +588,13 @@ class Runtime:
 
     async def _run_guarded(self, task_id: str):
         t0 = self.store.task(task_id) or {}
-        if self.store.settings().get("reply_language") == "match":
+        s0 = self.store.settings()
+        if s0.get("reply_language") == "match":
             _TASK_LANG.set(request_lang(t0.get("goal") or ""))   # this asyncio task only (and what it spawns)
+        elif (s0.get("language") == "en" and request_lang(t0.get("goal") or "") == "zh"
+              and prompts.wants_cjk_output(t0.get("goal") or "")):
+            # 2026-10-02 R8/R10: a note in the English prompt wasn't enough — "写一篇 5000 字的科幻小说" still came out in English
+            _FORCE_LANG.set("zh")
         try:
             await self.run(task_id)
         except Exception as e:
@@ -1694,7 +1699,8 @@ class Runtime:
         if r.get("errors"):
             parts.append("没取到 failed: " + "; ".join(r["errors"]))
         if not r.get("results"):
-            return "ERROR: " + "; ".join(r.get("errors") or ["no data"]) + "（检查代码，例如 0700.HK、^HSI、HKD=X check the ticker）"
+            return "ERROR: " + "; ".join(r.get("errors") or ["no data"]) + ("（检查代码，例如 0700.HK、^HSI、HKD=X；不确定代码时直接写公司全名，会自动查找 check the ticker — if unsure, pass "
+                                                                     "the full company name instead and it is looked up）")
         return ("\n\n".join(parts) + "\n来源 source: Yahoo Finance。画走势图可直接用 make_chart(type=line, symbols=[…], range=…) "
                 "To chart it, call make_chart with symbols + range (it fetches the series itself).")
 
@@ -1713,7 +1719,8 @@ class Runtime:
         if r.get("errors"):
             parts.append("没取到 failed: " + "; ".join(r["errors"]))
         if not r.get("results"):
-            return "ERROR: " + "; ".join(r.get("errors") or ["no data"]) + "（检查代码，例如 TSLA、1211.HK check the ticker）"
+            return "ERROR: " + "; ".join(r.get("errors") or ["no data"]) + ("（检查代码，例如 TSLA、1211.HK；不确定代码时直接写公司全名 check the ticker — if unsure, pass the "
+                                                                     "full company name instead and it is looked up）")
         return "\n\n".join(parts) + "\n来源 source: Yahoo Finance（数据可能有延迟 may be delayed）。"
 
     async def _send_file(self, t: dict, a: dict) -> str:
@@ -2401,9 +2408,16 @@ def request_lang(text: str) -> str:
     return "zh" if prompts.cjk_share(t) >= 0.3 else "en"
 
 
+_FORCE_LANG: contextvars.ContextVar[str] = contextvars.ContextVar("omuse_force_lang", default="")
+
+
 def agent_lang(settings: dict) -> str:
     """The agent's language: 'en' or 'zh'. Settings → Language (unset = Chinese, as before), unless Settings → Reply
-    language is "match": then each task answers in the language its request was written in (set per run)."""
+    language is "match": then each task answers in the language its request was written in (set per run). A request
+    written in Chinese for Chinese text to use as written (a story, a post …) runs in Chinese whatever the setting."""
+    forced = _FORCE_LANG.get()
+    if forced in ("en", "zh"):
+        return forced
     lg = _TASK_LANG.get()
     if lg in ("en", "zh") and (settings or {}).get("reply_language") == "match":
         return lg

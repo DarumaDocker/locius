@@ -19,7 +19,14 @@ RANGES = {"5d": "1d", "1mo": "1d", "3mo": "1d", "6mo": "1wk", "ytd": "1wk", "1y"
 ALIASES = {"1m": "1mo", "3m": "3mo", "6m": "6mo", "12m": "1y", "1yr": "1y", "year": "1y", "2yr": "2y", "3yr": "3y",
            "5yr": "5y", "10yr": "10y", "1w": "5d", "week": "5d", "month": "1mo"}
 # common names the model may pass instead of tickers
-NAMES = {"腾讯": "0700.HK", "汇丰": "0005.HK", "渣打": "2888.HK", "小米": "1810.HK", "比亚迪": "1211.HK", "阿里巴巴": "9988.HK",
+NAMES = {"海峡时报指数": "^STI", "新加坡海峡时报指数": "^STI", "STI": "^STI", "星展": "D05.SI", "星展银行": "D05.SI", "DBS": "D05.SI",
+         "华侨银行": "O39.SI", "OCBC": "O39.SI", "大华银行": "U11.SI", "UOB": "U11.SI", "新电信": "Z74.SI", "Singtel": "Z74.SI",
+         "CapitaLand Integrated Commercial Trust": "C38U.SI", "CICT": "C38U.SI", "凯德综合商业信托": "C38U.SI",
+         "Mapletree Pan Asia Commercial Trust": "N2IU.SI", "MPACT": "N2IU.SI", "丰树泛亚商业信托": "N2IU.SI",
+         "Frasers Centrepoint Trust": "J69U.SI", "FCT": "J69U.SI", "CapitaLand Ascendas REIT": "A17U.SI", "Ascendas REIT": "A17U.SI",
+         "Mapletree Logistics Trust": "M44U.SI", "Mapletree Industrial Trust": "ME8U.SI", "Keppel REIT": "K71U.SI",
+         "Suntec REIT": "T82U.SI", "Sea": "SE", "Grab": "GRAB",
+         "腾讯": "0700.HK", "汇丰": "0005.HK", "渣打": "2888.HK", "小米": "1810.HK", "比亚迪": "1211.HK", "阿里巴巴": "9988.HK",
          "美团": "3690.HK", "宁德时代": "300750.SZ", "茅台": "600519.SS", "贵州茅台": "600519.SS", "恒生指数": "^HSI", "恒指": "^HSI",
          "标普500": "^GSPC", "标普": "^GSPC", "纳指": "^IXIC", "纳斯达克": "^IXIC", "道指": "^DJI", "日经": "^N225", "黄金": "GC=F",
          "比特币": "BTC-USD", "英伟达": "NVDA", "苹果": "AAPL", "微软": "MSFT", "特斯拉": "TSLA", "谷歌": "GOOGL", "亚马逊": "AMZN",

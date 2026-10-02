@@ -330,7 +330,9 @@ def gantt(spec: dict) -> str:
         else:
             days = _num(t.get("days")) or (_num(t.get("weeks")) or 1) * 7
             en = st + _dt.timedelta(days=int(days))
-        if en <= st:
+        if en == st:   # a one-day item or a deadline (2026-10-02 R10-04: "due 10/03" gave start = end)
+            en = st + _dt.timedelta(days=1)
+        if en < st:
             raise ChartError(f"「{t.get('name', '')}」的结束日期要晚于开始日期 (end must be after start)")
         rows.append((str(t.get("name") or ""), st, en))
         prev_end = en

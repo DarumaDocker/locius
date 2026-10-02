@@ -525,8 +525,16 @@ def _sort(cols, rows, spec):
     return rows
 
 
+QUERY_KEYS = {"sheet", "pattern", "header", "derive", "where", "where_any", "group_by", "agg", "pivot", "trend", "having",
+              "sort", "select", "totals", "limit", "save"}
+
+
 def run(path: str, q: dict) -> tuple[list[str], list[dict], dict]:
     """Apply one query. Returns (columns, rows, info)."""
+    bad = sorted(set(q) - QUERY_KEYS)
+    if bad:   # 2026-10-02 R10-09: conditions nested under "queries" inside a query were silently ignored → whole table
+        raise DataError(f"unknown query key(s) {bad}; a query object uses only {sorted(QUERY_KEYS)} — e.g. "
+                        '{"where": [{"col": "status", "op": ">=", "value": 500}], "group_by": ["path"], "agg": [{"fn": "count"}]}')
     cols, rows = load(path, q.get("sheet"), q.get("pattern"), q.get("header", True))
     info = {"source_rows": len(rows), "columns": list(cols)}
     if q.get("derive"):     # first, so where / group_by can use derived columns (z-scores see the whole table)
