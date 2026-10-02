@@ -884,6 +884,11 @@ class Runtime:
                 f"- {x.get('path')} ({x.get('kind') or AT.kind_of(x.get('path', ''))}, {x.get('size')} bytes)" for x in conv_files[-30:])
                 + "\nWhen the user refers to them, open them with files_read (documents) or file_look (images, videos, audio, "
                 "scanned PDFs).")
+        if agent_lang(s) == "en" and prompts.wants_cjk_output(t["goal"]):
+            # 2026-10-02 R8: the app is in English but this request asks for text to use in Chinese (a post, a story …)
+            extra += ("\n## Output language for this request\nThe user asked, in Chinese, for text they will use as written: write "
+                      "that text (the post, story, poem, message, translation …) in Chinese — or in the language they name. "
+                      "Your own notes and the short explanation around it stay in English.")
         if not transcript:
             first = t["goal"]
             if t.get("attachments"):
