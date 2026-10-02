@@ -987,7 +987,7 @@ def test_requested_target_language_is_not_rewritten():
     assert P.wants_cjk_output("把这份日文菜单翻译成中文") and P.wants_cjk_output("Translate this into Japanese")
     assert P.wants_cjk_output("用中文回答我") and not P.wants_cjk_output("帮我看看最重要的邮件")
     assert not P.wants_cjk_output("How big is the Chinese market?")
-    assert "One exception" in P.language_rule("en")
+    assert "Exceptions:" in P.language_rule("en")
 
 
 def test_stranded_answer_is_merged_into_a_final_that_points_back():
@@ -1000,3 +1000,12 @@ def test_stranded_answer_is_merged_into_a_final_that_points_back():
     assert out.startswith("Here are the bills") and out.endswith("covers all bills.")
     assert M(tr, "Here are your bills: none found.") == "Here are your bills: none found."     # no pointer back
     assert M(tr, "如上表所示，共 20 笔。").startswith("Here are the bills")
+
+
+def test_chinese_requests_for_text_to_use_stay_chinese():
+    # 2026-10-02 R8 (app in English): 小红书 posts, a couplet and a wedding toast asked for in Chinese came out in English
+    from app.runtime import prompts as P
+    assert P.wants_cjk_output("给一家社区咖啡店写 3 条小红书风格的推广文案") and P.wants_cjk_output("写一副春联")
+    assert P.wants_cjk_output("帮 Olares One 想 5 个产品 slogan")
+    assert not P.wants_cjk_output("帮我写一封英文求职信") and not P.wants_cjk_output("帮我查一下邮件里的账单")
+    assert not P.wants_cjk_output("总结一下这份报告") and not P.wants_cjk_output("Write a poem about rain")

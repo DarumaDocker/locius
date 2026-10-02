@@ -211,7 +211,8 @@ LOCAL_TOOLS = [
         "LOOK at a workspace image, a video (still frames + the speech, if a speech model is available), a scanned PDF, or "
         "LISTEN to an audio file, and answer your question about it — e.g. files the user attached or media you saved.",
         {"path": S, "question": {"type": "string", "description": "what you want to know about the file"}}, ["path", "question"]),
-    _fn("files_write", "写入工作区文件（报告、笔记、数据）Write a text file in the workspace (creates folders).",
+    _fn("files_write", "写入工作区文件（报告、笔记、数据）；append=true 在末尾追加。返回字数。Write a text file in the workspace (creates "
+        "folders); append=true adds to the end. Returns the word / character count.",
         {"path": S, "content": S, "append": {"type": "boolean"}}, ["path", "content"]),
     _fn("files_search", "在工作区文件中搜索文字 Search text inside workspace files.", {"query": S}, ["query"]),
     _fn("send_file", "把工作区里的文件发到对话里（报告、PDF、表格、照片、视频等）：图片直接显示，视频/音频可以直接播放，其他文件可下载；"
@@ -1950,7 +1951,17 @@ class Runtime:
             os.makedirs(os.path.dirname(p), exist_ok=True)
             with open(p, "a" if a.get("append") else "w", encoding="utf-8") as f:
                 f.write(str(a.get("content", "")))
-            return f"已写入 written: {os.path.relpath(p, WORKSPACE)} ({os.path.getsize(p)} bytes)"
+            # 2026-10-02 R8-20 ("a 5000-character story"): the model guessed lengths from bytes and rewrote the whole file
+            # again and again; give it the real length, and tell it to append instead of rewriting
+            try:
+                txt = open(p, encoding="utf-8", errors="replace").read(4_000_000)
+            except OSError:
+                txt = ""
+            cjk = len(re.findall(r"[\u3400-\u9fff\uf900-\ufaff]", txt))
+            words = len(re.findall(r"[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)*", txt))
+            size = (f"{cjk} Chinese characters + {words} words" if cjk else f"{words} words")
+            return (f"已写入 written: {os.path.relpath(p, WORKSPACE)} ({os.path.getsize(p)} bytes; {size}). "
+                    "To make it longer, add text with append=true instead of rewriting the file.")
         if name == "send_file":
             return await self._send_file(t, a)
         if name == "file_look":

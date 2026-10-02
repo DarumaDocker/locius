@@ -25,6 +25,7 @@ spec:
 
     Runs on the local models served by your Olares by default — any OpenAI-compatible endpoint works. English and 中文 interface.
   upgradeDescription: |
+    0.2.32: Text you ask for in Chinese (posts, poems, toasts, messages) is written in Chinese even with the app in English; file writes report word counts; fewer 'runtime unavailable' blips
     0.2.31: Answers written mid-task are no longer lost behind a short 'see above' reply; plans skip services that aren't connected
     0.2.30: Translations and texts you ask for in another language stay in that language even when the app is in English
     0.2.29: data_query: derived columns, column-to-column filters, having; invest() for regular saving; optional reply-in-your-language setting; web-call budget
@@ -32,4 +33,3 @@ spec:
     0.2.27: Date/time form fields accept free text; search results skip accessories and ads; no image downloads unless asked; test forms use placeholder data
     0.2.26: Faster web research: OMuse searches the web in one step and reads several pages at once (in parallel, without clicking through them), so research and comparison questions finish much sooner. It turns down optional cookies on consent banners without asking you, never sends the same file twice, and always puts the key results in its answer even when it attaches a file.
     0.2.25: Answers stay in the chat unless you ask for a file: OMuse makes a PDF, Word or Excel file only when you ask for one (or the result is too long for a message), so quick requests finish sooner.
-    0.2.24: Word documents and safer file handling. OMuse makes Word (.docx) files itself — headings, lists, tables and charts — so it never pastes your content into online converters; once a task has read your files, typing long text into a website asks for your approval first. Quicker answers for general questions (no needless browsing), and the browser live view no longer jumps between tasks.

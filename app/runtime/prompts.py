@@ -97,8 +97,10 @@ def language_rule(language: str) -> str:
                 "English — even when the user's message, emails, web pages, files, memory or tool results are in Chinese or any "
                 "other language. Translate what you need; quote non-English names or text as-is only when it matters. This "
                 "setting (Settings → Language = English) overrides any language preference found in memory and the language "
-                "the user happens to write in. One exception: content the user explicitly asks for in another language (\"translate "
-                "into Chinese\", \"write it in Japanese\") is written in that language; your own explanation around it stays English.")
+                "the user happens to write in. Exceptions: content the user explicitly asks for in another language (\"translate "
+                "into Chinese\", \"write it in Japanese\") is written in that language, and text the user asked for in Chinese "
+                "to use as written (a poem, story, post, toast, message, email, slogan, couplet) is written in Chinese; your own "
+                "explanation around it stays English.")
     return ("语言：简体中文。LANGUAGE: SIMPLIFIED CHINESE. 思考、推理、计划、备注、计划更新、通知和最终回答都用简体中文——"
             "即使用户消息、邮件、网页、文件或工具结果是英文或其他语言。Think, plan and answer in Simplified Chinese.")
 
@@ -108,9 +110,22 @@ _WANTS_CJK = re.compile(r"(翻译|译|改写|写|回答|回复|输出)[^。！�
                         r"\b(in|into|to)\s+(Chinese|Mandarin|Japanese|Korean)\b", re.I)
 
 
+_CREATE_ZH = re.compile(r"写|创作|起草|拟一?[份个封篇条]|编[一个几]|改写|润色|命名|取名|起名|"
+                        r"文案|致辞|祝酒词|朋友圈|小红书|对联|春联|横批|诗|小说|段子|笑话|讲稿|串词|口号|标语|slogan", re.I)
+_ASKS_EN = re.compile(r"英文|英语|English", re.I)
+
+
 def wants_cjk_output(goal: str) -> bool:
-    """The user explicitly asked for Chinese / Japanese / Korean text (a translation, a reply in Chinese …)."""
-    return bool(_WANTS_CJK.search(str(goal or "")))
+    """The user asked for Chinese / Japanese / Korean text: explicitly ("translate into Chinese", "reply in Chinese"), or
+    by asking in Chinese for something to use as written (a poem, a post, a toast, a message) — 2026-10-02 R8: with the
+    app in English a 小红书 post, a couplet and a wedding toast requested in Chinese came out in English."""
+    g = str(goal or "")
+    if _WANTS_CJK.search(g):
+        return True
+    c = len(_CJK.findall(g))
+    a = len(re.findall(r"[A-Za-z]", g))
+    zh = c / (c + a / 4) >= 0.3 if (c + a) else False
+    return zh and bool(_CREATE_ZH.search(g)) and not _ASKS_EN.search(g)
 
 
 def cjk_share(text: str) -> float:

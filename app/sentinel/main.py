@@ -57,7 +57,8 @@ async def lifespan(app):
     from app.common import stallwatch
     stallwatch.start(SDATA, "sentinel")
     store = Store(SDATA)
-    proxy_client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
+    # keep-alive shorter than uvicorn's (5 s): reusing a connection the runtime is closing gave sporadic 503s
+    proxy_client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0), limits=httpx.Limits(keepalive_expiry=3.0))
     store.audit("sentinel", "sentinel.start", detail={"version": VERSION})
     try:
         mcp_hub.sync_catalog(store)
@@ -1347,8 +1348,18 @@ async def proxy(path: str, request: Request):
     body = await request.body()
     rq = proxy_client.build_request(request.method, url, params=request.query_params, headers=headers, content=body)
     try:
-        r = await proxy_client.send(rq, stream=True)
-    except httpx.HTTPError:
+        try:
+            r = await proxy_client.send(rq, stream=True)
+        except (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadError) as e:
+            # a pooled connection closed under us (or the runtime is restarting): one retry for reads and uploads-free calls
+            if request.method not in ("GET", "HEAD"):
+                raise
+            print(f"[proxy] retry {request.method} /api/{path}: {type(e).__name__}", flush=True)
+            await asyncio.sleep(0.3)
+            rq = proxy_client.build_request(request.method, url, params=request.query_params, headers=headers, content=body)
+            r = await proxy_client.send(rq, stream=True)
+    except httpx.HTTPError as e:
+        print(f"[proxy] 503 {request.method} /api/{path}: {type(e).__name__}: {str(e)[:120]}", flush=True)
         return JSONResponse({"detail": "Agent Runtime 暂不可用 (runtime unavailable)"}, status_code=503)
     resp_headers = {k: v for k, v in r.headers.items() if k.lower() not in HOP and k.lower() != "content-encoding"}
 
