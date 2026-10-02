@@ -4,7 +4,12 @@ set -e
 ROLE="$1"
 echo "[persona:$ROLE] unpacking bundle"
 rm -rf /tmp/persona && mkdir -p /tmp/persona /cache/pip
-base64 -d /bundle/app.tgz.b64 | tar xz -C /tmp/persona
+# the bundle is xz-compressed (keeps the Helm release under Kubernetes' 1 MB Secret limit); python's tarfile
+# auto-detects xz/gzip, so no xz binary is needed in the images
+base64 -d /bundle/app.tgz.b64 > /tmp/persona-bundle
+python3 -c "import sys, tarfile; t = tarfile.open(sys.argv[1]); t.extractall(sys.argv[2], **({'filter': 'fully_trusted'} if hasattr(tarfile, 'fully_trusted_filter') else {}))" /tmp/persona-bundle /tmp/persona \
+  || tar xf /tmp/persona-bundle -C /tmp/persona
+rm -f /tmp/persona-bundle
 # dev hot-patch: files placed in $PATCH_DIR/app/... override the bundle (used for quick fixes)
 if [ -n "$PATCH_DIR" ] && [ -d "$PATCH_DIR/app" ]; then echo "[persona:$ROLE] applying patches from $PATCH_DIR"; cp -r "$PATCH_DIR/app/." /tmp/persona/app/; fi
 if [ "$ROLE" = "browser" ]; then REQ=/tmp/persona/requirements-browser.txt; PYDIR=/cache/py-browser; else REQ=/tmp/persona/requirements.txt; PYDIR=/cache/py; fi

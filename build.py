@@ -1,5 +1,5 @@
 """Build the Olares chart: bundle app code into the ConfigMap and package persona-<ver>.tgz."""
-import base64, hashlib, io, os, re, shutil, subprocess, sys, tarfile
+import base64, hashlib, io, lzma, os, re, shutil, subprocess, sys, tarfile
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 APP = (sys.argv[1] if len(sys.argv) > 1 else "omuse").strip().lower()  # app id: omuse (current install); persona = the old pre-2026-10 install
@@ -7,7 +7,9 @@ if not re.fullmatch(r"[a-z][a-z0-9]{1,29}", APP):
     sys.exit("app id must be lowercase letters/digits")
 ver = re.search(r"VERSION = \"(.+?)\"", open(f"{ROOT}/app/common/util.py").read()).group(1)
 buf = io.BytesIO()
-with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+# xz, not gzip: the bundle sits in the Helm release twice (chart + rendered manifest) and the release Secret
+# must stay under Kubernetes' 1 MB limit; gzip had 0.2.20 at ~1.06 MB, xz brings it to ~0.87 MB
+with tarfile.open(fileobj=buf, mode="w:xz", preset=9 | lzma.PRESET_EXTREME) as tar:
     def filt(ti):
         if "__pycache__" in ti.name or ti.name.endswith(".pyc"):
             return None
@@ -49,3 +51,21 @@ tgz = f"{ROOT}/dist/{APP}-{ver}.tgz"
 with tarfile.open(tgz, "w:gz") as tar:
     tar.add(dist, arcname=APP)
 print(f"bundle {len(raw)} bytes (b64 {len(b64)}), chart {os.path.getsize(tgz)} bytes -> {tgz}")
+
+
+def helm_release_estimate(chart_dir, manifest):
+    """Approximate size of Helm's release Secret: base64(gzip(json(chart files as base64 + rendered manifest)))."""
+    import gzip, json
+    files = []
+    for r, _, fs in os.walk(chart_dir):
+        for f in fs:
+            p = os.path.join(r, f)
+            files.append({"name": os.path.relpath(p, chart_dir), "data": base64.b64encode(open(p, "rb").read()).decode()})
+    j = json.dumps({"chart": {"files": files}, "manifest": manifest}).encode()
+    return len(base64.b64encode(gzip.compress(j, 9)))
+
+
+est = helm_release_estimate(dist, out)
+print(f"helm release ~{est} bytes (Kubernetes Secret limit 1048576)")
+if est > 980_000:
+    sys.exit(f"helm release too large ({est} bytes): the upgrade would fail; shrink the bundle")
