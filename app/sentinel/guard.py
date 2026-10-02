@@ -231,9 +231,17 @@ _CART_ADD = re.compile(r"^\s*(add to (cart|basket|bag|trolley)|add to shopping (
                        r"(\s*,\s*(shift|alt|ctrl|control|cmd|command|option|meta|[a-z0-9]))*\s*$", re.I)
 
 
+# Cookie / consent banners: refusing optional cookies is the privacy-preserving choice and needs no approval
+# (accepting them still does). The 2026-10-02 research test stalled on an "Accept all" approval.
+_COOKIE_DECLINE = re.compile(r"^\s*(reject( all)?( cookies)?|decline( all)?( cookies)?|deny( all)?|refuse( all)?|"
+                             r"(use |accept )?(only )?(strictly )?(necessary|essential)( cookies)?( only)?|continue without accepting|"
+                             r"拒绝(全部|所有)?(cookie|Cookie)?|仅(接受)?必要(的)?(cookie|Cookie)?|只接受必要|全部拒绝|"
+                             r"すべて拒否|拒否する|必要なもののみ)\s*$", re.I)
+
+
 def click_is_risky(role: str, name: str, input_type: str = "") -> bool:
     label = f"{name or ''}"
-    if _CART_ADD.search(label):
+    if _CART_ADD.search(label) or _COOKIE_DECLINE.search(label):
         return False
     if (input_type or "").lower() == "submit":
         return True

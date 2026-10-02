@@ -56,6 +56,7 @@ out = t.get("result") or ""
 check("Word file made locally with the chart inside", "reports/summary.docx" in out and "1 images" in out, out[:600])
 msgs = c.get(f"{B}/api/conversations/{r['conversation_id']}").json()["messages"]
 cards = [json.loads(m["content"]) for m in msgs if m["role"] == "system"]
-check("docx sent to the chat as a Word file", any("wordprocessing" in (x.get("mime") or "") for x in cards), cards)
+check("docx sent to the chat as a Word file", sum("wordprocessing" in (x.get("mime") or "") for x in cards) == 1, cards)
+check("a second send of the same file is skipped", "Already in the chat" in out, out[-400:])
 print("ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}")
 sys.exit(1 if fails else 0)

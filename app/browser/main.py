@@ -75,6 +75,7 @@ class Broker:
         self.input_lock = asyncio.Lock()
         self.view_pinned_until = 0.0             # the user picked a task to watch: agents don't move the view meanwhile
         self.finished: dict[str, float] = {}     # task_id -> when the task ended (its page may be recycled)
+        self.temp_pages: set = set()             # short-lived pages of browser_search / browser_read (not a task's page)
         self.last_used: dict[str, float] = {}
         self.parent: dict = {}                    # popup page -> opener page (e.g. "Sign in with Google" windows)
         self.xvfb = None
@@ -238,7 +239,8 @@ class Broker:
         if not create:
             return None
         await self._recycle()
-        blank = [pg for pg in self.ctx.pages if pg.url in ("about:blank", "") and pg not in self.pages.values()]
+        blank = [pg for pg in self.ctx.pages if pg.url in ("about:blank", "") and pg not in self.pages.values()
+                 and pg not in self.temp_pages]
         p = blank[0] if blank else await self.ctx.new_page()
         self.pages[task_id] = p
         self.last_used[task_id] = time.time()
@@ -757,6 +759,102 @@ async def make_png(req: Request):
     return {"path": os.path.relpath(op, WORKSPACE), "size": len(data)}
 
 
+# ================================================================== fast search / read (no snapshot round trips)
+SEARCH_JS = r"""() => {
+  const out = [];
+  const dec = (h) => { try { const u = new URL(h, location.href); const g = u.searchParams.get('uddg');
+                             return g ? decodeURIComponent(g) : u.href; } catch (e) { return h; } };
+  for (const r of document.querySelectorAll('.result, .web-result')) {
+    const a = r.querySelector('a.result__a'); if (!a) continue;
+    const sn = r.querySelector('.result__snippet');
+    out.push({title: a.innerText.trim(), url: dec(a.getAttribute('href')), snippet: sn ? sn.innerText.trim() : ''});
+  }
+  if (!out.length) for (const r of document.querySelectorAll('li.b_algo')) {   // Bing
+    const a = r.querySelector('h2 a'); if (!a) continue;
+    let url = a.href; const m = url.match(/[?&]u=a1([^&]+)/);
+    if (m) { try { url = atob(m[1].replace(/-/g, '+').replace(/_/g, '/')); } catch (e) {} }
+    const sn = r.querySelector('.b_caption p, p');
+    out.push({title: a.innerText.trim(), url, snippet: sn ? sn.innerText.trim() : ''});
+  }
+  return out;
+}"""
+READ_JS = r"""(limit) => {
+  const pick = document.querySelector('article') || document.querySelector('main, [role=main]') || document.body;
+  let t = (pick ? pick.innerText : '') || '';
+  if (t.length < 400 && document.body) t = document.body.innerText || t;
+  t = t.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+  return {title: document.title, url: location.href, text: t.slice(0, limit), length: t.length};
+}"""
+
+
+async def _temp_page():
+    p = await broker.ctx.new_page()
+    broker.temp_pages.add(p)
+    return p
+
+
+async def _close_temp(p):
+    broker.temp_pages.discard(p)
+    try:
+        await p.close()
+    except Exception:
+        pass
+
+
+async def web_search(query: str, n: int = 8) -> dict:
+    from urllib.parse import quote_plus
+    engines = [("duckduckgo", "https://html.duckduckgo.com/html/?q=" + quote_plus(query)),
+               ("bing", "https://www.bing.com/search?setlang=en&q=" + quote_plus(query))]
+    if os.environ.get("SEARCH_ENGINES"):   # tests: "name=url-prefix,..."
+        engines = [(e.split("=", 1)[0], e.split("=", 1)[1] + quote_plus(query))
+                   for e in os.environ["SEARCH_ENGINES"].split(",") if "=" in e]
+    last = ""
+    for name, url in engines:
+        p = await _temp_page()
+        try:
+            await p.goto(url, wait_until="domcontentloaded", timeout=25000)
+            await asyncio.sleep(0.8)
+            res = await p.evaluate(SEARCH_JS)
+        except Exception as e:
+            res, last = [], f"{name}: {str(e)[:120]}"
+        finally:
+            await _close_temp(p)
+        res = [r for r in res if r.get("url", "").startswith("http") and check_url(r["url"])[0]]
+        if res:
+            return {"query": query, "engine": name, "results": res[:max(1, min(int(n or 8), 10))]}
+        last = last or f"{name}: no results"
+    return {"query": query, "engine": "", "results": [], "error": last}
+
+
+async def web_read(urls: list[str], limit: int = 6000) -> dict:
+    async def one(u: str) -> dict:
+        ok, why = check_url(u)
+        if not ok:
+            return {"url": u, "error": why}
+        p = await _temp_page()
+        try:
+            resp = await p.goto(u, wait_until="domcontentloaded", timeout=25000)
+            await asyncio.sleep(1.2)
+            r = await p.evaluate(READ_JS, limit)
+            try:
+                blk = await p.main_frame.evaluate(BLOCK_JS, resp.status if resp else 0)
+            except Exception:
+                blk = None
+            if blk:
+                r["blocked"] = blk
+            r["status"] = resp.status if resp else 0
+            return r
+        except Exception as e:
+            msg = str(e)
+            if "ERR_BLOCKED_BY_CLIENT" in msg:
+                return {"url": u, "error": "该地址被安全策略拦截 (blocked by egress policy)"}
+            return {"url": u, "error": f"打开失败 could not open: {msg[:160]}"}
+        finally:
+            await _close_temp(p)
+    pages = await asyncio.gather(*[one(str(u)) for u in urls[:4]])
+    return {"pages": pages}
+
+
 # ================================================================== agent API
 @app.post("/agent/{action}", dependencies=[Depends(auth)])
 async def agent_action(action: str, req: Request):
@@ -777,6 +875,13 @@ async def agent_action(action: str, req: Request):
             broker.finished[task_id] = time.time()
         broker.requests.pop(task_id, None)
         return {"ok": True}
+    if action == "search":
+        return await web_search(str(body.get("query", ""))[:300], int(body.get("max_results") or 8))
+    if action == "read":
+        urls = body.get("urls") or ([body["url"]] if body.get("url") else [])
+        if isinstance(urls, str):
+            urls = [urls]
+        return await web_read([str(u) for u in urls if str(u).strip()][:4])
     broker.check_agent(task_id)
     broker.requests.pop(task_id, None)   # the task is working again, so it is no longer waiting for the user
     if action in ("find", "look", "locate"):

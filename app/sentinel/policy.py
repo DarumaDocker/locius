@@ -86,6 +86,26 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
         elif ctx["injection"] and dom not in ctx["domains"] and not trusted and carries_data:
             risk = _bump(risk, "high")
             reasons.append("本任务读到疑似提示注入的内容后，要访问一个带参数的新网址 (possible exfiltration after injection)")
+    if tool == "browser_read":
+        cfg = conn["config"]
+        urls = args.get("urls") or ([args["url"]] if args.get("url") else [])
+        if isinstance(urls, str):
+            urls = [urls]
+        if not urls:
+            return Decision(DENY, "low", "缺少参数 urls (give 1–4 URLs)")
+        for u in [str(x) for x in urls][:4]:
+            ok, why = guard.check_url(u)
+            if not ok:
+                return Decision(DENY, "high", f"{why}: {u[:80]}")
+            dom = guard.domain_of(u)
+            if dom in set(cfg.get("blocked_domains") or []):
+                return Decision(DENY, "high", f"域名 {dom} 在黑名单中 (blocked domain)")
+            p = urlparse(u)
+            carries_data = bool(p.query) or len(p.path or "") > 60
+            if tainted and dom not in ctx["domains"] and dom not in set(cfg.get("allowed_domains") or []) and carries_data:
+                risk = _bump(risk, "high")
+                reasons.append("本任务已读取机密数据，且此网址带有参数，可能造成数据外泄 (data egress check)")
+                break
     if tool == "browser_save_media":
         if args.get("url") and not str(args["url"]).startswith("data:"):
             ok, why = guard.check_url(str(args["url"]))

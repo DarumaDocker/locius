@@ -98,6 +98,20 @@ TOOLS: dict[str, dict] = {
                             "mark_read": {"type": "boolean"}}, ["message_ids"]),
     },
     # ------------------------------------------------------------------ Browser
+    "browser_search": {
+        "connector": "browser", "capability": "browse", "operation": "read", "risk": "low", "data_class": "PUBLIC",
+        "description": "网页搜索（一次调用返回标题、网址和摘要，比打开搜索页快）。Web search: one call returns titles, URLs and "
+                       "snippets — faster than opening a search page. Then read the best results with browser_read.",
+        "parameters": _obj({"query": {"type": S, "description": "搜索词 search words"},
+                            "max_results": {"type": "integer", "description": "1-10, default 8"}}, ["query"]),
+    },
+    "browser_read": {
+        "connector": "browser", "capability": "browse", "operation": "read", "risk": "low", "data_class": "PUBLIC",
+        "description": "一次读取 1–4 个网页的正文（并行，不做页面快照），用来查资料。要点击、填表或页面需要交互时用 browser_navigate。"
+                       " Read the main text of 1–4 web pages at once (in parallel, no snapshot) — for looking things up. Use "
+                       "browser_navigate when you need to click, fill in forms or the page is interactive.",
+        "parameters": _obj({"urls": {"type": "array", "items": {"type": S}, "description": "1–4 个网址 URLs"}}, ["urls"]),
+    },
     "browser_navigate": {
         "connector": "browser", "capability": "browse", "operation": "navigate", "risk": "low", "data_class": "PUBLIC",
         "description": "在浏览器中打开网址，返回页面快照。Open a URL in the agent's browser; returns an accessibility snapshot "

@@ -35,6 +35,7 @@ WAITING = {"WAITING_APPROVAL", "WAITING_EXTERNAL", "PAUSED"}
 RESULT_LIMIT = 9000
 SEND_FILE_MAX = 200 * 1024 * 1024    # chat download; Telegram's own bot limit (50 MB) is checked by Sentinel
 SUBAGENT_TOOLS = {"gmail_search", "gmail_get_message", "gmail_get_thread", "browser_navigate", "browser_snapshot",
+                  "browser_search", "browser_read",
                   "browser_click", "browser_type", "browser_press", "browser_scroll", "browser_back", "browser_wait",
                   "browser_select", "browser_find", "browser_look", "browser_locate", "browser_click_at", "files_read", "file_look", "files_list", "files_search", "memory_search", "market_data", "stock_fundamentals", "calculate"}
 # Loop guard: small local models sometimes repeat the exact same call until the step budget is gone
@@ -488,6 +489,7 @@ class Runtime:
         self.running: dict[str, asyncio.Task] = {}
         self._remakes: dict[tuple, int] = {}   # (task, tool, output) -> files made, see REMAKE_MAX
         self._confidential: set[str] = set()   # tasks that read the user's files (Sentinel was told)
+        self._sent_files: set[tuple] = set()    # (task, file, size, mtime) already posted to the chat
         self.cancel_flags: set[str] = set()
         self.pause_flags: set[str] = set()
         self._catalog_cache = (0.0, None)
@@ -1668,7 +1670,7 @@ class Runtime:
         raw = [str(x) for x in raw if str(x or "").strip()][:20]
         if not raw:
             return "ERROR: 需要 path 或 paths (give path or paths)"
-        items, total = [], 0
+        items, total, dup = [], 0, []
         for r in raw:
             p = self._path(r)
             if os.sep + ".quarantine" in p:
@@ -1679,8 +1681,16 @@ class Runtime:
             total += size
             if size > SEND_FILE_MAX or total > SEND_FILE_MAX:
                 return f"ERROR: 文件太大 ({total // 1_000_000} MB > {SEND_FILE_MAX // 1_000_000} MB) file too large to send."
+            key = (t["id"], os.path.realpath(p), size, int(os.path.getmtime(p)))
+            if key in self._sent_files:   # the same file was already posted in this task (e.g. charts are auto-sent)
+                dup.append(os.path.basename(p))
+                continue
+            self._sent_files.add(key)
             items.append({"path": os.path.relpath(p, WORKSPACE), "name": os.path.basename(p), "size": size,
                           "mime": mimetypes.guess_type(p)[0] or "application/octet-stream"})
+        if not items:
+            return (f"已经发过了，不用再发 Already in the chat (sent earlier in this task): {', '.join(dup)}. "
+                    "Do not send it again; write the final answer with the key results.")
         note = truncate(str(a.get("note") or ""), 300)
         if len(items) == 1:
             info = {"type": "file", **items[0], "note": note, "task_id": t["id"]}

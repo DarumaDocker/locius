@@ -332,6 +332,49 @@ async def _browser(store, tool: str, args: dict, task_id: str) -> dict:
                 "from_page": res.get("url"),
                 "next": "用 send_file 发给用户（多张一起用 paths），或用 file_look 查看 — send_file it to the user (several at once with "
                         "paths) or file_look it." + (" (保存的是元素截图 saved as a screenshot of the element)" if sv.get("method") == "screenshot" else "")}
+    if action == "search":
+        res = await broker("POST", "/agent/search", payload, timeout=90.0)
+        txt = "\n".join(f"{r.get('title', '')} {r.get('snippet', '')}" for r in res.get("results") or [])
+        flags = guard.scan_injection(txt)
+        if flags:
+            store.update_task_ctx(task_id, injection=flags)
+        out = {"trust": "untrusted", "source": f"web search ({res.get('engine') or 'none'}): {args.get('query', '')}",
+               "results": res.get("results") or [],
+               "next": "用 browser_read 一次读 2–4 个最相关的网址 — browser_read the 2–4 most relevant URLs in one call."}
+        if res.get("error") and not res.get("results"):
+            out["error"] = res["error"]
+        if flags:
+            out["injection_warning"] = flags
+        return out
+    if action == "read":
+        res = await broker("POST", "/agent/read", payload, timeout=120.0)
+        pages, allflags = [], []
+        for pg in res.get("pages") or []:
+            if pg.get("error"):
+                pages.append({"url": pg.get("url"), "error": pg["error"]})
+                continue
+            text, _n = guard.redact_secrets(pg.get("text") or "")
+            flags = guard.scan_injection(text)
+            allflags += flags
+            dom = guard.domain_of(pg.get("url", ""))
+            if dom:
+                store.update_task_ctx(task_id, domain=dom)
+            item = {"url": pg.get("url"), "title": pg.get("title"), "text": text, "chars": pg.get("length")}
+            blk = pg.get("blocked")
+            if isinstance(blk, dict):
+                item["blocked"] = {"kind": str(blk.get("kind", ""))[:40], "detail": str(blk.get("detail", ""))[:120]}
+                item["text"] = text[:300]
+            elif (pg.get("length") or 0) < 200:
+                item["note"] = ("页面几乎没有文字（可能需要 JavaScript、登录，或被拦截）；需要的话用 browser_navigate 打开 "
+                                "little text: the page may need JavaScript or a login, or block bots — use browser_navigate if needed")
+            pages.append(item)
+        if allflags:
+            store.update_task_ctx(task_id, injection=sorted(set(allflags)))
+        out = {"trust": "untrusted", "source": "web pages " + ", ".join(str(p.get("url", ""))[:80] for p in pages)[:200],
+               "pages": pages}
+        if allflags:
+            out["injection_warning"] = sorted(set(allflags))
+        return vault.scrub(store, out)
     snap = await broker("POST", f"/agent/{action}", payload, timeout=180.0 if action == "wait" else 90.0)
     out = vault.scrub(store, _snap_envelope(store, task_id, snap))
     if action == "locate" and snap.get("image_b64"):

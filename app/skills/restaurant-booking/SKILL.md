@@ -17,7 +17,7 @@ description: 订餐厅：查真实空位、比较、预订（Google 地图 / Res
 - A specific restaurant: `https://www.google.com/maps/search/<restaurant name>+<city>?hl=en`, then open the place.
 - Pick 5–8 that fit: rating ≥ 4.3 with a decent number of reviews (unless the user says otherwise), open at that time, price fits.
   Skip "Sponsored" results unless they clearly fit.
-- If Google shows a SITE BLOCKED / "unusual traffic" page, use `https://duckduckgo.com/html/?q=<query>` and the platforms in step 2.
+- If Google shows a SITE BLOCKED / "unusual traffic" page, use browser_search and the platforms in step 2.
 
 ## 2. Check REAL availability
 For each candidate, in this order:

@@ -401,3 +401,16 @@ async def slow_page(s: float = 6, name: str = "slow"):
     import asyncio as _a
     await _a.sleep(min(s, 20))
     return HTMLResponse(f"<html><head><title>{name}</title></head><body><h1>{name}</h1><button>Go</button></body></html>")
+
+
+@app.get("/ddg")
+async def fake_ddg(q: str = ""):
+    """DuckDuckGo-html-like results page (browser_search)."""
+    rows = "".join(f'<div class="result"><a class="result__a" href="/l/?uddg=http%3A%2F%2Fshop.test%3A8094%2Fslow%3Fs%3D0%26name%3DPage{i}">'
+                   f'Result {i} for {q}</a><a class="result__snippet">Snippet {i} about {q}</a></div>' for i in range(1, 6))
+    return HTMLResponse(f"<html><body>{rows}</body></html>")
+
+
+@app.get("/emptysearch")
+async def fake_empty_search(q: str = ""):
+    return HTMLResponse("<html><body>Please complete the challenge</body></html>")

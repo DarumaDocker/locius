@@ -901,3 +901,11 @@ def test_calculator_is_exact_and_safe():
     ln = calc.loan(3e6, 3.5, 25, 12)
     assert ln["payment"] == 15018.71 and ln["schedule"][0]["interest"] == 8750.0 and len(ln["schedule"]) == 12
     assert "| 1 | 15,018.71 | 6,268.71 | 8,750.00 |" in calc.fmt(ln)
+
+
+def test_cookie_decline_needs_no_approval():
+    from app.sentinel.guard import click_is_risky
+    for label in ("Reject all", "Reject All Cookies", "Only necessary", "Use necessary cookies only", "Decline", "拒绝全部", "仅必要"):
+        assert not click_is_risky("button", label), label
+    for label in ("Accept all", "Accept", "Agree", "Submit order"):
+        assert click_is_risky("button", label), label

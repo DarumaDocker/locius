@@ -15,7 +15,7 @@ help-center forms — or by email. Try them in that order unless the user says o
 - A key fact is missing (which order? which outcome?) → ask the user one short question first.
 
 ## 2. Find the channel
-- Search `https://duckduckgo.com/html/?q=<company>+contact+live+chat` (or `+cancel+subscription`, `+return+refund`).
+- Search with browser_search `<company> contact live chat` (or `+cancel+subscription`, `+return+refund`).
 - Self-service first: Account → Subscriptions / Orders → Return or Cancel is usually faster than chat.
 - Login needed → browser_request_takeover("请登录 <site>"). Never type passwords or one-time codes.
 - Chat widgets usually live in an iframe (refs look like [f1e3]) or a shadow root. Look for Chat / Live chat / Messaging /
