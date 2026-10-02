@@ -1046,7 +1046,7 @@ class Runtime:
                         if st.get("status") == "done"]
                 final = prompts.L(agent_lang(s), "（任务已结束，但模型没有返回文字说明。）" + ("已完成：" + "；".join(map(str, done)) if done else ""),
                                   "(The task ended but the model wrote no answer.)" + (" Done: " + "; ".join(map(str, done)) if done else ""))
-            if agent_lang(s) == "en" and prompts.cjk_share(final) > 0.5:
+            if agent_lang(s) == "en" and prompts.cjk_share(final) > 0.5 and not prompts.wants_cjk_output(t["goal"]):
                 final = await self._rewrite_in_english(task_id, transcript, final)
             transcript.append({"role": "assistant", "content": final})
             plan = t["plan"]

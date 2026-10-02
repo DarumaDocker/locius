@@ -97,9 +97,20 @@ def language_rule(language: str) -> str:
                 "English — even when the user's message, emails, web pages, files, memory or tool results are in Chinese or any "
                 "other language. Translate what you need; quote non-English names or text as-is only when it matters. This "
                 "setting (Settings → Language = English) overrides any language preference found in memory and the language "
-                "the user happens to write in.")
+                "the user happens to write in. One exception: content the user explicitly asks for in another language (\"translate "
+                "into Chinese\", \"write it in Japanese\") is written in that language; your own explanation around it stays English.")
     return ("语言：简体中文。LANGUAGE: SIMPLIFIED CHINESE. 思考、推理、计划、备注、计划更新、通知和最终回答都用简体中文——"
             "即使用户消息、邮件、网页、文件或工具结果是英文或其他语言。Think, plan and answer in Simplified Chinese.")
+
+
+_WANTS_CJK = re.compile(r"(翻译|译|改写|写|回答|回复|输出)[^。！？\n]{0,12}(成|为|用)?\s*(中文|汉语|简体|繁体|日文|日语|韩文|韩语)|"
+                        r"(用|以)\s*(中文|汉语|日文|日语|韩文)|(中文|日文|日语|韩文)版|"
+                        r"\b(in|into|to)\s+(Chinese|Mandarin|Japanese|Korean)\b", re.I)
+
+
+def wants_cjk_output(goal: str) -> bool:
+    """The user explicitly asked for Chinese / Japanese / Korean text (a translation, a reply in Chinese …)."""
+    return bool(_WANTS_CJK.search(str(goal or "")))
 
 
 def cjk_share(text: str) -> float:

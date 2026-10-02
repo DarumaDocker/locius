@@ -979,3 +979,12 @@ def test_invest_schedule_and_sign_free_fv():
     assert v["balance"] == 147249.8 and v["contributed"] == 120000 and len(v["years"]) == 10
     assert round(calc.fv(0.04 / 12, 120, -1000), 2) == 147249.8
     assert "final balance 147,249.80" in calc.fmt(v)
+
+
+def test_requested_target_language_is_not_rewritten():
+    # 2026-10-02 R6-04: "把日文菜单翻译成中文" answered in English because Settings → Language = English
+    from app.runtime import prompts as P
+    assert P.wants_cjk_output("把这份日文菜单翻译成中文") and P.wants_cjk_output("Translate this into Japanese")
+    assert P.wants_cjk_output("用中文回答我") and not P.wants_cjk_output("帮我看看最重要的邮件")
+    assert not P.wants_cjk_output("How big is the Chinese market?")
+    assert "One exception" in P.language_rule("en")
