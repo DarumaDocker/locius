@@ -909,3 +909,15 @@ def test_cookie_decline_needs_no_approval():
         assert not click_is_risky("button", label), label
     for label in ("Accept all", "Accept", "Agree", "Submit order"):
         assert click_is_risky("button", label), label
+
+
+def test_date_time_inputs_get_their_iso_format():
+    # 2026-10-02 R4-18: httpbin's <input type=time> took "2026-10-03 12:00" / "12:00 PM" as garbage keystrokes
+    from app.browser.main import normalize_date_input as N
+    assert N("time", "2026-10-03 12:00") == "12:00"
+    assert N("time", "12:00 PM") == "12:00" and N("time", "7:30 pm") == "19:30" and N("time", "12:15 AM") == "00:15"
+    assert N("time", "下午 3:05") == "15:05"
+    assert N("date", "2026/10/3") == "2026-10-03" and N("date", "2026年12月20日") == "2026-12-20"
+    assert N("datetime-local", "2026-10-03 9:00") == "2026-10-03T09:00"
+    assert N("month", "2026-9") == "2026-09"
+    assert N("text", "12:00 PM") == "12:00 PM" and N("time", "noon") == "noon"

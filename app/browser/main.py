@@ -947,6 +947,11 @@ async def agent_action(action: str, req: Request):
                 loc = broker.locate(task_id, body.get("ref", ""))
                 text = str(body.get("text", ""))
                 try:
+                    try:   # <input type=time/date/…> only accepts its ISO format: "12:00 PM" or "2026-10-03 12:00" fail
+                        kind = await loc.evaluate("e => (e.tagName === 'INPUT' ? e.type : '')", timeout=3000)
+                    except Exception:
+                        kind = ""
+                    text = normalize_date_input(kind, text)
                     try:
                         await loc.fill(text, timeout=8000)
                     except Exception:
@@ -1151,3 +1156,40 @@ async def _user_input(body: dict):
 @app.exception_handler(HTTPException)
 async def http_exc(req, exc: HTTPException):
     return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+
+
+_DATE_KINDS = ("date", "time", "datetime-local", "month", "week")
+
+
+def normalize_date_input(kind: str, text: str) -> str:
+    """Rewrite free text into the value format a date/time <input> accepts (date YYYY-MM-DD, time HH:MM,
+    datetime-local YYYY-MM-DDTHH:MM, month YYYY-MM). Other inputs, or text that can't be parsed, pass through."""
+    if kind not in _DATE_KINDS:
+        return text
+    t = text.strip()
+    d = re.search(r"(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})", t)
+    tm = re.search(r"(\d{1,2})[:：](\d{2})(?:[:：]\d{2})?\s*([AaPp]\.?[Mm]\.?|上午|下午|晚上)?", t)
+    hhmm = ""
+    if tm:
+        h, m, ap = int(tm.group(1)), int(tm.group(2)), (tm.group(3) or "").lower().replace(".", "")
+        if not ap:   # Chinese puts it first: 下午 3:05
+            pre = re.search(r"(上午|下午|晚上)\s*$", t[:tm.start()])
+            ap = pre.group(1) if pre else ""
+
+        if ap in ("pm", "下午", "晚上") and h < 12:
+            h += 12
+        if ap in ("am", "上午") and h == 12:
+            h = 0
+        if 0 <= h < 24 and 0 <= m < 60:
+            hhmm = f"{h:02d}:{m:02d}"
+    ymd = f"{int(d.group(1)):04d}-{int(d.group(2)):02d}-{int(d.group(3)):02d}" if d else ""
+    if kind == "time":
+        return hhmm or text
+    if kind == "date":
+        return ymd or text
+    if kind == "datetime-local":
+        return f"{ymd}T{hhmm or '00:00'}" if ymd else text
+    if kind == "month":
+        mo = re.search(r"(\d{4})[-/.年](\d{1,2})", t)
+        return f"{int(mo.group(1)):04d}-{int(mo.group(2)):02d}" if mo else text
+    return text
