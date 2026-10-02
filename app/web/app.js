@@ -591,6 +591,8 @@ function evLine(e) {
       (d.profile_suggestions || []).length ? ' ' + T('📝 档案修改待你确认（记忆页）：') + d.profile_suggestions.join(T('；')) : ''].join('').trim()); break;
     case 'profile_read': body = h('span', { class: 'muted' }, Tf("🪪 读取档案：{0}", (d.fields || []).join(', ') || T('全部'))); break;
     case 'replanning': body = h('span', { style: 'color:var(--warn)' }, T('🔄 重新规划 Re-plan')); break;
+    case 'chart': body = h('span', null, Tf("📊 图表：{0}", (d.title || d.path || ''))); break;
+    case 'gave_up': body = h('span', { style: 'color:var(--warn)' }, T('🛑 同样的来源反复失败，停止重试，按已有信息作答')); break;
     case 'error': case 'planner_error': body = h('span', { style: 'color:var(--danger)' }, '❌ ' + (d.message || '')); break;
     default: body = h('span', { class: 'muted' }, e.type + ' ' + JSON.stringify(d).slice(0, 200));
   }
@@ -1673,6 +1675,7 @@ async function viewSettings(root) {
       langField(s, f),
       field('user_name', T('你的名字'), 'Your name'), field('timezone', T('时区（定时任务）'), 'Timezone'),
       field('max_steps', T('每个任务最多步数'), 'Max steps', 'number'),
+      field('max_minutes', T('每个任务最长用时（分钟）'), 'Time limit (minutes)', 'number'),
       tog('memory_extraction', T('任务结束后自动提取长期记忆 Auto memory extraction')),
       tog('memory_consolidation', T('每天自动整理记忆并发送报告到 Telegram Daily memory tidy')),
       field('memory_consolidate_at', T('每天整理时间（HH:MM）'), 'Tidy at'),

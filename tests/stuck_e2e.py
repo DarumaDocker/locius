@@ -71,6 +71,36 @@ check("the other site then works", res[4].get("ok") is True, res[4] if len(res) 
 check("the agent's instructions list the dead end", "dead_ends_in_prompt=True" in (t.get("result") or ""), t.get("result"))
 check("no give-up when the switch made progress", not any(e["type"] == "gave_up" for e in ev))
 
+# ---------------------------------------------------------------- 3. prompt-cache friendliness (0.2.23)
+calls = httpx.get("http://127.0.0.1:8090/calls_for", params={"marker": "SWITCHSRC"}, timeout=10).json()
+systems = {x["system"] for x in calls}
+check("system prompt identical on every step (model server can reuse its cache)", len(calls) >= 4 and len(systems) == 1,
+      (len(calls), len(systems)))
+check("live status (time, plan, dead ends) comes last, not in the system prompt",
+      all(x["last"].startswith(("（系统）当前状态", "(System) Status")) for x in calls[:-1])
+      and "Dead ends" not in calls[0]["system"] and any("nosuch.test" in x["last"] for x in calls), [x["last"][:120] for x in calls])
+# ---------------------------------------------------------------- 4. time budget (0.2.23)
+c.put(B + "/api/settings", json={"max_minutes": 0.5}, headers=H).raise_for_status()
+t0 = time.time()
+t = run("SLOWTASK 查一下很多网页")
+took = time.time() - t0
+check("time budget ends a slow task with an answer", t["status"] == "FAILED" and "用时上限" in (t.get("error") or "")
+      and "SLOW SUMMARY" in (t.get("result") or ""), (t["status"], t.get("error"), t.get("result")))
+check("wrap-up note given before the limit", "wrap-up note seen: True" in (t.get("result") or ""), t.get("result"))
+check("stopped near the limit", took < 60, took)
+c.put(B + "/api/settings", json={"max_minutes": s0.get("max_minutes", 20)}, headers=H)
+# ---------------------------------------------------------------- 4b. re-making the same file (0.2.23)
+c.put(B + "/api/settings", json={"max_steps": 40}, headers=H).raise_for_status()
+t = run("REMAKEXLSX 香港行程导出 Excel")
+res = [e["data"] for e in t["events"] if e["type"] == "tool_result" and e["data"]["name"] == "make_xlsx"]
+check("2nd remake gets a 'stop redoing' note", len(res) >= 2 and "Made 2 times" in res[1]["preview"], [r["preview"][:160] for r in res[:2]])
+check("5th remake of the same file is refused", len(res) == 6 and all(r["ok"] for r in res[:4]) and not res[4]["ok"]
+      and "already made 4 times" in res[4]["preview"], [(r["ok"], r["preview"][:80]) for r in res])
+# ---------------------------------------------------------------- 5. tool-call markup never becomes the answer (0.2.23)
+c.put(B + "/api/settings", json={"max_steps": 3}, headers=H).raise_for_status()
+t = run("MARKUPFINAL 查一下特斯拉的财报")
+check("raw <tool_call> text in a final answer is dropped and the model is asked again",
+      (t.get("result") or "").startswith("MARKUP FIXED") and "<tool_call>" not in (t.get("result") or ""), t.get("result"))
 c.put(B + "/api/settings", json={"max_steps": s0.get("max_steps", 30)}, headers=H)
 print("ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}")
 sys.exit(1 if fails else 0)

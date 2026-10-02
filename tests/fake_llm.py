@@ -92,7 +92,8 @@ async def chat(req: Request):
     allu = "\n".join(str(m["content"]) for m in msgs if m["role"] == "user")
     tnames = [t["function"]["name"] for t in (b.get("tools") or [])]
     if "ZHANSWER" in goal:   # a model that answers in Chinese although the setting is English
-        last = str(msgs[-1]["content"])
+        last = next((str(m["content"]) for m in reversed(msgs)
+                     if not str(m["content"]).startswith(("(System) Status", "（系统）当前状态"))), "")
         if last.startswith("(System) Settings → Language is English"):
             return reply("Here is the most important email: the security alert from Google Workspace about a suspicious login.")
         return reply("最重要的邮件是 Google Workspace 发来的可疑登录安全告警，建议尽快检查。")
@@ -291,6 +292,52 @@ async def chat(req: Request):
         if n == 1:
             return reply("", [tc("send_file", {"path": "reports/brief.md", "note": "今天的简报 today's brief"})])
         return reply("文件已发送 File sent: " + last_tool[:200])
+    if "MARKETTEST" in goal:   # market_data for numbers, make_chart(symbols=...) for a comparison chart
+        if n == 0:
+            return reply("", [tc("market_data", {"symbols": ["0700.HK", "hsbc holdings", "NOPE.XX"], "range": "1y"})])
+        if n == 1:
+            return reply("", [tc("make_chart", {"type": "line", "title": "汇丰 vs 渣打", "symbols": ["0005.HK", "2888.HK"], "range": "2y"})])
+        return reply("MARKET RESULTS:\n" + "\n=====\n".join(str(m["content"])[:8000] for m in tools_done))
+    if "CALCTEST" in goal:   # calculate: exact loan maths instead of the model's guesses
+        if n == 0:
+            return reply("", [tc("calculate", {"expressions": ["loan(3000000, 3.5, 25, 2)", "pmt(r, 300, 3e6)", "1/0"],
+                                               "variables": json.dumps({"r": "0.035/12"})})])
+        return reply("CALC RESULTS:\n" + "\n".join(str(m["content"]) for m in tools_done))
+    if "FUNDTEST" in goal:   # stock_fundamentals: valuations + reported financials, unknown ticker reported
+        if n == 0:
+            return reply("", [tc("stock_fundamentals", {"symbols": ["TSLA", "1211.HK", "NOPE.XX"]})])
+        return reply("FUND RESULTS:\n" + "\n=====\n".join(str(m["content"])[:6000] for m in tools_done))
+    if "REMAKEXLSX" in goal:   # the 2026-10-02 itinerary run: the same Excel file re-made again and again
+        if n < 6:
+            return reply("", [tc("make_xlsx", {"output": "trip.xlsx", "sheets": [{"name": "Plan", "columns": ["Day", "Cost"],
+                                                                                   "rows": [["D1", 100 + n]]}]})])
+        return reply("REMAKE DONE:\n" + "\n=====\n".join(str(m["content"])[:400] for m in tools_done))
+    if "MARKUPFINAL" in goal:   # the 2026-10-02 Tesla run: a final answer (no tools offered) that was only tool-call markup
+        if b.get("tools"):
+            return reply("", [tc("browser_navigate", {"url": PAGE + f"?m={n}"})])
+        if "<tool_call>" not in allu:   # the nudge (zh or en) names the markup
+            return reply('<tool_call>\n<function=update_plan>\n<parameter=steps>\n[{"id": "s1", "status": "done"}]\n'
+                         '</parameter>\n</function>\n</tool_call>')
+        return reply("MARKUP FIXED: plain answer")
+    if "CHARTTEST" in goal:   # make_chart: a line chart shown in the chat, a bad spec, a flow chart embedded in a PDF
+        if n == 0:
+            return reply("", [tc("make_chart", {"type": "line", "title": "腾讯 0700.HK 近一年", "source": "测试数据",
+                                                "labels": ["2025-10", "2025-11", "2025-12", "2026-01"],
+                                                "series": json.dumps([{"name": "收盘价", "values": [410, 435, 452, 470]}])})])
+        if n == 1:
+            return reply("", [tc("make_chart", {"type": "bar", "title": "坏数据", "labels": ["a", "b"], "values": [1]})])
+        if n == 2:
+            return reply("", [tc("make_chart", {"type": "flow", "title": "报销流程", "steps": ["提交", "主管审批", "财务审核", "付款"],
+                                                "send": False})])
+        if n == 3:
+            return reply("", [tc("make_pdf", {"markdown": "# 报告\n\n![流程](charts/报销流程.png)\n", "output": "reports/chart_report.pdf"})])
+        return reply("CHART RESULTS:\n" + "\n=====\n".join(str(m["content"])[:300] for m in tools_done))
+    if "SLOWTASK" in goal:   # a slow research task: told to wrap up at 70% of the time budget, answers at 100%
+        if not b.get("tools"):
+            return reply(f"SLOW SUMMARY after {n} pages; wrap-up note seen: {'time budget' in allu}")
+        import asyncio as _a
+        await _a.sleep(4)
+        return reply("", [tc("browser_navigate", {"url": PAGE + f"?page={n}"})])
     if "STUCKLOOP" in goal:   # the 2026-10-02 HSBC run: the same Google Finance link, 3 copies per turn, forever
         if not b.get("tools"):
             return reply(f"STUCK SUMMARY after {n} tool results; asked to stop: {'停止重试' in allu or 'retrying has stopped' in allu}")
@@ -298,7 +345,7 @@ async def chat(req: Request):
         return reply("", [tc("browser_navigate", {"url": url}), tc("browser_navigate", {"url": url}),
                           tc("browser_navigate", {"url": url})])
     if "SWITCHSRC" in goal:   # a source that keeps failing: after 3 failures the host is blocked, the agent switches site
-        dead_seen = "Dead ends in this task" in sys
+        dead_seen = "Dead ends in this task" in allu
         if n < 4:
             return reply("", [tc("browser_navigate", {"url": f"http://nosuch.test:8099/quote{n}"})])
         if n == 4:
@@ -453,6 +500,18 @@ async def chat(req: Request):
             return reply('<tool_call>{"name": "files_write", "arguments": {"path": "notes/a.md", "content": "hello"}}</tool_call>')
         return reply("<think>hidden</think>Wrote file: " + last_tool)
     return reply("<think>reasoning here</think>你好！这是一个普通回答。")
+
+
+@app.get("/calls_for")
+async def calls_for(marker: str):
+    """Executor requests whose conversation contains `marker`: the system prompt and the last message of each."""
+    out = []
+    for b in CALLS:
+        ms = b.get("messages") or []
+        if any(marker in str(m.get("content")) for m in ms if m.get("role") == "user") and ms and ms[0].get("role") == "system" \
+                and "planning module" not in str(ms[0].get("content")):
+            out.append({"system": ms[0]["content"], "last": str(ms[-1].get("content")), "n": len(ms)})
+    return out
 
 
 @app.get("/calls")

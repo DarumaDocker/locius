@@ -1,5 +1,8 @@
 /* English strings for the OMuse UI (keys = Chinese source strings in app.js). */
 window.OMUSE_EN = {
+"每个任务最长用时（分钟）": "Time limit per task (minutes)",
+"📊 图表：{0}": "📊 Chart: {0}",
+"🛑 同样的来源反复失败，停止重试，按已有信息作答": "🛑 The same sources kept failing — stopped retrying and answered with what was found",
 "刷新": "Refresh",
 "已保存 saved — 不改可留空": "saved — leave empty to keep",
 "可选 optional — Telnyx 公钥 (webhook 签名)": "optional — Telnyx public key (webhook signatures)",

@@ -40,6 +40,8 @@ sched: Scheduler = None  # type: ignore
 @asynccontextmanager
 async def lifespan(app):
     global rt, sched
+    from app.common import stallwatch
+    stallwatch.start(DATA, "runtime")
     rt = Runtime(DATA, publish)
     sched = Scheduler(rt)
     sched.start()

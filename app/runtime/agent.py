@@ -36,7 +36,7 @@ RESULT_LIMIT = 9000
 SEND_FILE_MAX = 200 * 1024 * 1024    # chat download; Telegram's own bot limit (50 MB) is checked by Sentinel
 SUBAGENT_TOOLS = {"gmail_search", "gmail_get_message", "gmail_get_thread", "browser_navigate", "browser_snapshot",
                   "browser_click", "browser_type", "browser_press", "browser_scroll", "browser_back", "browser_wait",
-                  "browser_select", "browser_find", "browser_look", "browser_locate", "browser_click_at", "files_read", "file_look", "files_list", "files_search", "memory_search"}
+                  "browser_select", "browser_find", "browser_look", "browser_locate", "browser_click_at", "files_read", "file_look", "files_list", "files_search", "memory_search", "market_data", "stock_fundamentals", "calculate"}
 # Loop guard: small local models sometimes repeat the exact same call until the step budget is gone
 # (e.g. opening one RSS feed 24 times in a row). Identical calls are refused after REPEAT_STREAK in a row,
 # and read-type calls after REPEAT_TOTAL anywhere in the task. Tools where repeating is normal are exempt from the streak rule.
@@ -135,6 +135,8 @@ def repeat_guard(transcript: list[dict], call: dict) -> str | None:
 # told which sources to avoid, 3rd time (or after MAX_REPLANS re-plans) it stops and answers with what it has.
 HOST_FAIL_MAX = 3
 MAX_REPLANS = 4
+COMPRESS_HIGH, COMPRESS_LOW = 70000, 40000   # chars of context: compress old tool results in one batch
+TIME_NUDGE = 0.7   # share of the time budget (Settings → max_minutes) after which the agent is told to wrap up
 
 
 def _host(url) -> str:
@@ -237,6 +239,63 @@ LOCAL_TOOLS = [
          "source": {"type": "string", "description": "或者：工作区里的 .csv / .md 文件 or a workspace .csv/.md file"},
          "formulas": {"type": "boolean", "description": "保留以 = 开头的公式（如 =SUM(B2:B9)）keep simple formulas; default false"}},
         ["output"]),
+    _fn("calculate", "精确计算（不要心算）：贷款月供和还款明细、利息、复利、增长率、汇率换算、AA 分摊、百分比、合计和平均。"
+        "表达式支持 + - * / ** % 和 round、min、max、sum、mean、median、sqrt、log；金融函数：pmt(月利率, 期数, 本金)、"
+        "loan(本金, 年利率%, 年数, 明细行数) 返回月供+总利息+还款明细、fv(利率, 期数, 每期存入, 现值)、cagr(起始, 结束, 年数)。"
+        " Exact arithmetic — never compute figures the user relies on in your head. Operators + - * / ** %, functions round "
+        "min max sum mean median sqrt log, finance: pmt(rate, nper, pv), loan(principal, annual_rate_pct, years, rows) → "
+        "payment, totals and amortization rows, fv(rate, nper, pmt, pv), cagr(start, end, years).",
+        {"expressions": {"type": "array", "items": S, "description": "要算的表达式 expressions, e.g. [\"loan(3000000, 3.5, 25, 12)\", \"283.8/4\"]"},
+         "variables": {"type": "object", "description": "可选：变量 optional named values (may be expressions), e.g. {\"r\": \"0.035/12\"}"}},
+        ["expressions"]),
+    _fn("stock_fundamentals", "查公司估值和财报（Yahoo Finance，不用开浏览器）：股价、市值、市盈率 P/E（TTM 和预期）、市净率、EPS、股息率、"
+        "最近 4 个季度和 4 个年度的营收、毛利（毛利率）、经营利润、净利润（净利率）、摊薄 EPS。估值对比、财报要点一律先用它。"
+        "代码同 market_data（TSLA、1211.HK、300750.SZ…）。分析师观点和新闻仍需查网页。"
+        " Valuation and reported financials (no browser): price, market cap, P/E (TTM, forward), P/B, EPS, dividend yield and the "
+        "last 4 quarters / 4 years of revenue, gross profit and margin, operating income, net income and margin, diluted EPS.",
+        {"symbols": {"type": "array", "items": S, "description": "1–6 个代码 tickers, e.g. [\"TSLA\", \"1211.HK\"]"}},
+        ["symbols"]),
+    _fn("market_data", "查股票/指数/汇率/黄金/加密货币的行情和历史价格（Yahoo Finance，不用开浏览器）：最新价、区间涨跌、区间最高/最低（带日期）、"
+        "52 周区间和收盘价序列。股价、走势、涨跌幅一律先用它，比翻网页快且准。代码示例：AAPL、NVDA、0700.HK（腾讯）、0005.HK（汇丰）、"
+        "9988.HK、600519.SS、300750.SZ、^GSPC（标普500）、^IXIC（纳指）、^DJI、^HSI（恒指）、^N225（日经）、HKD=X（美元兑港币）、"
+        "CNY=X（美元兑人民币）、GC=F（黄金）、BTC-USD。也可以给英文公司名。估值（市盈率等）和财报用 stock_fundamentals。"
+        " Quotes and price history for stocks, indices, FX, gold and crypto (Yahoo Finance; no browser): last price, change over "
+        "the range, high/low with dates, 52-week range and a close-price series. Use it first for any price / trend question.",
+        {"symbols": {"type": "array", "items": S, "description": "1–8 个代码 tickers, e.g. [\"0700.HK\", \"^HSI\"]"},
+         "range": {"type": "string", "enum": ["5d", "1mo", "3mo", "6mo", "ytd", "1y", "2y", "3y", "5y", "10y", "max"],
+                   "description": "时间范围 history range (default 1y)"}},
+        ["symbols"]),
+    _fn("make_chart", "在本机画图表/示意图并直接显示在对话里（PNG）：走势图 line、柱状/排行 bar（horizontal=true 横向排行）、"
+        "饼图 pie、甘特图 gantt、流程图/架构图 flow。用户要「画图、图表、走势图、对比图、饼图、流程图、架构图、甘特图」时就用它——"
+        "不要写代码、不要打开在线画图或代码运行网站、不要用 ASCII 字符画。数字必须来自你在本任务里查到的数据或用户给的数据，"
+        "source 写明来源；不要编造。生成后图片自动发到对话（send=false 则只保存，可在 make_pdf 的 Markdown 里用 ![标题](路径) 插入）。"
+        " Draw a chart or diagram locally and show it in the chat as a PNG: line (trends; several series ok; highest/lowest "
+        "marked), bar (grouped; horizontal=true for rankings; negative values ok), pie, gantt, flow (flowchart / architecture). "
+        "Use it whenever the user asks for a chart, graph, plot or diagram — never write code, never use online chart or "
+        "code-runner sites, no ASCII art. Only plot numbers you fetched in this task or the user gave, and name the source.",
+        {"type": {"type": "string", "enum": ["line", "bar", "pie", "gantt", "flow"]},
+         "title": S, "subtitle": S, "source": {"type": "string", "description": "数据来源（网站名/网址）data source"},
+         "labels": {"type": "array", "items": S, "description": "line/bar 的 X 轴（日期或类别）；pie 的扇区名 x-axis labels / slices"},
+         "series": {"type": "array", "items": {"type": "object", "properties": {"name": S, "values": {"type": "array", "items": {}}}},
+                    "description": "line/bar：一条或多条数据线，values 与 labels 一一对应 one or more series, values match labels"},
+         "values": {"type": "array", "items": {}, "description": "pie（或只有一条线时）的数值 values for pie / a single series"},
+         "unit": {"type": "string", "description": "单位，如 %、$、港元 unit shown on values"},
+         "horizontal": {"type": "boolean", "description": "bar 横向（排行榜）horizontal bars for rankings"},
+         "sort": {"type": "string", "enum": ["desc", "asc"], "description": "bar 排序 sort a single-series bar chart"},
+         "tasks": {"type": "array", "items": {"type": "object", "properties": {"name": S, "start": S, "end": S, "days": {"type": "number"},
+                                                                                "weeks": {"type": "number"}}},
+                   "description": "gantt：[{name, start YYYY-MM-DD, end 或 days/weeks}]；没有 start 的接在上一项后面"},
+         "nodes": {"type": "array", "items": {"type": "object", "properties": {"id": S, "label": S}}, "description": "flow 的方框"},
+         "edges": {"type": "array", "items": {"type": "object", "properties": {"from": S, "to": S, "label": S}}, "description": "flow 的箭头"},
+         "steps": {"type": "array", "items": S, "description": "flow 的简单写法：按顺序的步骤 a simple linear flow"},
+         "direction": {"type": "string", "enum": ["LR", "TB"], "description": "flow 方向：LR 横向 / TB 竖向"},
+         "symbols": {"type": "array", "items": S, "description": "line 走势图的快捷方式：直接给股票/指数/汇率代码，自动取数据画图（不用自己抄数字）"
+                     " shortcut for a price chart: tickers to fetch and plot (with range)"},
+         "range": {"type": "string", "description": "配合 symbols 的时间范围 range for symbols: 1mo/3mo/6mo/ytd/1y/2y/3y/5y/10y"},
+         "mode": {"type": "string", "enum": ["price", "pct"], "description": "配合 symbols：price 价格；pct 涨跌幅%（不同股票/币种对比时用）"},
+         "output": {"type": "string", "description": "保存路径，默认 charts/<标题>.png output .png path"},
+         "send": {"type": "boolean", "description": "是否发到对话里（默认 true）show it in the chat (default true)"}},
+        ["type", "title"]),
     _fn("present_choices", "把几个选项做成卡片给用户挑（餐厅、商品、航班、方案等）。kind=comparison 时，每个选项的 label 和 details "
         "必须是你在本任务里读过的网页/邮件的原文摘录（照抄原文，不要翻译或改写），source_url 是读过的那个页面（或其中的链接）；"
         "系统会逐条核对，找不到原文就拒绝显示。你的翻译、评价写在 note 里（不核对）。kind=clarify 用于简单的澄清选项（不核对）。"
@@ -328,7 +387,16 @@ BUDGET_RESERVE = 5
 RESEARCH_NUDGE_PAGES = 10
 BUDGET_MARK = "step budget"
 BUDGET_MARK_PAGES = "research check"
-FINISH_TOOLS = {"update_plan", "files_write", "files_read", "file_look", "files_list", "make_pdf", "make_xlsx", "send_file", "notify_user",
+TIME_MARK = "time budget"
+REMAKE_TOOLS = {"make_xlsx", "make_pdf", "make_chart"}
+REMAKE_MAX = 4   # the 2026-10-02 itinerary run re-made the same Excel file 9 times (≈5 minutes of generation)
+
+
+def _out_key(args: dict) -> str:
+    return str(args.get("output") or args.get("title") or "").strip().lower()
+
+
+FINISH_TOOLS = {"update_plan", "files_write", "files_read", "file_look", "files_list", "make_pdf", "make_xlsx", "make_chart", "market_data", "stock_fundamentals", "calculate", "send_file", "notify_user",
                 "memory_remember", "goal_update", "schedule_state_set", "gmail_send", "gmail_reply", "gmail_create_draft",
                 "slack_send_message", "notion_create_page", "notion_append", "calendar_create_event"}
 
@@ -408,6 +476,7 @@ class Runtime:
         self.publish = publish            # async fn(event: dict)
         self.llm = LLM(self.store.settings, on_call=self._on_llm_call)
         self.running: dict[str, asyncio.Task] = {}
+        self._remakes: dict[tuple, int] = {}   # (task, tool, output) -> files made, see REMAKE_MAX
         self.cancel_flags: set[str] = set()
         self.pause_flags: set[str] = set()
         self._catalog_cache = (0.0, None)
@@ -452,6 +521,13 @@ class Runtime:
         t = self.store.task(task_id)
         await self.publish({"kind": "task_update", "task": self.task_brief(t)})
         await self.audit("runtime", "task.status", task_id, result=status, detail={"status": status, **{k: v for k, v in kw.items() if k in ("error",)}})
+        if status in TERMINAL:   # let the browser recycle this task's page later (best effort, never blocks)
+            async def _release():
+                try:
+                    await self.sentinel("POST", "/internal/browser_release", {"task_id": task_id}, timeout=10)
+                except Exception:
+                    pass
+            asyncio.create_task(_release())
 
     @staticmethod
     def task_brief(t: dict) -> dict:
@@ -698,15 +774,21 @@ class Runtime:
         return tools
 
     def _compress(self, transcript: list[dict]) -> list[dict]:
-        """Keep the context small: shrink old tool results, keep the last few intact."""
+        """Keep the context small: shrink old tool results, keep the last few intact.
+
+        Compresses in batches (above COMPRESS_HIGH chars, oldest first, down to COMPRESS_LOW) rather than a little
+        every step: between batches the conversation only grows at the end, so the model server reuses its cache."""
         total = sum(len(str(m.get("content") or "")) for m in transcript)
-        if total < 70000:
+        if total < COMPRESS_HIGH:
             return transcript
         tool_idx = [i for i, m in enumerate(transcript) if m.get("role") == "tool"]
-        for i in tool_idx[:-4]:
+        for i in tool_idx[:-3]:
+            if total <= COMPRESS_LOW:
+                break
             c = str(transcript[i].get("content") or "")
             if len(c) > 600:
                 transcript[i]["content"] = c[:500] + "\n…[较早的工具结果已压缩 older result compressed]"
+                total -= len(c) - len(transcript[i]["content"])
         return transcript
 
     async def run(self, task_id: str):
@@ -783,6 +865,13 @@ class Runtime:
         steps = int(t["steps"] or 0)
         max_steps = int(s.get("max_steps") or 30)
         consecutive_errors = 0
+        run_started = time.time()
+        started_txt = prompts.now_str(s["timezone"], agent_lang(s))
+        try:
+            max_minutes = max(0.5, float(s.get("max_minutes") or 20))
+        except (TypeError, ValueError):
+            max_minutes = 20.0
+        timed_out = False
         stuck = 0          # turns in a row where every call was refused by a loop guard
         gave_up = False    # set when the agent keeps going round in circles: it must answer now, without tools
         nudged = False
@@ -795,15 +884,22 @@ class Runtime:
                 await self.set_status(task_id, "PAUSED", waiting={"type": "paused"})
                 return
             t = self.store.task(task_id)
+            # the system prompt stays identical for the whole run (live state goes in the status note at the end)
             transcript[0] = {"role": "system", "content": prompts.executor_system(
-                user_name=s["user_name"], tz=s["timezone"], connections=catalog.get("connections", {}), plan=t["plan"],
+                user_name=s["user_name"], tz=s["timezone"], connections=catalog.get("connections", {}), plan=None,
                 facts=facts, skills=self.skills(), extra=extra, language=agent_lang(s),
-                reply_lang=self.reply_lang(t, s))}
-            dead = dead_ends_text(source_failures(self.store.events(task_id)), agent_lang(s))
-            if dead:
-                transcript[0]["content"] += "\n\n" + dead
+                reply_lang=self.reply_lang(t, s), now_txt=started_txt)}
             transcript = self._compress(transcript)
-            force_final = steps >= max_steps or gave_up
+            minutes = (time.time() - run_started) / 60
+            if minutes >= max_minutes * TIME_NUDGE and TIME_MARK not in "\n".join(
+                    str(m.get("content") or "") for m in transcript if m.get("role") == "user"):
+                transcript.append({"role": "user", "content": prompts.L(
+                    agent_lang(s), f"（系统）[{TIME_MARK}] 这个任务已经用了 {minutes:.0f} 分钟（上限 {max_minutes} 分钟）。"
+                    "停止继续搜集，用已有的信息尽快完成用户要的结果（图表、文件、回答），并说明哪些还没核实。",
+                    f"(System) [{TIME_MARK}] This task has run for {minutes:.0f} minutes (limit {max_minutes}). Stop gathering "
+                    "and deliver what the user asked for with what you have (chart, file, answer); note what is unverified.")})
+            timed_out = minutes >= max_minutes
+            force_final = steps >= max_steps or gave_up or timed_out
             tools = None if force_final else self._tools(catalog, schedule=bool(t["schedule_id"]) and not goal, goal=bool(goal))
             lg = agent_lang(s)
             if not force_final:
@@ -819,13 +915,24 @@ class Runtime:
                     "Do not call tools. Give the most useful answer you can from what you already have, say clearly what could "
                     "not be fetched and why (e.g. which site would not open or was blocked), and suggest what the user can do "
                     "next (another source, or providing the data).")})
+            elif timed_out:
+                transcript.append({"role": "user", "content": prompts.L(
+                    lg, f"（系统）已达到 {max_minutes:.0f} 分钟的用时上限。请停止调用工具，用已有的信息给出尽量完整的回答，"
+                        "说明完成了什么、结论是什么、还缺什么。",
+                    f"(System) The {max_minutes:.0f}-minute time limit is reached: stop calling tools and give the most complete "
+                    "answer you can from what you have — what is done, the findings and what is missing.")})
             elif force_final:
                 transcript.append({"role": "user", "content": prompts.L(
                     lg, "（系统）已达到步数上限。请停止调用工具，总结目前完成的内容、结果和未完成的部分。",
                     "(System) Step limit reached: stop calling tools and summarize what is done, the results and what is left.")})
             await self.event(task_id, "thinking", {"step": steps + 1})
+            msgs = transcript
+            if not force_final:   # live state at the end (not stored), see prompts.status_note
+                msgs = transcript + [{"role": "user", "content": prompts.status_note(
+                    t["plan"], s["timezone"], agent_lang(s), minutes,
+                    dead_ends_text(source_failures(self.store.events(task_id)), agent_lang(s)))}]
             try:
-                resp = await self.llm.chat(transcript, tools, purpose="executor", task_id=task_id)
+                resp = await self.llm.chat(msgs, tools, purpose="executor", task_id=task_id)
             except LLMError as e:
                 self.store.update_task(task_id, transcript=transcript)
                 raise
@@ -879,10 +986,15 @@ class Runtime:
             final = resp["content"]
             if not final and not nudged:
                 nudged = True
-                transcript.append({"role": "user", "content": prompts.L(agent_lang(s), "（系统）请给出最终回答。",
-                                                                        "(System) Please write the final answer now.")})
+                transcript.append({"role": "user", "content": prompts.L(
+                    agent_lang(s), "（系统）请直接用文字写出最终回答（不要调用工具，也不要输出 <tool_call> 之类的标记）。",
+                    "(System) Write the final answer now as plain text (no tool calls, no <tool_call> markup).")})
                 continue
-            final = final or "（任务已结束，但模型没有返回文字说明。）"
+            if not final:   # the model still gave no text: say what was done instead of an empty bubble
+                done = [st.get("description") or st.get("id") for st in (t["plan"] or {}).get("steps", [])
+                        if st.get("status") == "done"]
+                final = prompts.L(agent_lang(s), "（任务已结束，但模型没有返回文字说明。）" + ("已完成：" + "；".join(map(str, done)) if done else ""),
+                                  "(The task ended but the model wrote no answer.)" + (" Done: " + "; ".join(map(str, done)) if done else ""))
             if agent_lang(s) == "en" and prompts.cjk_share(final) > 0.5:
                 final = await self._rewrite_in_english(task_id, transcript, final)
             transcript.append({"role": "assistant", "content": final})
@@ -891,7 +1003,11 @@ class Runtime:
                 if st.get("status") in ("pending", "running"):
                     st["status"] = "done" if not force_final else st["status"]
             self.store.update_task(task_id, transcript=transcript, result=final, plan=plan, finished_at=now_ts())
-            if gave_up:
+            if timed_out and not gave_up and steps < max_steps:
+                why = (f"Stopped at the {max_minutes:.0f}-minute time limit; answered with what was found" if s.get("language") == "en"
+                       else f"达到 {max_minutes:.0f} 分钟用时上限，按已有信息作答")
+                await self.set_status(task_id, "FAILED", error=why)
+            elif gave_up:
                 # stopped retrying on purpose: the answer explains what is missing, but the task is not a full success
                 why = ("Stopped retrying: the same sources kept failing, answered with what was available" if s.get("language") == "en"
                        else "同样的来源反复失败，已停止重试，按已有信息作答")
@@ -906,6 +1022,10 @@ class Runtime:
             await self.event(task_id, "final", {"text": truncate(final, 4000)})
             self.store.add_msg(t["conv_id"], "assistant", final, task_id)
             await self.publish({"kind": "conv_update", "conv_id": t["conv_id"]})
+            if timed_out and not gave_up and steps < max_steps:
+                await self._warn_unattended(t, (f"超过 {max_minutes:.0f} 分钟上限，按已有信息作答",
+                                                f"hit the {max_minutes:.0f}-minute limit"), final)
+                return
             if gave_up:
                 await self._warn_unattended(t, ("同样的来源反复失败，已停止重试", "kept failing on the same sources and stopped retrying"), final)
                 return
@@ -1329,10 +1449,23 @@ class Runtime:
         elif allow is not None and name not in allow:
             content = f"ERROR: tool {name} is not available to this agent."
             ok = False
+        elif name in REMAKE_TOOLS and self._remakes.get((task_id, name, _out_key(args)), 0) >= REMAKE_MAX:
+            content = (f"ERROR: 这个文件已经生成了 {REMAKE_MAX} 次，不再重做。现在用 send_file 发给用户（图表已在对话里）并写最终回答；"
+                       "如需修改请在回答里说明。"
+                       f" This file was already made {REMAKE_MAX} times: stop remaking it. Send it with send_file (charts are already "
+                       "in the chat) and write the final answer.")
+            ok = False
+            call["_refused"] = True
         elif name in LOCAL_NAMES:
             try:
                 content = await self._local(t, name, args)
                 ok = not str(content).startswith("ERROR")
+                if ok and name in REMAKE_TOOLS:
+                    k = (task_id, name, _out_key(args))
+                    self._remakes[k] = self._remakes.get(k, 0) + 1
+                    if self._remakes[k] >= 2:
+                        content = str(content) + (f"\n（第 {self._remakes[k]} 次生成同一个文件。内容已经可以用了就不要再重做，直接 send_file 并结束。）"
+                                                  f"(Made {self._remakes[k]} times. If it is good enough, don't redo it: send it and finish.)")
             except Suspend:
                 raise
             except Exception as e:
@@ -1412,6 +1545,106 @@ class Runtime:
         if full != WORKSPACE and not full.startswith(WORKSPACE + os.sep):
             raise ValueError("路径必须在工作区内 (path must be inside the workspace)")
         return full
+
+    async def _make_chart(self, t: dict, a: dict) -> str:
+        """make_chart: draw the chart as SVG here, have it rendered to PNG offline, and (by default) show it in the chat."""
+        from app.common import charts as CH
+        spec = {}
+        for k, v in (a or {}).items():   # small models sometimes pass lists/objects as JSON text
+            if isinstance(v, str) and v.strip()[:1] in ("[", "{") and k not in ("title", "subtitle", "source"):
+                try:
+                    v = json.loads(v)
+                except ValueError:
+                    pass
+            spec[k] = v
+        if spec.get("symbols"):   # fetch the prices here, so the model never copies (or invents) a long list of numbers
+            syms = spec["symbols"] if isinstance(spec["symbols"], list) else [spec["symbols"]]
+            r = await self.sentinel("POST", "/internal/market_data", {"task_id": t["id"], "symbols": syms,
+                                                                      "range": spec.get("range") or "1y"}, timeout=90)
+            if r.get("error") or not r.get("results"):
+                return f"ERROR: 取不到行情数据 market data unavailable: {r.get('error') or '; '.join(r.get('errors') or [])}"
+            res = r["results"]
+            pct = spec.get("mode") == "pct" or (len(res) > 1 and len({x["currency"] for x in res}) > 1 and spec.get("mode") != "price")
+            dates = sorted({d for x in res for d, _c in x["series"]})
+            ser = []
+            for x in res:
+                m = dict(x["series"])
+                base = x["series"][0][1]
+                vals = [m.get(d) for d in dates]
+                if pct:
+                    vals = [None if v is None else round((v / base - 1) * 100, 2) for v in vals]
+                ser.append({"name": f"{x['symbol']} {x['name'][:24]}", "values": vals})
+            spec.update({"type": "line", "labels": dates, "series": ser, "unit": "%" if pct else "",
+                         "source": spec.get("source") or "Yahoo Finance"})
+            if not spec.get("subtitle"):
+                cur = res[0]["currency"]
+                spec["subtitle"] = ("涨跌幅 % change since " + dates[0]) if pct else (f"收盘价 close ({cur})"
+                                                                                    if len(res) == 1 or not pct else "")
+            if len(res) == 1 and "mark_extremes" not in spec:
+                spec["mark_extremes"] = True
+        try:
+            svg = CH.render(spec)
+        except (CH.ChartError, KeyError, TypeError) as e:
+            return f"ERROR: 图表参数有误 chart spec problem: {e}. 改正参数后再调用 make_chart (fix the arguments and call make_chart again)."
+        slug = re.sub(r"[^\w\-一-鿿]+", "_", str(spec.get("title") or "chart")).strip("_")[:50] or "chart"
+        out = str(spec.get("output") or f"charts/{slug}.png")
+        if not out.lower().endswith(".png"):
+            out += ".png"
+        base, i = out[:-4], 2
+        while os.path.exists(self._path(out)) and not spec.get("output"):
+            out, i = f"{base}-{i}.png", i + 1
+        r = await self.sentinel("POST", "/internal/render_png", {"task_id": t["id"], "svg": svg, "output": out}, timeout=120)
+        if r.get("error") or not r.get("path"):
+            return f"ERROR: 图表渲染失败 (chart rendering failed): {r.get('error') or r}"
+        path = r["path"]
+        await self.event(t["id"], "chart", {"path": path, "type": spec.get("type"), "title": spec.get("title")})
+        if spec.get("send", True) is not False and str(spec.get("send")).lower() != "false":
+            sent = await self._send_file(t, {"path": path, "note": str(spec.get("title") or "")})
+            if sent.startswith("ERROR"):
+                return f"图表已生成 chart saved: {path}，但发送失败 but sending failed: {sent}"
+            return (f"图表已生成并显示在对话里 chart saved and shown in the chat: {path}。不要再用 send_file 重复发送；"
+                    "在回答里简要说明图表要点即可。要放进 PDF 报告时，在 make_pdf 的 Markdown 里写 ![标题](" + path + ")。"
+                    " Don't send it again; summarise what it shows in your answer.")
+        return (f"图表已生成 chart saved: {path}（未发送 not sent）。放进 PDF：在 make_pdf 的 Markdown 里写 ![标题]({path})；"
+                "要给用户看就用 send_file。")
+
+    async def _market_data(self, task_id: str, a: dict) -> str:
+        syms = a.get("symbols") or a.get("symbol") or []
+        if isinstance(syms, str):
+            try:
+                syms = json.loads(syms) if syms.strip().startswith("[") else [x.strip() for x in syms.split(",")]
+            except ValueError:
+                syms = [syms]
+        r = await self.sentinel("POST", "/internal/market_data", {"task_id": task_id, "symbols": syms,
+                                                                  "range": a.get("range") or "1y"}, timeout=90)
+        if r.get("error"):
+            return f"ERROR: {r['error']}"
+        from app.sentinel.market import describe
+        parts = [describe(x) for x in r.get("results") or []]
+        if r.get("errors"):
+            parts.append("没取到 failed: " + "; ".join(r["errors"]))
+        if not r.get("results"):
+            return "ERROR: " + "; ".join(r.get("errors") or ["no data"]) + "（检查代码，例如 0700.HK、^HSI、HKD=X check the ticker）"
+        return ("\n\n".join(parts) + "\n来源 source: Yahoo Finance。画走势图可直接用 make_chart(type=line, symbols=[…], range=…) "
+                "To chart it, call make_chart with symbols + range (it fetches the series itself).")
+
+    async def _stock_fundamentals(self, task_id: str, a: dict) -> str:
+        syms = a.get("symbols") or a.get("symbol") or []
+        if isinstance(syms, str):
+            try:
+                syms = json.loads(syms) if syms.strip().startswith("[") else [x.strip() for x in syms.split(",")]
+            except ValueError:
+                syms = [syms]
+        r = await self.sentinel("POST", "/internal/fundamentals", {"task_id": task_id, "symbols": syms}, timeout=120)
+        if r.get("error"):
+            return f"ERROR: {r['error']}"
+        from app.sentinel.market import describe_fundamentals
+        parts = [describe_fundamentals(x) for x in r.get("results") or []]
+        if r.get("errors"):
+            parts.append("没取到 failed: " + "; ".join(r["errors"]))
+        if not r.get("results"):
+            return "ERROR: " + "; ".join(r.get("errors") or ["no data"]) + "（检查代码，例如 TSLA、1211.HK check the ticker）"
+        return "\n\n".join(parts) + "\n来源 source: Yahoo Finance（数据可能有延迟 may be delayed）。"
 
     async def _send_file(self, t: dict, a: dict) -> str:
         """Post workspace files into the conversation (images inline, video/audio players, other files as downloads)
@@ -1582,6 +1815,33 @@ class Runtime:
                     "如果用户要这个文件，用 send_file 发给他 Use send_file to give it to the user.")
         if name == "make_xlsx":
             return self._make_xlsx(a)
+        if name == "make_chart":
+            return await self._make_chart(t, a)
+        if name == "market_data":
+            return await self._market_data(tid, a)
+        if name == "stock_fundamentals":
+            return await self._stock_fundamentals(tid, a)
+        if name == "calculate":
+            from app.common import calc
+            exprs = a.get("expressions") or a.get("expression") or []
+            if isinstance(exprs, str):
+                try:
+                    exprs = json.loads(exprs) if exprs.strip().startswith("[") else [exprs]
+                except ValueError:
+                    exprs = [exprs]
+            vars_ = a.get("variables") or {}
+            if isinstance(vars_, str):
+                try:
+                    vars_ = json.loads(vars_)
+                except ValueError:
+                    return "ERROR: variables 应为对象 must be an object like {\"r\": \"0.035/12\"}"
+            try:
+                rows = calc.run(exprs, vars_ if isinstance(vars_, dict) else {})
+            except calc.CalcError as e:
+                return f"ERROR: {e}"
+            if not rows:
+                return "ERROR: 需要 expressions (give one or more expressions)"
+            return "\n".join(f"{e} = {calc.fmt(v)}" for e, v in rows)
         if name == "files_search":
             q = str(a.get("query", "")).lower()
             hits = []

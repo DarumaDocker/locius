@@ -9,7 +9,8 @@ from app.sentinel.catalog import TOOLS
 
 ALLOW, DENY, ASK = "ALLOW", "DENY", "ASK_USER"
 RISK_ORDER = {"low": 0, "medium": 1, "high": 2, "critical": 3}
-PER_USE_TOOLS = {"browser_fill_secret"}   # always ASK, approval scope forced to ONCE
+PER_USE_TOOLS = {"browser_fill_secret"}
+BULK_MAIL = 5   # archiving / trashing more emails than this in one call needs approval   # always ASK, approval scope forced to ONCE
 
 
 @dataclass
@@ -94,7 +95,7 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
             if mdom in set(conn["config"].get("blocked_domains") or []):
                 return Decision(DENY, "high", f"域名 {mdom} 在黑名单中 (blocked domain)")
         if not args.get("ref") and not args.get("url"):
-            return Decision(DENY, "low", "需要 ref 或 url (give the element ref or the media URL)")
+            return Decision(DENY, "low", "缺少参数：要给出图片/视频元素的 ref（如 e12）或者它的 url。Missing argument: pass ref (the [eN] of the photo or video in the snapshot) or url (its address). For charts, use make_chart instead")
     if tool in ("browser_click", "browser_click_at", "browser_type", "browser_select", "browser_press", "browser_upload",
                 "browser_save_media") and page:
         dom = guard.domain_of(page.get("url", ""))
@@ -160,6 +161,15 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
     # ---------------------------------------------------------------- gmail rules
     if tool in ("gmail_send", "gmail_reply", "gmail_forward"):
         reasons.append("对外发送邮件 (sends email on your behalf)")
+    if tool in ("gmail_archive", "gmail_label"):
+        # 2026-10-02 test "delete all my emails": 35 emails in 4 mailboxes were archived without asking. Bulk changes
+        # that take mail out of the inbox (or trash it) need the user's OK; one approval can cover the task.
+        n = len(args.get("message_ids") or [])
+        labels = [str(x).lower() for x in (args.get("remove_labels") or []) + (args.get("add_labels") or [])]
+        moves = tool == "gmail_archive" or any(x in ("\\inbox", "inbox", "\\trash", "trash", "\\spam", "spam") for x in labels)
+        if moves and (n > BULK_MAIL or store.count_done(task_id, ("gmail_archive", "gmail_label")) >= 2):
+            risk = _bump(risk, "high")
+            reasons.append(f"将批量移动 {n} 封邮件（移出收件箱/垃圾箱）(bulk change: {n} emails leave the inbox)")
     if tool == "gmail_unsubscribe":
         reasons.append(f"将代表你退订 {len(args.get('message_ids') or [])} 个发件方（发送退订请求/退订邮件）(unsubscribes on your behalf)")
 

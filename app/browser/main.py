@@ -70,8 +70,11 @@ class Broker:
         self.takeover_task = ""
         self.requests: dict[str, dict] = {}      # task_id -> {"task_id","reason","ts"}: tasks that asked the user for help
         self.downloads: list[dict] = []
-        self.lock = asyncio.Lock()
+        self.lock = asyncio.Lock()               # only for things that touch every task (start-up)
+        self.task_locks: dict[str, asyncio.Lock] = {}   # one per task: tasks no longer wait for each other's page loads
         self.input_lock = asyncio.Lock()
+        self.view_pinned_until = 0.0             # the user picked a task to watch: agents don't move the view meanwhile
+        self.finished: dict[str, float] = {}     # task_id -> when the task ended (its page may be recycled)
         self.last_used: dict[str, float] = {}
         self.parent: dict = {}                    # popup page -> opener page (e.g. "Sign in with Google" windows)
         self.xvfb = None
@@ -201,9 +204,27 @@ class Broker:
             rec["status"] = "failed"
             rec["reason"] = str(e)[:200]
 
-    def check_agent(self):
-        if self.mode == "user":
+    def task_lock(self, task_id: str) -> asyncio.Lock:
+        return self.task_locks.setdefault(task_id or "default", asyncio.Lock())
+
+    def check_agent(self, task_id: str = ""):
+        # a takeover pauses only the task whose page the user is driving; other tasks keep working on their own pages
+        if self.mode == "user" and (task_id or "default") == (self.takeover_task or "default"):
             raise HTTPException(423, "用户正在接管浏览器，Agent 已暂停 (user takeover in progress)")
+
+    def _follow(self, task_id: str):
+        """Move the live view to this task unless the user is watching (or driving) another task, or the task being
+        shown is still busy — two tasks running at once no longer make the view flip back and forth."""
+        cur = self.view_task
+        if cur == task_id:
+            return
+        if self.mode == "user" or time.time() < self.view_pinned_until:
+            return
+        p = self.pages.get(cur)
+        busy = (p is not None and not p.is_closed() and cur not in self.finished
+                and time.time() - self.last_used.get(cur, 0) < 20)
+        if not busy:
+            self.view_task = task_id
 
     # ------------------------------------------------------------ pages
     async def page_for(self, task_id: str, create=True):
@@ -211,23 +232,44 @@ class Broker:
         p = self.pages.get(task_id)
         if p is not None and not p.is_closed():
             self.last_used[task_id] = time.time()
-            self.view_task = task_id
+            self.finished.pop(task_id, None)
+            self._follow(task_id)
             return p
         if not create:
             return None
-        if len(self.pages) >= 6:
-            oldest = min(self.pages, key=lambda k: self.last_used.get(k, 0))
-            old = self.pages.pop(oldest)
-            try:
-                await old.close()
-            except Exception:
-                pass
+        await self._recycle()
         blank = [pg for pg in self.ctx.pages if pg.url in ("about:blank", "") and pg not in self.pages.values()]
         p = blank[0] if blank else await self.ctx.new_page()
         self.pages[task_id] = p
         self.last_used[task_id] = time.time()
-        self.view_task = task_id
+        self.finished.pop(task_id, None)
+        self._follow(task_id)
         return p
+
+    async def _recycle(self, keep: int = 8):
+        """Close pages of finished tasks after 10 minutes, and when there are too many pages close the least recently
+        used finished ones first. Pages of running tasks, of the task being taken over and of tasks waiting for the user
+        are never closed here."""
+        now = time.time()
+        protected = {self.takeover_task, self.view_task} | set(self.requests)
+        def closable(k):
+            return k not in protected
+        old = [k for k, t in self.finished.items() if now - t > 600 and closable(k)]
+        if len(self.pages) >= keep:
+            done = sorted((k for k in self.pages if k in self.finished and closable(k)), key=lambda k: self.last_used.get(k, 0))
+            idle = sorted((k for k in self.pages if k not in self.finished and closable(k)
+                           and now - self.last_used.get(k, 0) > 1800), key=lambda k: self.last_used.get(k, 0))
+            old += (done + idle)[: len(self.pages) - keep + 1]
+        for k in dict.fromkeys(old):
+            pg = self.pages.pop(k, None)
+            self.finished.pop(k, None)
+            self.frame_maps.pop(k, None)
+            self.task_locks.pop(k, None)
+            if pg is not None:
+                try:
+                    await pg.close()
+                except Exception:
+                    pass
 
     def open_requests(self) -> list[dict]:
         """Takeover requests still waiting, newest first (requests older than 6 h are dropped)."""
@@ -679,6 +721,42 @@ async def make_pdf(req: Request):
     return {"path": os.path.relpath(op, WORKSPACE), "size": len(data), "title": title}
 
 
+@app.post("/png", dependencies=[Depends(auth)])
+async def make_png(req: Request):
+    """Render an SVG (a chart made by the runtime) to a PNG in the workspace: JavaScript off, no network,
+    so the system CJK fonts are used and nothing in the SVG can reach out."""
+    b = await req.json()
+    svg = str(b.get("svg") or "")
+    if not svg.lstrip().startswith("<svg") or len(svg) > 3_000_000:
+        raise HTTPException(400, "需要 SVG (svg required, max 3 MB)")
+    out_rel = str(b.get("output") or "charts/chart.png")
+    if not out_rel.lower().endswith(".png"):
+        out_rel += ".png"
+    op = _ws(out_rel)
+    async with _pdf["lock"]:
+        br = _pdf["browser"]
+        if br is None or not br.is_connected():
+            br = _pdf["browser"] = await broker.pw.chromium.launch(headless=True)
+        ctx = await br.new_context(java_script_enabled=False, device_scale_factor=2, locale="zh-CN")
+        try:
+            async def block(route):
+                if route.request.url.startswith("data:"):
+                    await route.continue_()
+                else:
+                    await route.abort()
+            await ctx.route("**/*", block)
+            page = await ctx.new_page()
+            await page.set_content(f"<!doctype html><html><body style='margin:0;background:#fff'>{svg}</body></html>",
+                                   wait_until="load", timeout=30000)
+            data = await page.locator("svg").first.screenshot(type="png", timeout=30000)
+        finally:
+            await ctx.close()
+    os.makedirs(os.path.dirname(op), exist_ok=True)
+    with open(op, "wb") as f:
+        f.write(data)
+    return {"path": os.path.relpath(op, WORKSPACE), "size": len(data)}
+
+
 # ================================================================== agent API
 @app.post("/agent/{action}", dependencies=[Depends(auth)])
 async def agent_action(action: str, req: Request):
@@ -694,10 +772,15 @@ async def agent_action(action: str, req: Request):
         broker.requests[task_id] = {"task_id": task_id, "reason": str(body.get("reason", ""))[:300], "ts": time.time()}
         await broker.page_for(task_id)
         return {"ok": True, "status": "takeover_requested"}
-    broker.check_agent()
+    if action == "release":   # the task ended: its page stays for a while (to look at), then is recycled
+        if task_id in broker.pages:
+            broker.finished[task_id] = time.time()
+        broker.requests.pop(task_id, None)
+        return {"ok": True}
+    broker.check_agent(task_id)
     broker.requests.pop(task_id, None)   # the task is working again, so it is no longer waiting for the user
     if action in ("find", "look", "locate"):
-        async with broker.lock:
+        async with broker.task_lock(task_id):
             try:
                 if action == "find":
                     return await broker.find(task_id, str(body.get("query", ""))[:200])
@@ -713,7 +796,7 @@ async def agent_action(action: str, req: Request):
                 raise
             except Exception as e:
                 raise HTTPException(500, f"浏览器错误 browser error: {str(e)[:300]}")
-    async with broker.lock:
+    async with broker.task_lock(task_id):
         page = await broker.page_for(task_id)
         try:
             if action == "navigate":
@@ -880,16 +963,19 @@ async def user_view(req: Request):
     tid = body.get("task_id")
     if tid in broker.pages:
         broker.view_task = tid
+        broker.view_pinned_until = time.time() + 600   # the user chose what to watch: keep it for 10 minutes
     return await state()
 
 
 @app.post("/user/takeover", dependencies=[Depends(auth)])
 async def user_takeover(req: Request):
     body = await req.json()
-    async with broker.lock:  # waits for any in-flight agent action to finish
+    tid = body.get("task_id") or (broker.requested or {}).get("task_id") or broker.view_task or "default"
+    async with broker.task_lock(tid):  # waits for that task's in-flight action; other tasks keep running
         broker.mode = "user"
-        broker.takeover_task = body.get("task_id") or (broker.requested or {}).get("task_id") or broker.view_task or "default"
-        await broker.page_for(broker.takeover_task)  # the page the user drives is always a registered task page
+        broker.takeover_task = tid
+        await broker.page_for(tid)  # the page the user drives is always a registered task page
+        broker.view_task = tid
     return await state()
 
 
@@ -916,8 +1002,9 @@ async def user_input(req: Request):
 
 
 async def _user_input(body: dict):
-    page = broker.view_page()
-    if page is None:
+    # always the page being taken over — never whatever another (still running) task last touched
+    page = broker.pages.get(broker.takeover_task or "default")
+    if page is None or page.is_closed():
         page = await broker.page_for(broker.takeover_task or "default")
     kind = body.get("type")
     x, y = float(body.get("x", 0)), float(body.get("y", 0))

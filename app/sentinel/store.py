@@ -170,6 +170,14 @@ class Store:
             return {"taint": "PUBLIC", "injection": [], "domains": []}
         return {"taint": row["taint"], "injection": loads(row["injection"], []), "domains": loads(row["domains"], [])}
 
+    def count_done(self, task_id: str, actions: tuple[str, ...]) -> int:
+        """How many of these actions already ran in this task (from the audit log)."""
+        if not task_id:
+            return 0
+        q = "SELECT COUNT(*) AS n FROM audit WHERE task_id=? AND action IN (%s) AND result='success'" % ",".join("?" * len(actions))
+        row = self.db.one(q, (task_id, *actions))
+        return int(row["n"] if row else 0)
+
     def update_task_ctx(self, task_id: str, taint: str | None = None, injection: list | None = None,
                         domain: str | None = None) -> dict:
         from app.sentinel.guard import max_class

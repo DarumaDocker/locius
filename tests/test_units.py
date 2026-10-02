@@ -100,6 +100,18 @@ def test_policy_gmail(store):
     assert decide(store, "gmail_send", {"to": "john@x.com", "body": "hi"}, "t1").decision == DENY
 
 
+def test_policy_bulk_archive_needs_approval(store):
+    few, many = ["1", "2", "3"], [str(i) for i in range(12)]
+    assert decide(store, "gmail_archive", {"message_ids": few}, "t1").decision == ALLOW
+    d = decide(store, "gmail_archive", {"message_ids": many}, "t1")
+    assert d.decision == ASK and "12" in d.reason
+    assert decide(store, "gmail_label", {"message_ids": many, "remove_labels": ["\\Inbox"]}, "t1").decision == ASK
+    assert decide(store, "gmail_label", {"message_ids": many, "add_labels": ["Receipts"]}, "t1").decision == ALLOW
+    for _ in range(2):   # small batches add up: the third archive call in a task asks
+        store.audit("sentinel", "gmail_archive", task_id="t9", result="success")
+    assert decide(store, "gmail_archive", {"message_ids": few}, "t9").decision == ASK
+
+
 def test_policy_grants(store):
     store.add_grant("gmail_send", "TASK", "t1", {"destination": "john@x.com"}, None)
     assert decide(store, "gmail_send", {"to": "john@x.com", "body": "x"}, "t1").decision == ALLOW
@@ -846,3 +858,46 @@ def test_dead_end_sources():
     assert host_guard(ev, {"name": "files_read", "args": {"path": "a.md"}}) is None
     # lazily read: the event source is only consulted when the call has a URL
     assert host_guard(lambda: (_ for _ in ()).throw(AssertionError("read")), {"name": "files_list", "args": {}}) is None
+
+
+def test_tool_markup_never_reaches_the_answer():
+    # 0.2.23: a final answer (tools off) that was only "<tool_call><function=update_plan>..." was shown to the user
+    from app.runtime.llm import _TOOLCALL_XML, _XML_PARAM, _xml_value, strip_tool_markup
+    raw = ('<tool_call>\n<function=update_plan>\n<parameter=steps>\n[{"id": "s1", "status": "done"}]\n</parameter>\n'
+           '</function>\n</tool_call>')
+    assert strip_tool_markup(raw) == ""
+    assert strip_tool_markup("Answer here.\n" + raw) == "Answer here."
+    assert strip_tool_markup("Cut off <tool_call>\n<function=x>") == "Cut off"
+    (name, body), = _TOOLCALL_XML.findall(raw)
+    args = {k: _xml_value(v) for k, v in _XML_PARAM.findall(body)}
+    assert name == "update_plan" and args == {"steps": [{"id": "s1", "status": "done"}]}
+    (name, body), = _TOOLCALL_XML.findall("<tool_call><function=web_search><parameter=query>\nHSBC price\n</parameter></function></tool_call>")
+    assert name == "web_search" and {k: _xml_value(v) for k, v in _XML_PARAM.findall(body)} == {"query": "HSBC price"}
+
+
+def test_stallwatch_reports_a_blocked_loop(tmp_path, monkeypatch):
+    import asyncio
+    import time as _t
+    from app.common import stallwatch
+    monkeypatch.setattr(stallwatch, "STALL_S", 0.8)
+
+    async def main():
+        stallwatch.start(str(tmp_path), "test")
+        await asyncio.sleep(0.6)
+        _t.sleep(2.5)   # a blocking call inside async code
+        await asyncio.sleep(0.1)
+
+    asyncio.run(main())
+    log = (tmp_path / "loop_stalls.log").read_text()
+    assert "test event loop blocked" in log and "_t.sleep(2.5)" in log
+
+
+def test_calculator_is_exact_and_safe():
+    from app.common import calc
+    r = dict(calc.run(["pmt(r, 300, 3e6)", "283.8/4", "2^10", "__import__('os')", "[1]*10**9", "10**100000", "x+1"],
+                      {"r": "0.035/12"}))
+    assert round(r["pmt(r, 300, 3e6)"], 2) == 15018.71 and r["283.8/4"] == 70.95 and r["2^10"] == 1024
+    assert all(str(r[k]).startswith("ERROR") for k in ("__import__('os')", "[1]*10**9", "10**100000", "x+1"))
+    ln = calc.loan(3e6, 3.5, 25, 12)
+    assert ln["payment"] == 15018.71 and ln["schedule"][0]["interest"] == 8750.0 and len(ln["schedule"]) == 12
+    assert "| 1 | 15,018.71 | 6,268.71 | 8,750.00 |" in calc.fmt(ln)

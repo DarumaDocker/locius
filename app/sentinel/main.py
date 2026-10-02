@@ -54,6 +54,8 @@ _resolving: set[str] = set()   # approvals being resolved right now (web + Teleg
 async def lifespan(app):
     global store, proxy_client, bot
     os.makedirs(SHOTS, exist_ok=True)
+    from app.common import stallwatch
+    stallwatch.start(SDATA, "sentinel")
     store = Store(SDATA)
     proxy_client = httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=10.0))
     store.audit("sentinel", "sentinel.start", detail={"version": VERSION})
@@ -231,6 +233,64 @@ async def internal_render_pdf(req: Request):
         return {"error": str(e)}
     store.audit("sentinel", "pdf.render", task_id=str(b.get("task_id", "")), resource=r.get("path", ""), result="success",
                 detail={"source": body["source"] or "(text)", "size": r.get("size")})
+    return r
+
+
+@app.post("/internal/market_data", dependencies=[Depends(runtime_auth)])
+async def internal_market_data(req: Request):
+    """Quotes and price history (Yahoo Finance public chart API, read-only, nothing about the user is sent)."""
+    from app.sentinel import market
+    b = await req.json()
+    syms = [str(s) for s in (b.get("symbols") or []) if str(s).strip()][:8]
+    if not syms:
+        return {"error": "需要 symbols (give one or more tickers)"}
+    try:
+        r = await market.fetch(syms, str(b.get("range") or "1y"))
+    except market.MarketError as e:
+        return {"error": str(e)}
+    store.audit("sentinel", "market.data", task_id=str(b.get("task_id", "")), resource=",".join(syms)[:200],
+                result="success" if r["results"] else "error", detail={"range": b.get("range"), "errors": r["errors"][:5]})
+    return r
+
+
+@app.post("/internal/fundamentals", dependencies=[Depends(runtime_auth)])
+async def internal_fundamentals(req: Request):
+    """Valuations (P/E, market cap, dividend yield) and reported quarterly/annual financials — Yahoo Finance, read-only."""
+    from app.sentinel import market
+    b = await req.json()
+    syms = [str(s) for s in (b.get("symbols") or []) if str(s).strip()][:6]
+    if not syms:
+        return {"error": "需要 symbols (give one or more tickers)"}
+    r = await market.fundamentals(syms)
+    store.audit("sentinel", "market.fundamentals", task_id=str(b.get("task_id", "")), resource=",".join(syms)[:200],
+                result="success" if r["results"] else "error", detail={"errors": r["errors"][:5]})
+    return r
+
+
+@app.post("/internal/browser_release", dependencies=[Depends(runtime_auth)])
+async def internal_browser_release(req: Request):
+    """A task ended: the browser may recycle its page later (pages of running or waiting tasks are kept)."""
+    b = await req.json()
+    try:
+        await actions.broker("POST", "/agent/release", {"task_id": str(b.get("task_id") or "")}, timeout=10)
+    except actions.ActionError:
+        pass
+    return {"ok": True}
+
+
+@app.post("/internal/render_png", dependencies=[Depends(runtime_auth)])
+async def internal_render_png(req: Request):
+    """Turn a chart the runtime drew (SVG) into a PNG in the workspace — rendered on this machine, offline."""
+    b = await req.json()
+    body = {"svg": str(b.get("svg") or ""), "output": str(b.get("output") or "")}
+    try:
+        r = await actions.broker("POST", "/png", body, timeout=90)
+    except ActionError as e:
+        store.audit("sentinel", "chart.render", task_id=str(b.get("task_id", "")), resource=body["output"],
+                    result="error", detail={"error": str(e)[:200]})
+        return {"error": str(e)}
+    store.audit("sentinel", "chart.render", task_id=str(b.get("task_id", "")), resource=r.get("path", ""), result="success",
+                detail={"size": r.get("size")})
     return r
 
 

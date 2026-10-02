@@ -57,6 +57,8 @@ DEFAULT_SETTINGS = {
     "stt_model": "",          # speech-to-text for audio/video attachments; "" = a whisper-like model on the endpoint, if any
     "temperature": 0.3,
     "max_steps": 40,
+    "llm_concurrency": 2,   # model requests in flight at once (match the model server's parallel slots, llama.cpp -np)
+    "max_minutes": 20,      # time budget per run: told to wrap up at 70%, answers with what it has at 100%
     "max_tokens": 4096,
     "timezone": os.environ.get("TZ", "Asia/Singapore"),
     "user_name": "",

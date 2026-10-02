@@ -11,6 +11,22 @@ import httpx
 
 _THINK = re.compile(r"<think>.*?</think>", re.S)
 _TOOLCALL_TAG = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.S)
+# Qwen3 "XML" style that llama.cpp sometimes leaves in the text: <tool_call><function=x><parameter=k>v</parameter></function></tool_call>
+_TOOLCALL_XML = re.compile(r"<tool_call>\s*<function=([\w.\-]+)>(.*?)</function>\s*(?:</tool_call>|$)", re.S)
+_XML_PARAM = re.compile(r"<parameter=([\w.\-]+)>\n?(.*?)\n?</parameter>", re.S)
+_ANY_TOOLCALL = re.compile(r"<tool_call>.*?(?:</tool_call>|$)", re.S)
+
+
+def _xml_value(v: str):
+    try:
+        return json.loads(v)
+    except Exception:
+        return v
+
+
+def strip_tool_markup(text: str) -> str:
+    """Remove tool-call markup a model wrote as plain text (it must never reach the user as the answer)."""
+    return _ANY_TOOLCALL.sub("", text or "").strip()
 
 
 class LLMError(Exception):
@@ -66,7 +82,14 @@ class LLM:
     def __init__(self, get_settings, on_call=None):
         self.get_settings = get_settings
         self.on_call = on_call
-        self.sem = asyncio.Semaphore(1)  # one local GPU → serialize calls
+        # Requests in flight at once. llama.cpp serves 2 slots (-np 2) and batches them, so two tasks no longer wait for
+        # each other's calls (with 1, a one-step translation waited ~50 s behind another task's long prefill).
+        try:
+            n = int((get_settings() or {}).get("llm_concurrency") or 2)
+        except Exception:
+            n = 2
+        self.sem = asyncio.Semaphore(max(1, min(n, 8)))
+        self.stt_sem = asyncio.Semaphore(1)   # speech-to-text runs on its own server; it must not hold an LLM slot
         self.fallback: dict[str, str] = {}  # configured model -> model actually served (when the configured one is missing)
 
     @staticmethod
@@ -109,7 +132,7 @@ class LLM:
         if not model:
             raise LLMError("没有语音转文字模型 (no speech-to-text model on the model endpoint; set Settings → Speech-to-text model)")
         t0 = time.time()
-        async with self.sem:
+        async with self.stt_sem:
             async with httpx.AsyncClient(timeout=httpx.Timeout(float(s.get("llm_timeout") or 600), connect=15)) as c:
                 r = await c.post(f"{base}/audio/transcriptions", data={"model": model, "response_format": "json"},
                                  files={"file": (filename, audio, "audio/wav")})
@@ -153,7 +176,9 @@ class LLM:
                 pass
         timeout = float(s.get("llm_timeout") or 600)
         last_err = None
+        queued = time.time()
         async with self.sem:
+            wait_s = round(time.time() - queued, 2)
             for attempt in range(4):
                 t0 = time.time()
                 try:
@@ -210,11 +235,16 @@ class LLM:
                     calls.append({"id": f"call_{uuid.uuid4().hex[:10]}", "name": j["name"],
                                   "args": parse_args(j.get("arguments") or j.get("parameters") or {})})
             content = _TOOLCALL_TAG.sub("", content).strip()
+        if not calls and tools and "<function=" in content:
+            for name, body in _TOOLCALL_XML.findall(content):
+                calls.append({"id": f"call_{uuid.uuid4().hex[:10]}", "name": name,
+                              "args": {k: _xml_value(v) for k, v in _XML_PARAM.findall(body)}})
+        content = strip_tool_markup(content)   # also when no tools were offered (final answer): never show raw markup
         usage = data.get("usage") or {}
         if self.on_call:
             try:
                 await self.on_call({"purpose": purpose, "task_id": task_id, "model": body["model"],
-                                    "latency_s": round(latency, 2), "prompt_tokens": usage.get("prompt_tokens"),
+                                    "latency_s": round(latency, 2), "wait_s": wait_s, "prompt_tokens": usage.get("prompt_tokens"),
                                     "completion_tokens": usage.get("completion_tokens"), "tool_calls": [c["name"] for c in calls]})
             except Exception:
                 pass

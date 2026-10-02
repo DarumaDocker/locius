@@ -319,3 +319,85 @@ async def wall():
     return HTMLResponse("<html><head><title>Access Denied</title></head><body><h1>Access Denied</h1>"
                         "You don't have permission to access \"http://www.opentable.test/\" on this server.<p>"
                         "Reference #18.4f2d3e17.1790590000.1a2b3c</body></html>", status_code=403)
+
+
+# ---------------------------------------------------------------- fake Yahoo Finance (market_data): host 1 is rate-limited
+_MKT = {"0700.HK": ("Tencent Holdings Limited", "HKD", 400.0), "0005.HK": ("HSBC Holdings plc", "HKD", 100.0),
+        "2888.HK": ("Standard Chartered PLC", "HKD", 80.0), "^HSI": ("HANG SENG INDEX", "HKD", 25000.0),
+        "AAPL": ("Apple Inc.", "USD", 200.0)}
+
+
+@app.get("/yahoo1/{rest:path}")
+async def yahoo_busy(rest: str):
+    return JSONResponse({"error": "Too Many Requests"}, status_code=429, headers={"content-type": "text/html"})
+
+
+@app.get("/yahoo2/v1/finance/search")
+async def yahoo_search(q: str = ""):
+    hits = [{"symbol": s, "shortname": n} for s, (n, _c, _p) in _MKT.items() if q.lower() in n.lower()]
+    return {"quotes": hits}
+
+
+@app.get("/yahoo2/v8/finance/chart/{sym}")
+async def yahoo_chart(sym: str, interval: str = "1wk"):
+    if sym not in _MKT:
+        return JSONResponse({"chart": {"result": None, "error": {"code": "Not Found", "description": "No data found"}}},
+                            status_code=404)
+    name, cur, p0 = _MKT[sym]
+    n = 24 if interval == "1mo" else 52
+    step = 30 * 86400 if interval == "1mo" else 7 * 86400
+    t0 = 1759104000 - n * step   # ends 2025-09-29
+    closes = [round(p0 * (1 + 0.01 * i) + (15 if i == n // 2 else 0), 2) for i in range(n)]
+    return {"chart": {"result": [{"meta": {"symbol": sym, "longName": name, "currency": cur, "fullExchangeName": "HKSE",
+                                           "regularMarketPrice": closes[-1], "regularMarketTime": t0 + (n - 1) * step,
+                                           "gmtoffset": 28800, "fiftyTwoWeekLow": min(closes), "fiftyTwoWeekHigh": max(closes)},
+                                  "timestamp": [t0 + i * step for i in range(n)],
+                                  "indicators": {"quote": [{"close": closes, "high": [c + 1 for c in closes],
+                                                            "low": [c - 1 for c in closes]}]}}], "error": None}}
+
+
+_FUND = {"TSLA": ("Tesla, Inc.", "USD", 354.11, 1.4e12, 334.07, None),
+         "1211.HK": ("BYD Company Limited", "HKD", 73.9, 6.7e11, 19.65, 0.54)}
+
+
+@app.get("/yahoo2/v1/test/getcrumb")
+async def yahoo_crumb():
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse("Crumb123")
+
+
+@app.get("/yahoo2/v7/finance/quote")
+async def yahoo_quote(symbols: str = "", crumb: str = ""):
+    if crumb != "Crumb123":
+        return JSONResponse({"finance": {"error": {"code": "Unauthorized", "description": "Invalid Crumb"}}}, status_code=401)
+    out = []
+    for s in symbols.split(","):
+        if s in _FUND:
+            n, cur, p, cap, pe, dy = _FUND[s]
+            out.append({"symbol": s, "longName": n, "currency": cur, "financialCurrency": "CNY" if s.endswith(".HK") else "USD",
+                        "regularMarketPrice": p, "marketCap": cap, "trailingPE": pe, "forwardPE": pe / 2, "priceToBook": 3.1,
+                        "epsTrailingTwelveMonths": round(p / pe, 2), "dividendYield": dy, "fiftyTwoWeekLow": p * .7,
+                        "fiftyTwoWeekHigh": p * 1.3, "earningsTimestamp": 1787904600})
+    return {"quoteResponse": {"result": out, "error": None}}
+
+
+@app.get("/yahoo2/ws/fundamentals-timeseries/v1/finance/timeseries/{sym}")
+async def yahoo_timeseries(sym: str, type: str = ""):   # noqa: A002 (Yahoo's parameter name)
+    if sym not in _FUND:
+        return {"timeseries": {"result": [], "error": None}}
+    res = []
+    for t in type.split(","):
+        kind = "quarterly" if t.startswith("quarterly") else "annual"
+        dates = ["2025-09-30", "2025-12-31", "2026-03-31", "2026-06-30"] if kind == "quarterly" else ["2022-12-31", "2023-12-31", "2024-12-31", "2025-12-31"]
+        base = {"TotalRevenue": 25e9, "GrossProfit": 4.75e9, "OperatingIncome": 1e9, "NetIncome": 1.1e9, "DilutedEPS": 0.32}[t[len(kind):]]
+        mult = 1 if kind == "quarterly" else 4
+        res.append({"meta": {"type": [t], "symbol": [sym]},
+                    t: [{"asOfDate": d, "currencyCode": "USD", "reportedValue": {"raw": base * mult * (1 + i / 10)}} for i, d in enumerate(dates)]})
+    return {"timeseries": {"result": res, "error": None}}
+
+
+@app.get("/slow")
+async def slow_page(s: float = 6, name: str = "slow"):
+    import asyncio as _a
+    await _a.sleep(min(s, 20))
+    return HTMLResponse(f"<html><head><title>{name}</title></head><body><h1>{name}</h1><button>Go</button></body></html>")
