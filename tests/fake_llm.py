@@ -298,6 +298,15 @@ async def chat(req: Request):
         if n == 1:
             return reply("", [tc("make_chart", {"type": "line", "title": "汇丰 vs 渣打", "symbols": ["0005.HK", "2888.HK"], "range": "2y"})])
         return reply("MARKET RESULTS:\n" + "\n=====\n".join(str(m["content"])[:8000] for m in tools_done))
+    if "DOCXTEST" in goal:   # make_docx: a Word file made locally (no online converters), then sent to the chat
+        if n == 0:
+            return reply("", [tc("make_chart", {"type": "bar", "title": "收入", "labels": ["4月", "5月"], "values": [1, 2], "send": False})])
+        if n == 1:
+            return reply("", [tc("make_docx", {"markdown": "# 合同摘要\n\n- 服务费 **12 万**\n\n| 条款 | 建议 |\n|---|---|\n| 知识产权 | 改为甲方 |\n\n![收入](charts/收入.png)",
+                                               "output": "reports/summary"})])
+        if n == 2:
+            return reply("", [tc("send_file", {"path": "reports/summary.docx"})])
+        return reply("DOCX RESULTS:\n" + "\n=====\n".join(str(m["content"])[:300] for m in tools_done))
     if "CALCTEST" in goal:   # calculate: exact loan maths instead of the model's guesses
         if n == 0:
             return reply("", [tc("calculate", {"expressions": ["loan(3000000, 3.5, 25, 2)", "pmt(r, 300, 3e6)", "1/0"],

@@ -15,7 +15,31 @@ with tarfile.open(fileobj=buf, mode="w:xz", preset=9 | lzma.PRESET_EXTREME) as t
             return None
         ti.uid = ti.gid = 0; ti.uname = ti.gname = "root"; ti.mtime = 0
         return ti
-    tar.add(f"{ROOT}/app", arcname="app", filter=filt)
+    import ast
+
+    def _strip_docstrings(src: str) -> str:
+        """Drop docstrings and comments from the shipped .py files (ast round trip): ~20 KB less in the Helm release."""
+        tree = ast.parse(src)
+        for n in ast.walk(tree):
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)) and n.body \
+                    and isinstance(n.body[0], ast.Expr) and isinstance(getattr(n.body[0], "value", None), ast.Constant) \
+                    and isinstance(n.body[0].value.value, str):
+                n.body = n.body[1:] or [ast.Pass()]
+        return ast.unparse(tree) + "\n"
+
+    for r, ds, fs in os.walk(f"{ROOT}/app"):
+        ds[:] = sorted(d for d in ds if d != "__pycache__")
+        for f in sorted(fs):
+            if f.endswith(".pyc"):
+                continue
+            p = os.path.join(r, f)
+            data = open(p, "rb").read()
+            if f.endswith(".py") and os.environ.get("KEEP_DOCSTRINGS") != "1":
+                data = _strip_docstrings(data.decode()).encode()
+            ti = tarfile.TarInfo(os.path.relpath(p, ROOT))
+            ti.size, ti.mode, ti.mtime = len(data), os.stat(p).st_mode & 0o777, 0
+            ti.uid = ti.gid = 0; ti.uname = ti.gname = "root"
+            tar.addfile(ti, io.BytesIO(data))
     tar.add(f"{ROOT}/requirements.txt", arcname="requirements.txt", filter=filt)
     tar.add(f"{ROOT}/requirements-browser.txt", arcname="requirements-browser.txt", filter=filt)
 raw = buf.getvalue()

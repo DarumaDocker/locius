@@ -963,7 +963,8 @@ async def user_view(req: Request):
     tid = body.get("task_id")
     if tid in broker.pages:
         broker.view_task = tid
-        broker.view_pinned_until = time.time() + 600   # the user chose what to watch: keep it for 10 minutes
+    # the user chose what to watch: keep it for 10 minutes ("pin": false hands the view back to the agents)
+    broker.view_pinned_until = time.time() + 600 if body.get("pin", True) and tid in broker.pages else 0.0
     return await state()
 
 

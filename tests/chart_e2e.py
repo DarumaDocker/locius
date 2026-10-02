@@ -1,5 +1,6 @@
 """0.2.23: make_chart draws charts/diagrams locally (SVG -> PNG in the browser container, offline) and shows them
 in the chat; a bad spec gets an actionable error; a chart can be embedded in a PDF."""
+import json
 import sys
 import time
 
@@ -43,5 +44,18 @@ pdf = c.get(B + "/api/files/raw", params={"path": "reports/chart_report.pdf"}).c
 check("PDF embeds the picture", pdf[:4] == b"%PDF" and b"/Image" in pdf, len(pdf))
 ev = [e for e in t["events"] if e["type"] == "chart"]
 check("chart events on the timeline", len(ev) == 2, ev)
+# ---------------------------------------------------------------- make_docx (0.2.24)
+r = c.post(B + "/api/chat", json={"message": "DOCXTEST 把合同要点导出成 Word"}, headers=H).json()
+t0 = time.time()
+while time.time() - t0 < 90:
+    t = c.get(f"{B}/api/tasks/{r['task_id']}").json()
+    if t["status"] in ("COMPLETED", "FAILED", "CANCELLED"):
+        break
+    time.sleep(0.5)
+out = t.get("result") or ""
+check("Word file made locally with the chart inside", "reports/summary.docx" in out and "1 images" in out, out[:600])
+msgs = c.get(f"{B}/api/conversations/{r['conversation_id']}").json()["messages"]
+cards = [json.loads(m["content"]) for m in msgs if m["role"] == "system"]
+check("docx sent to the chat as a Word file", any("wordprocessing" in (x.get("mime") or "") for x in cards), cards)
 print("ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}")
 sys.exit(1 if fails else 0)

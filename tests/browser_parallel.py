@@ -26,6 +26,9 @@ def act(task, action, **kw):
 
 SLOW = "http://shop.test:8094/slow?s=8&name=SlowA"
 FAST = "http://shop.test:8094/slow?s=0&name=FastB"
+c.post(f"{BR}/user/view", json={"task_id": "", "pin": False}, headers=HB)   # no view pinned by an earlier run
+for x in c.get(f"{BR}/state", headers=HB).json().get("tasks", []):   # pages left by earlier tests: those tasks are over
+    act(x["task_id"], "release")
 act("pA", "navigate", url=FAST)          # both tasks have a page already
 act("pB", "navigate", url=FAST)
 c.post(f"{BR}/user/release", json={}, headers=HB)

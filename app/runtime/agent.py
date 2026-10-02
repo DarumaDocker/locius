@@ -228,6 +228,16 @@ LOCAL_TOOLS = [
          "markdown": {"type": "string", "description": "或者直接给 Markdown 内容 or Markdown text instead of a file"},
          "output": {"type": "string", "description": "输出路径，默认与源文件同名 .pdf output path (default: next to source)"},
          "title": S}),
+    _fn("make_docx", "在本机生成 Word 文档（.docx），不要用任何在线转换网站。内容用 Markdown 写：# 标题、## 小标题、段落、**粗体**、"
+        "列表、表格、> 引用，以及 ![说明](charts/xxx.png) 插入工作区里的图片（例如 make_chart send=false 生成的图）。"
+        " Create a Word document (.docx) locally — never use online converters. Write the content as Markdown (headings, "
+        "paragraphs, bold, lists, tables, quotes, ![caption](charts/x.png) images from the workspace) or pass a workspace "
+        ".md file as source; then send_file it.",
+        {"markdown": {"type": "string", "description": "文档内容（Markdown）document content in Markdown"},
+         "source": {"type": "string", "description": "或者：工作区里的 .md 文件 or a workspace .md file"},
+         "output": {"type": "string", "description": "输出路径，以 .docx 结尾 output path ending in .docx, e.g. reports/summary.docx"},
+         "title": {"type": "string", "description": "可选：文档标题 optional title"}},
+        ["output"]),
     _fn("make_xlsx", "在本机生成 Excel 表格（.xlsx）：表头加粗、首行冻结、可筛选、数字按数字存。可以有多个工作表。"
         "数据用 sheets 给出，或者用 source 指定工作区里的 CSV / 含 Markdown 表格的文件。生成后用 send_file 发给用户。"
         " Make an Excel workbook locally. Give sheets=[{name, columns:[...], rows:[[...], ...]}] or source (a workspace .csv, "
@@ -388,7 +398,7 @@ RESEARCH_NUDGE_PAGES = 10
 BUDGET_MARK = "step budget"
 BUDGET_MARK_PAGES = "research check"
 TIME_MARK = "time budget"
-REMAKE_TOOLS = {"make_xlsx", "make_pdf", "make_chart"}
+REMAKE_TOOLS = {"make_xlsx", "make_pdf", "make_docx", "make_chart"}
 REMAKE_MAX = 4   # the 2026-10-02 itinerary run re-made the same Excel file 9 times (≈5 minutes of generation)
 
 
@@ -396,7 +406,7 @@ def _out_key(args: dict) -> str:
     return str(args.get("output") or args.get("title") or "").strip().lower()
 
 
-FINISH_TOOLS = {"update_plan", "files_write", "files_read", "file_look", "files_list", "make_pdf", "make_xlsx", "make_chart", "market_data", "stock_fundamentals", "calculate", "send_file", "notify_user",
+FINISH_TOOLS = {"update_plan", "files_write", "files_read", "file_look", "files_list", "make_pdf", "make_xlsx", "make_docx", "make_chart", "market_data", "stock_fundamentals", "calculate", "send_file", "notify_user",
                 "memory_remember", "goal_update", "schedule_state_set", "gmail_send", "gmail_reply", "gmail_create_draft",
                 "slack_send_message", "notion_create_page", "notion_append", "calendar_create_event"}
 
@@ -477,6 +487,7 @@ class Runtime:
         self.llm = LLM(self.store.settings, on_call=self._on_llm_call)
         self.running: dict[str, asyncio.Task] = {}
         self._remakes: dict[tuple, int] = {}   # (task, tool, output) -> files made, see REMAKE_MAX
+        self._confidential: set[str] = set()   # tasks that read the user's files (Sentinel was told)
         self.cancel_flags: set[str] = set()
         self.pause_flags: set[str] = set()
         self._catalog_cache = (0.0, None)
@@ -840,6 +851,7 @@ class Runtime:
             first = t["goal"]
             if t.get("attachments"):
                 first += await self._attachment_context(t)
+                await self._mark_confidential(task_id, "attachment")
             transcript = [{"role": "system", "content": ""}] + history + [{"role": "user", "content": first}]
 
         # ---------------------------------------------------------- resume after approval / takeover
@@ -1473,6 +1485,9 @@ class Runtime:
                 ok = False
             await self.audit("executor", name, task_id, resource="local", risk="low", decision="ALLOW",
                              result="success" if ok else "error", detail={"args": _preview_args(args)})
+            if ok and name in ("files_read", "file_look", "files_search"):
+                # the user's own files are confidential: Sentinel then asks before long text is typed into websites
+                await self._mark_confidential(task_id, name)
         elif name == "browser_navigate" and (blocked := site_blocked(transcript, str(args.get("url", "")))):
             content = (f"ERROR: [SITE BLOCKED site={blocked}] 这个网站之前已经拦截了自动浏览器，换网址也一样，不再重试。"
                        "请换一个有同样信息的来源（例如订餐厅：Google 地图、Chope、TableCheck、餐厅官网），"
@@ -1691,6 +1706,41 @@ class Runtime:
         return (f"已发送到对话 Sent to the chat ({len(items)} file(s)): {names}.{extra} "
                 "图片会直接显示、视频可直接播放 Images show inline and videos play inline — no need to tell the user where to find them.")
 
+    async def _mark_confidential(self, task_id: str, why: str):
+        if task_id in self._confidential:
+            return
+        self._confidential.add(task_id)
+        try:
+            await self.sentinel("POST", "/internal/taint", {"task_id": task_id, "taint": "CONFIDENTIAL"}, timeout=10)
+        except Exception:
+            self._confidential.discard(task_id)
+
+    def _make_docx(self, a: dict) -> str:
+        from app.common import docx_writer
+        out = str(a.get("output") or "").strip()
+        if not out:
+            return "ERROR: 需要 output（.docx 路径）Give an output path ending in .docx"
+        if not out.lower().endswith(".docx"):
+            out = os.path.splitext(out)[0] + ".docx"
+        p = self._path(out)
+        if os.sep + ".quarantine" in p:
+            return "ERROR: 不能写入隔离区"
+        md = str(a.get("markdown") or a.get("content") or "")
+        if not md.strip() and a.get("source"):
+            src = self._path(str(a["source"]))
+            if not os.path.isfile(src):
+                return f"ERROR: 文件不存在 file not found: {a['source']}"
+            md = open(src, encoding="utf-8", errors="replace").read()
+        if not md.strip():
+            return "ERROR: 需要 markdown 或 source Give the content as markdown, or a workspace .md file as source."
+        try:
+            info = docx_writer.markdown_to_docx(md, p, str(a.get("title") or ""), base_dir=WORKSPACE)
+        except Exception as e:
+            return f"ERROR: Word 生成失败 (docx export failed): {e}"
+        rel = os.path.relpath(p, WORKSPACE)
+        return (f"Word 文档已在本机生成 created locally: {rel} ({info['size'] // 1024 or 1} KB, {info['paragraphs']} blocks"
+                + (f", {info['images']} images" if info["images"] else "") + ")。用 send_file 发给用户 Use send_file to give it to the user.")
+
     def _make_xlsx(self, a: dict) -> str:
         from app.common import xlsx
         out = str(a.get("output") or "").strip()
@@ -1815,6 +1865,8 @@ class Runtime:
                     "如果用户要这个文件，用 send_file 发给他 Use send_file to give it to the user.")
         if name == "make_xlsx":
             return self._make_xlsx(a)
+        if name == "make_docx":
+            return self._make_docx(a)
         if name == "make_chart":
             return await self._make_chart(t, a)
         if name == "market_data":
