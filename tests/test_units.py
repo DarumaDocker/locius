@@ -988,3 +988,15 @@ def test_requested_target_language_is_not_rewritten():
     assert P.wants_cjk_output("用中文回答我") and not P.wants_cjk_output("帮我看看最重要的邮件")
     assert not P.wants_cjk_output("How big is the Chinese market?")
     assert "One exception" in P.language_rule("en")
+
+
+def test_stranded_answer_is_merged_into_a_final_that_points_back():
+    from app.runtime.agent import merge_stranded_answer as M
+    table = "Here are the bills:\n\n| Merchant | Amount |\n|---|---|\n" + "| Shop | S$10 |\n" * 20
+    tr = [{"role": "user", "content": "find my bills"},
+          {"role": "assistant", "content": table, "tool_calls": [{"id": "1", "function": {"name": "update_plan"}}]},
+          {"role": "tool", "content": "plan updated"}]
+    out = M(tr, "The task is complete — the summary table above covers all bills.")
+    assert out.startswith("Here are the bills") and out.endswith("covers all bills.")
+    assert M(tr, "Here are your bills: none found.") == "Here are your bills: none found."     # no pointer back
+    assert M(tr, "如上表所示，共 20 笔。").startswith("Here are the bills")

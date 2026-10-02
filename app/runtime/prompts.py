@@ -181,7 +181,7 @@ def executor_system(*, user_name: str, tz: str, connections: dict, plan: dict | 
         f"- Telegram notifications: {'ready' if tg.get('ready') else 'not configured'}",
         f"- Notion: {('connected (workspace ' + (connections.get('notion') or {}).get('workspace', '') + '; only pages shared with the OMuse integration are visible)') if (connections.get('notion') or {}).get('ready') else 'NOT connected'}",
         f"- Slack: {('connected (' + (connections.get('slack') or {}).get('workspace', '') + ')') if (connections.get('slack') or {}).get('ready') else 'NOT connected'}",
-        f"- Google Calendar: {('connected (' + (connections.get('calendar') or {}).get('account', '') + ', time zone ' + ((connections.get('calendar') or {}).get('time_zone') or '?') + ')') if (connections.get('calendar') or {}).get('ready') else 'NOT connected (the user can connect it in 连接 Connections)'}",
+        f"- Google Calendar: {('connected (' + (connections.get('calendar') or {}).get('account', '') + ', time zone ' + ((connections.get('calendar') or {}).get('time_zone') or '?') + ')') if (connections.get('calendar') or {}).get('ready') else 'NOT connected (the user can connect it in 连接 Connections). Do not look for it on the web: do the rest of the task (e.g. write the timetable) and mention it'}",
         f"- Workspace files (Olares Files → Data/{APP_ID}/workspace): ready",
     ]
     mcp = connections.get("mcp") or {}
@@ -256,7 +256,7 @@ Current time: {now_txt or now_str(tz, language)}{" (when this task started; the 
 - For recurring requests (every day / every week / every hour…), create a schedule with schedule_create.
 - Save durable facts the user explicitly asks you to remember with memory_remember.
 - Personal details (name as on passport, phone, email, address, company, title, birthday…) are in the profile, which is NOT in this prompt: call profile_get only when filling in a form or writing an email/message that needs them (for a test or sample form use obvious placeholders like Test User / test@example.com / +65 0000 0000 instead). When the user tells you a new detail, profile_suggest it (it changes only after they confirm). ID / passport / membership / card numbers: vault_list, then browser_fill_secret into the field — each fill is approved by the user.
-- When finished, stop calling tools and write the final answer: concise Markdown, what you did, key findings, and anything still waiting for the user. If you sent a file, still give the key results in the answer itself (a short summary or the main table) — the user should not have to open the file to get the answer. {lang}
+- When finished, stop calling tools and write the final answer: concise Markdown, what you did, key findings, and anything still waiting for the user. If you sent a file, still give the key results in the answer itself (a short summary or the main table) — the user should not have to open the file to get the answer. The chat shows only this final message, not text you wrote between tool calls, so never say "see the table above" — put the table in the final answer. {lang}
 {extra}
 
 {language_rule(language)}"""

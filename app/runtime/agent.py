@@ -752,10 +752,17 @@ class Runtime:
 
     async def _plan(self, task: dict, facts: list[dict], history_txt: str, state: str = "") -> dict:
         s = self.store.settings()
-        mcp = ((await self.catalog()).get("connections") or {}).get("mcp") or {}
+        conns = (await self.catalog()).get("connections") or {}
+        mcp = conns.get("mcp") or {}
         live = [f"{x['name']} (mcp:{x['id']})" for x in mcp.get("servers") or [] if x.get("enabled") and x.get("tools")]
+        # 2026-10-02 R7-13: a "plan my Saturday" request got a "check Google Calendar" step although the calendar isn't
+        # connected; the executor then web-searched "Google Calendar API status" until it gave up
+        off = [n for k, n in (("gmail", "gmail"), ("calendar", "calendar"), ("notion", "notion"), ("slack", "slack"))
+               if not (conns.get(k) or {}).get("ready")]
         sys_prompt = (prompts.language_rule(agent_lang(s)) + "\n\n" + prompts.PLANNER_SYSTEM
-                      + (f"\nConnected MCP servers: {', '.join(live)}." if live else ""))
+                      + (f"\nConnected MCP servers: {', '.join(live)}." if live else "")
+                      + (f"\nNOT connected (do not plan steps that use them; if the request needs one, plan to do the rest and "
+                         f"tell the user it can be connected in Connections): {', '.join(off)}." if off else ""))
         msgs = [{"role": "system", "content": sys_prompt},
                 {"role": "user", "content": prompts.planner_user(task["goal"], history_txt, facts, state,
                                                                  reply_lang=self.reply_lang(task, s))}]
@@ -1046,6 +1053,7 @@ class Runtime:
                         if st.get("status") == "done"]
                 final = prompts.L(agent_lang(s), "（任务已结束，但模型没有返回文字说明。）" + ("已完成：" + "；".join(map(str, done)) if done else ""),
                                   "(The task ended but the model wrote no answer.)" + (" Done: " + "; ".join(map(str, done)) if done else ""))
+            final = merge_stranded_answer(transcript, final)
             if agent_lang(s) == "en" and prompts.cjk_share(final) > 0.5 and not prompts.wants_cjk_output(t["goal"]):
                 final = await self._rewrite_in_english(task_id, transcript, final)
             transcript.append({"role": "assistant", "content": final})
@@ -2345,6 +2353,25 @@ class Runtime:
                              detail={"facts": added, "recent": recent, "profile_suggestions": suggested})
             await self.publish({"kind": "memory_update"})
         return {"facts": added, "recent": recent, "profile_suggestions": suggested}
+
+
+_POINTS_BACK = re.compile(r"\babove\b|\bpreceding\b|\bearlier (table|summary|message)\b|上面|上方|如上|上述|前面(的|那)", re.I)
+
+
+def merge_stranded_answer(transcript: list[dict], final: str) -> str:
+    """2026-10-02 R7-02: the model wrote the full answer (a table of bills) as text next to an update_plan call, then
+    finished with "the summary table above covers …" — the chat only shows the final message, so the table was lost.
+    When the final answer is short and points back, put the last substantial mid-task text in front of it."""
+    f = str(final or "").strip()
+    if len(f) > 700 or not _POINTS_BACK.search(f):
+        return final
+    for m in reversed(transcript):
+        if m.get("role") == "user" and not str(m.get("content") or "").startswith(("(System)", "（系统）")):
+            break    # only look inside this run
+        txt = str(m.get("content") or "").strip() if m.get("role") == "assistant" and m.get("tool_calls") else ""
+        if len(txt) >= 300 and txt not in f:
+            return txt + "\n\n" + f
+    return final
 
 
 _TASK_LANG: contextvars.ContextVar[str] = contextvars.ContextVar("omuse_task_lang", default="")
