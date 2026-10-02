@@ -71,6 +71,7 @@ spec:
 
     Runs on the local models served by your Olares by default — any OpenAI-compatible endpoint works. English and 中文 interface.
   upgradeDescription: |
+    0.2.22: Smarter when a source keeps failing. A website that fails or is refused 3 times in a task is blocked for the rest of that task, so OMuse switches to a different source instead of retrying the same link; copies of the same call in one step run once; re-plans are told which sources to avoid; and if it is still going round in circles after a nudge and a re-plan, it stops and answers with what it has, saying what it could not get.
     0.2.21: Photos, videos and files in the chat. Attach files with the new ＋ button next to Send (or drag them in, or paste a screenshot): images, videos, PDFs, Word, Excel, PowerPoint, Markdown and text — OMuse reads them together with your message (videos as still frames, plus the speech when a speech-to-text model is available) and can look at them again later in the same chat. OMuse can now save photos and videos from web pages and send them straight into the chat as a gallery; videos and audio play inline, and Telegram chats get them as photos and videos.
     0.2.19: Store listing tags updated (personal assistant, automation, browser, agent, muse) so OMuse is easier to find in Olares Market.
     0.2.18: Memory tidy is stricter: profile suggestions must look right (a real email address, a phone number) and only the most complete value per field is suggested; tidying may shorten a memory but never add details to it.

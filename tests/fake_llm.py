@@ -291,6 +291,19 @@ async def chat(req: Request):
         if n == 1:
             return reply("", [tc("send_file", {"path": "reports/brief.md", "note": "今天的简报 today's brief"})])
         return reply("文件已发送 File sent: " + last_tool[:200])
+    if "STUCKLOOP" in goal:   # the 2026-10-02 HSBC run: the same Google Finance link, 3 copies per turn, forever
+        if not b.get("tools"):
+            return reply(f"STUCK SUMMARY after {n} tool results; asked to stop: {'停止重试' in allu or 'retrying has stopped' in allu}")
+        url = "http://shop.test:8099/page.html?quote=HSBC&window=5Y"
+        return reply("", [tc("browser_navigate", {"url": url}), tc("browser_navigate", {"url": url}),
+                          tc("browser_navigate", {"url": url})])
+    if "SWITCHSRC" in goal:   # a source that keeps failing: after 3 failures the host is blocked, the agent switches site
+        dead_seen = "Dead ends in this task" in sys
+        if n < 4:
+            return reply("", [tc("browser_navigate", {"url": f"http://nosuch.test:8099/quote{n}"})])
+        if n == 4:
+            return reply("", [tc("browser_navigate", {"url": PAGE})])
+        return reply(f"SWITCH OK dead_ends_in_prompt={dead_seen} last={last_tool[:120]}")
     if "LOOPFEED" in goal:   # a model stuck re-opening the same RSS feed (the 2026-09-28 news-brief run)
         if not b.get("tools"):
             return reply(f"LOOP SUMMARY after {n} tool calls: feed read, email not sent.")

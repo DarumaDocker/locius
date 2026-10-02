@@ -14,7 +14,7 @@ def check(name, cond, info=""):
 
 
 s0 = c.get(B + "/api/settings", headers=H).json()["settings"]
-c.put(B + "/api/settings", json={"max_steps": 6}, headers=H).raise_for_status()
+c.put(B + "/api/settings", json={"max_steps": 4}, headers=H).raise_for_status()
 sch = c.post(B + "/api/schedules", json={"name": "LOOP 早报", "goal": "LOOPFEED read the robotics feed and email it",
                                         "kind": "cron", "spec": "0 6 * * *", "tz": "Asia/Singapore"}, headers=H).json()
 sid = (sch.get("schedule") or sch)["id"]
@@ -30,7 +30,7 @@ check("step limit -> FAILED, not COMPLETED", t["status"] == "FAILED" and "步数
 check("summary kept as result", "LOOP SUMMARY" in (t.get("result") or ""), t.get("result"))
 check("feed shown as item list", res and "RSS/Atom feed" in res[0]["preview"] and "Robot story 0" in res[0]["preview"], res[:1])
 blocked = [r for r in res if "重复调用已拦截" in r["preview"]]
-check("identical re-opens blocked", len(blocked) >= 3 and len(res) - len(blocked) <= 3, [r["preview"][:80] for r in res])
+check("identical re-opens blocked", len(blocked) >= 2 and len(res) - len(blocked) <= 3, [r["preview"][:80] for r in res])
 ns = c.get(B + "/api/notifications", headers=H).json()
 ns = ns.get("notifications", ns) if isinstance(ns, dict) else ns
 check("user told the scheduled run did not finish", any("LOOP 早报" in n.get("title", "") and "没有做完" in n.get("title", "") for n in ns),

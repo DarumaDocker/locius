@@ -14,6 +14,7 @@ import os
 import re
 import time
 import traceback
+from urllib.parse import urlparse
 
 import httpx
 
@@ -126,6 +127,66 @@ def repeat_guard(transcript: list[dict], call: dict) -> str | None:
                 f" Repeated identical call blocked ({name}, {n}x): the result will not change. Use what you already have, "
                 "skip this source, and move on to the next step.")
     return None
+
+
+# Dead-end sources: a web host that failed (error, bot wall, refused repeat) HOST_FAIL_MAX times in one task is
+# blocked for the rest of the task, so the agent has to switch source instead of hammering the same link.
+# When every call in a turn is refused, the agent is stuck: 1st time it gets a firm nudge, 2nd time a re-plan that is
+# told which sources to avoid, 3rd time (or after MAX_REPLANS re-plans) it stops and answers with what it has.
+HOST_FAIL_MAX = 3
+MAX_REPLANS = 4
+
+
+def _host(url) -> str:
+    try:
+        h = (urlparse(str(url or "")).hostname or "").lower()
+    except ValueError:
+        return ""
+    return h[4:] if h.startswith("www.") else h
+
+
+def source_failures(events: list[dict]) -> dict[str, int]:
+    """Failures per web host in this task, from the event log (survives restarts and context compression)."""
+    calls, fails = {}, {}
+    for e in events:
+        d = e.get("data") or {}
+        if e.get("type") == "tool_call":
+            a = d.get("args")
+            calls[d.get("call_id")] = a if isinstance(a, dict) else {}
+        elif e.get("type") == "tool_result" and d.get("ok") is False and not d.get("skipped"):
+            host = _host((calls.get(d.get("call_id")) or {}).get("url"))
+            if host:
+                fails[host] = fails.get(host, 0) + 1
+    return fails
+
+
+def dead_ends_text(fails: dict[str, int], lang: str = "zh") -> str:
+    bad = sorted(((h, n) for h, n in fails.items() if n >= 2), key=lambda x: -x[1])[:8]
+    if not bad:
+        return ""
+    lst = ", ".join(f"{h} ({n}x)" for h, n in bad)
+    if lang == "en":
+        return f"Dead ends in this task (failed or blocked repeatedly; do NOT use them again, pick a different source): {lst}"
+    return (f"本任务里已经反复失败/被拦截的来源（不要再用，换别的网站或方法）: {lst}"
+            f"\nDead ends in this task (do NOT use them again, pick a different source): {lst}")
+
+
+def host_guard(events, call: dict) -> str | None:
+    """Refusal text if the call goes to a web host that already failed HOST_FAIL_MAX times in this task.
+    `events` is the task's event list, or a callable returning it (only read when the call has a URL)."""
+    args = call.get("args") or {}
+    host = _host(args.get("url")) if isinstance(args, dict) else ""
+    if not host:
+        return None
+    n = source_failures(events() if callable(events) else events).get(host, 0)
+    if n < HOST_FAIL_MAX:
+        return None
+    return (f"ERROR: 已拦截 — {host} 在本任务里已经失败或被拦截 {n} 次，本次没有执行，之后也不会再执行。"
+            "不要再访问这个网站：换一个完全不同的网站或数据来源（例如同类信息的其他网站、官方网站、新闻或资料站），"
+            "或者用已经拿到的内容完成任务，并告诉用户哪些数据拿不到。"
+            f" Blocked: {host} already failed or was refused {n} times in this task, so it will not be called again. "
+            "Switch to a completely different website or data source, or finish with what you already have and tell the user "
+            "what could not be fetched.")
 
 
 def _fn(name: str, desc: str, props: dict, required: list[str] | None = None) -> dict:
@@ -722,6 +783,8 @@ class Runtime:
         steps = int(t["steps"] or 0)
         max_steps = int(s.get("max_steps") or 30)
         consecutive_errors = 0
+        stuck = 0          # turns in a row where every call was refused by a loop guard
+        gave_up = False    # set when the agent keeps going round in circles: it must answer now, without tools
         nudged = False
         while True:
             if task_id in self.cancel_flags:
@@ -736,15 +799,27 @@ class Runtime:
                 user_name=s["user_name"], tz=s["timezone"], connections=catalog.get("connections", {}), plan=t["plan"],
                 facts=facts, skills=self.skills(), extra=extra, language=agent_lang(s),
                 reply_lang=self.reply_lang(t, s))}
+            dead = dead_ends_text(source_failures(self.store.events(task_id)), agent_lang(s))
+            if dead:
+                transcript[0]["content"] += "\n\n" + dead
             transcript = self._compress(transcript)
-            force_final = steps >= max_steps
+            force_final = steps >= max_steps or gave_up
             tools = None if force_final else self._tools(catalog, schedule=bool(t["schedule_id"]) and not goal, goal=bool(goal))
             lg = agent_lang(s)
             if not force_final:
                 tools = self._budget(transcript, tools, max_steps - steps, lg)
                 if lg == "en":
                     tools = prompts.strip_tools_en(tools)
-            if force_final:
+            if gave_up:
+                transcript.append({"role": "user", "content": prompts.L(
+                    lg, "（系统）同样的方法和来源反复失败，已经换过计划也没有进展，所以停止重试。请不要再调用工具，"
+                        "用已经拿到的信息给出尽可能有用的回答；清楚说明哪些数据没拿到、为什么（例如哪个网站打不开或被拦截），"
+                        "并建议用户下一步可以怎么做（例如换哪个来源、或者由用户提供数据）。",
+                    "(System) The same methods and sources keep failing even after re-planning, so retrying has stopped. "
+                    "Do not call tools. Give the most useful answer you can from what you already have, say clearly what could "
+                    "not be fetched and why (e.g. which site would not open or was blocked), and suggest what the user can do "
+                    "next (another source, or providing the data).")})
+            elif force_final:
                 transcript.append({"role": "user", "content": prompts.L(
                     lg, "（系统）已达到步数上限。请停止调用工具，总结目前完成的内容、结果和未完成的部分。",
                     "(System) Step limit reached: stop calling tools and summarize what is done, the results and what is left.")})
@@ -767,16 +842,39 @@ class Runtime:
                 if resp["content"]:
                     await self.event(task_id, "message", {"text": truncate(resp["content"], 2000)})
                 self.store.update_task(task_id, transcript=transcript)
+                seen_sigs, progress = {}, False
                 try:
                     for i, call in enumerate(calls):
+                        sig = _call_sig(call["name"], call.get("args") or {})
+                        if sig in seen_sigs and call["name"] not in REPEAT_STREAK_OK:
+                            # the model sometimes emits the same call 3-4 times in one turn: run it once, skip the copies
+                            # (they are not failures, so they must not trigger a re-plan on their own)
+                            await self._skip_duplicate(task_id, call, seen_sigs[sig], transcript)
+                            continue
+                        seen_sigs[sig] = call["id"]
                         ok = await self._exec_call(t, call, transcript, catalog, remaining=calls[i + 1:])
                         consecutive_errors = 0 if ok else consecutive_errors + 1
+                        progress = progress or not call.get("_refused")
                 except Suspend as sp:
                     return await self._suspend(task_id, sp, transcript)
                 self.store.update_task(task_id, transcript=transcript)
-                if consecutive_errors >= 3:
-                    await self._replan(task_id, transcript, facts, history_txt)
+                stuck = 0 if progress else stuck + 1
+                replans = sum(1 for e in self.store.events(task_id) if e["type"] == "replanning")
+                dead = dead_ends_text(source_failures(self.store.events(task_id)), lg)
+                if stuck >= 3 or (stuck or consecutive_errors >= 3) and replans >= MAX_REPLANS:
+                    # still going round in circles after a nudge and a re-plan: stop and answer with what we have
+                    gave_up = True
+                    await self.event(task_id, "gave_up", {"reason": "stuck", "replans": replans, "dead_ends": dead[:500]})
+                elif stuck == 2 or consecutive_errors >= 3:
+                    await self._replan(task_id, transcript, facts, history_txt, dead_ends=dead)
                     consecutive_errors = 0
+                elif stuck == 1:
+                    transcript.append({"role": "user", "content": prompts.L(
+                        lg, "（系统）你刚才的调用全部被拦截了（重复调用，或者这个网站已经多次失败）。不要再重复同样的调用。"
+                            "换一个完全不同的方法或来源继续；如果前面已经拿到了足够的信息，就直接完成任务。" + ("\n" + dead if dead else ""),
+                        "(System) Every call you just made was refused (a repeat, or a site that already failed several times). "
+                        "Do not repeat them. Switch to a completely different method or source, or finish the task if you "
+                        "already have enough." + ("\n" + dead if dead else ""))})
                 continue
             final = resp["content"]
             if not final and not nudged:
@@ -793,7 +891,12 @@ class Runtime:
                 if st.get("status") in ("pending", "running"):
                     st["status"] = "done" if not force_final else st["status"]
             self.store.update_task(task_id, transcript=transcript, result=final, plan=plan, finished_at=now_ts())
-            if force_final:
+            if gave_up:
+                # stopped retrying on purpose: the answer explains what is missing, but the task is not a full success
+                why = ("Stopped retrying: the same sources kept failing, answered with what was available" if s.get("language") == "en"
+                       else "同样的来源反复失败，已停止重试，按已有信息作答")
+                await self.set_status(task_id, "FAILED", error=why)
+            elif force_final:
                 # ran out of steps: this is not a success — say so instead of quietly marking it completed
                 why = (f"Stopped at the step limit ({max_steps} steps) before finishing" if s.get("language") == "en"
                        else f"达到步数上限（{max_steps} 步），任务没有做完")
@@ -803,6 +906,9 @@ class Runtime:
             await self.event(task_id, "final", {"text": truncate(final, 4000)})
             self.store.add_msg(t["conv_id"], "assistant", final, task_id)
             await self.publish({"kind": "conv_update", "conv_id": t["conv_id"]})
+            if gave_up:
+                await self._warn_unattended(t, ("同样的来源反复失败，已停止重试", "kept failing on the same sources and stopped retrying"), final)
+                return
             if force_final:
                 await self._warn_unattended(t, (f"达到 {max_steps} 步上限，没有做完", f"hit the {max_steps}-step limit and didn't finish"), final)
                 return
@@ -1059,18 +1165,34 @@ class Runtime:
             return text
         return final
 
-    async def _replan(self, task_id: str, transcript: list[dict], facts, history_txt):
+    async def _replan(self, task_id: str, transcript: list[dict], facts, history_txt, dead_ends: str = ""):
         t = self.store.task(task_id)
         recent = [m for m in transcript if m.get("role") == "tool"][-4:]
         state = "\n".join(truncate(str(m.get("content")), 400) for m in recent)
-        await self.event(task_id, "replanning", {"reason": "连续失败 consecutive failures"})
-        plan = await self._plan(t, facts, history_txt, state=f"Previous plan: {dumps(t['plan'])}\nRecent failures:\n{state}")
+        await self.event(task_id, "replanning", {"reason": "连续失败 consecutive failures", "dead_ends": dead_ends[:500]})
+        avoid = (f"\n{dead_ends}\nThe new plan must NOT use those sources again; plan a genuinely different approach "
+                 "(other websites, other tools, or finishing with the information already gathered)." if dead_ends else
+                 "\nThe new plan must take a genuinely different approach from the steps that failed, not retry them.")
+        plan = await self._plan(t, facts, history_txt,
+                                state=f"Previous plan: {dumps(t['plan'])}\nRecent failures:\n{state}{avoid}")
         plan["version"] = int(t["plan"].get("version", 1)) + 1
         self.store.update_task(task_id, plan=plan)
         await self.event(task_id, "plan", plan)
         transcript.append({"role": "user", "content": prompts.L(agent_lang(self.store.settings()),
-                                                                "（系统）多次失败后已重新规划，请按新计划换一种方法继续。",
-                                                                "(System) Several steps failed; a new plan was made — try a different approach.")})
+                                                                "（系统）多次失败后已重新规划，请按新计划换一种方法继续，不要重复失败过的调用。",
+                                                                "(System) Several steps failed; a new plan was made — try a different approach "
+                                                                "and do not repeat the calls that failed.")
+                                                    + ("\n" + dead_ends if dead_ends else "")})
+
+    async def _skip_duplicate(self, task_id: str, call: dict, first_id: str, transcript: list[dict]):
+        """A call identical to one earlier in the same turn: answer its tool_call id without running it again."""
+        msg = (f"已跳过 — 与本轮前面的调用 {first_id} 完全相同，请直接使用那个结果。"
+               f" Skipped: identical to call {first_id} earlier in this same turn; use that result.")
+        transcript.append({"role": "tool", "tool_call_id": call["id"], "content": msg})
+        await self.event(task_id, "tool_call", {"call_id": call["id"], "name": call["name"], "args": _preview_args(call.get("args") or {}),
+                                                "sub": False})
+        await self.event(task_id, "tool_result", {"call_id": call["id"], "name": call["name"], "ok": False, "skipped": True,
+                                                  "sub": False, "preview": msg})
 
     async def _suspend(self, task_id: str, sp: Suspend, transcript: list[dict]):
         self.store.update_task(task_id, transcript=transcript, pending=sp.waiting.pop("_pending"), waiting=sp.waiting)
@@ -1196,10 +1318,12 @@ class Runtime:
         await self.event(task_id, "tool_call", {"call_id": call["id"], "name": name, "args": _preview_args(args), "sub": sub})
         ext_names = {x["function"]["name"] for x in catalog.get("tools", [])}
         ok = True
-        repeated = repeat_guard(transcript, call) or retype_guard(transcript, call)
+        repeated = (repeat_guard(transcript, call) or retype_guard(transcript, call)
+                    or host_guard(lambda: self.store.events(task_id), call))
         if repeated:
             content = repeated
             ok = False
+            call["_refused"] = True
             await self.audit("executor", name, task_id, resource="loop_guard", risk="low", decision="DENY",
                              result="repeat_blocked", detail={"args": _preview_args(args)})
         elif allow is not None and name not in allow:

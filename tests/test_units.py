@@ -822,3 +822,27 @@ def test_attachment_extraction(tmp_path):
     assert m2 == "image/jpeg" and sheet[:2] == b"\xff\xd8"
     assert AT.audio_wav(str(vid))[:4] == b"RIFF"
     assert AT.kind_of("a.HEIC") == "image" and AT.kind_of("b.mov") == "video" and AT.kind_of("c.pptx") == "pptx"
+
+
+def test_dead_end_sources():
+    from app.runtime.agent import HOST_FAIL_MAX, dead_ends_text, host_guard, source_failures
+    ev = []
+    for i in range(HOST_FAIL_MAX):
+        ev.append({"type": "tool_call", "data": {"call_id": f"c{i}", "name": "browser_navigate",
+                                                "args": {"url": f"https://www.google.com/finance/quote/HSBC:NYSE?w={i}"}}})
+        ev.append({"type": "tool_result", "data": {"call_id": f"c{i}", "name": "browser_navigate", "ok": False}})
+    # a skipped duplicate and a success do not count as failures
+    ev.append({"type": "tool_call", "data": {"call_id": "d", "name": "browser_navigate", "args": {"url": "https://google.com/x"}}})
+    ev.append({"type": "tool_result", "data": {"call_id": "d", "name": "browser_navigate", "ok": False, "skipped": True}})
+    ev.append({"type": "tool_call", "data": {"call_id": "y", "name": "browser_navigate", "args": {"url": "https://finance.yahoo.com/q"}}})
+    ev.append({"type": "tool_result", "data": {"call_id": "y", "name": "browser_navigate", "ok": True}})
+    f = source_failures(ev)
+    assert f == {"google.com": HOST_FAIL_MAX}
+    assert "google.com (3x)" in dead_ends_text(f, "en") and "不要再用" in dead_ends_text(f, "zh")
+    assert dead_ends_text({"a.com": 1}) == ""
+    blocked = host_guard(ev, {"name": "browser_navigate", "args": {"url": "https://www.google.com/search?q=hsbc"}})
+    assert blocked and "google.com" in blocked and "different website" in blocked
+    assert host_guard(ev, {"name": "browser_navigate", "args": {"url": "https://stooq.com/q/?s=hsbc"}}) is None
+    assert host_guard(ev, {"name": "files_read", "args": {"path": "a.md"}}) is None
+    # lazily read: the event source is only consulted when the call has a URL
+    assert host_guard(lambda: (_ for _ in ()).throw(AssertionError("read")), {"name": "files_list", "args": {}}) is None

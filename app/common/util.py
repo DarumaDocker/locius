@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-VERSION = "0.2.21"
+VERSION = "0.2.22"
 
 
 def now_ts() -> float:
