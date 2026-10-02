@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 
 from app.common.util import VERSION, token_ok, truncate
-from app.sentinel import actions, guard, mailboxes, mcp_hub, watchers
+from app.sentinel import actions, guard, mailboxes, mailproviders, mcp_hub, watchers
 from app.sentinel.actions import ActionError
 from app.sentinel.catalog import TOOLS, llm_schemas
 from app.sentinel.policy import ALLOW, ASK, DENY, PER_USE_TOOLS, decide
@@ -178,7 +178,8 @@ async def catalog():
                         "workspace": c["config"].get("workspace") or c["config"].get("team") or "" if name in ("notion", "slack") else "",
                         "account": c["config"].get("email", "") if name in ("gmail", "calendar") else "",
                         "time_zone": c["config"].get("time_zone", "") if name == "calendar" else "",
-                        "accounts": [a["email"] for a in sorted(mailboxes.ready_accounts(store), key=lambda a: a["id"] != mailboxes.default_id(store))] if name == "gmail" else []}
+                        "accounts": [a["email"] for a in sorted(mailboxes.ready_accounts(store), key=lambda a: a["id"] != mailboxes.default_id(store))] if name == "gmail" else [],
+                        "providers": {a["email"]: mailproviders.label(a["provider"]) for a in mailboxes.ready_accounts(store)} if name == "gmail" else {}}
     status["mcp"] = mcp_hub.status(store)
     enabled |= {f"mcp:{x['id']}" for x in status["mcp"]["servers"] if x["enabled"]}
 
@@ -761,7 +762,9 @@ def _conn_view(name: str) -> dict:
     c["has_credential"] = store.has_secret(f"cred_{name}_1")
     c["credential_handle"] = f"cred_{name}_1" if c["has_credential"] else ""
     if name == "gmail":
-        c["accounts"] = [{k: a[k] for k in ("id", "email", "display_name", "ready")} for a in mailboxes.accounts(store)]
+        c["accounts"] = [{**{k: a[k] for k in ("id", "email", "display_name", "ready", "provider", "auth")},
+                          "provider_label": mailproviders.label(a["provider"])} for a in mailboxes.accounts(store)]
+        c["providers"] = mailproviders.public_presets()
         c["default"] = mailboxes.default_id(store)
         c["has_credential"] = bool(mailboxes.ready_accounts(store))
     return c
@@ -866,23 +869,112 @@ async def phone_test_call(req: Request):
     return r
 
 
-@app.post("/sentinel/api/connections/gmail/credential", dependencies=[Depends(ui_auth)])
-async def gmail_cred(req: Request):
-    b = await req.json()
+def _mail_form(b: dict) -> tuple[str, str, str, dict]:
     email_addr = str(b.get("email", "")).strip()
-    pw = str(b.get("app_password", "")).replace(" ", "").strip()
-    if "@" not in email_addr or len(pw) < 12:
-        raise HTTPException(400, "请填写邮箱地址和 16 位应用专用密码 (App Password)")
-    from app.sentinel.gmail import Gmail, GmailError
-    g = Gmail(email_addr, pw, display_name=str(b.get("display_name", "")))
+    if not re.fullmatch(r"[^@\s<>,;]+@[^@\s<>,;]+\.[A-Za-z0-9-]{2,}", email_addr):
+        raise HTTPException(400, "请填写正确的邮箱地址 (valid email address required)")
+    provider = str(b.get("provider") or "").strip() or mailproviders.guess_provider(email_addr) or "custom"
+    if provider not in mailproviders.PROVIDERS:
+        raise HTTPException(400, f"unknown provider {provider}")
+    try:
+        servers = mailproviders.server_settings(provider, email_addr, b)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return email_addr, provider, str(b.get("display_name", "")).strip()[:120], servers
+
+
+async def _mail_connect(email_addr: str, provider: str, dname: str, servers: dict, secret: dict) -> dict:
+    """Test the mailbox with the given secret, then store it. Nothing is saved when the test fails."""
+    from app.sentinel.gmail import GmailError
+    acc = {"id": "test", "email": email_addr, "display_name": dname, "provider": provider, **servers}
+    g = actions.make_client(acc, secret, store)
+    if secret.get("oauth"):  # a fresh access token was just issued; use it for the test instead of refreshing
+        tok = secret["oauth"].pop("_access_token", "")
+        if tok:
+            g.token_fn = lambda: tok
     try:
         info = await asyncio.to_thread(g.test)
     except GmailError as e:
-        store.audit("user", "credential.gmail.set", resource="gmail", result="failed", detail={"error": str(e)[:300]})
+        store.audit("user", "credential.gmail.set", resource="gmail", result="failed",
+                    detail={"error": str(e)[:300], "provider": provider})
         raise HTTPException(400, str(e))
-    acc = mailboxes.save_account(store, email_addr, pw, str(b.get("display_name", "")))
-    store.audit("user", "credential.gmail.set", resource="gmail", result="success", detail={"email": email_addr, "account": acc["id"]})
-    return {"ok": True, "test": info, "account": acc["id"], "connection": _conn_view("gmail")}
+    saved = mailboxes.save_account(store, email_addr, secret.get("app_password", ""), dname, provider, servers,
+                                   oauth=secret.get("oauth"))
+    actions._MS_TOKENS.pop(saved["id"], None)
+    store.audit("user", "credential.gmail.set", resource="gmail", result="success",
+                detail={"email": email_addr, "account": saved["id"], "provider": provider})
+    return {"ok": True, "test": info, "account": saved["id"], "connection": _conn_view("gmail")}
+
+
+@app.post("/sentinel/api/connections/gmail/credential", dependencies=[Depends(ui_auth)])
+async def gmail_cred(req: Request):
+    """Connect a mailbox with an app password / authorization code (every provider except Outlook)."""
+    b = await req.json()
+    email_addr, provider, dname, servers = _mail_form(b)
+    if mailproviders.PROVIDERS[provider]["auth"] == "oauth":
+        raise HTTPException(400, "Outlook 需要用微软账号登录授权 (use Sign in with Microsoft)")
+    pw = str(b.get("app_password", "")).strip()
+    if provider in ("gmail", "yahoo", "aol", "icloud"):
+        pw = pw.replace(" ", "")
+    if provider == "gmail" and len(pw) < 12:
+        raise HTTPException(400, "请填写邮箱地址和 16 位应用专用密码 (App Password)")
+    if not pw and servers.get("smtp_security") != "none":
+        raise HTTPException(400, "请填写密码 / 授权码 (password required)")
+    return await _mail_connect(email_addr, provider, dname, servers, {"app_password": pw})
+
+
+# Outlook / Microsoft 365: OAuth 2.0 device code flow with the user's own app registration (client ID)
+_MS_FLOWS: dict[str, dict] = {}
+
+
+@app.post("/sentinel/api/connections/gmail/oauth/start", dependencies=[Depends(ui_auth)])
+async def gmail_oauth_start(req: Request):
+    b = await req.json()
+    email_addr, provider, dname, servers = _mail_form({**b, "provider": "outlook"})
+    client_id = str(b.get("client_id", "")).strip()
+    tenant = mailproviders.ms_tenant(email_addr)
+    try:
+        d = await asyncio.to_thread(mailproviders.ms_device_start, client_id, tenant)
+    except mailproviders.OAuthError as e:
+        raise HTTPException(400, str(e))
+    for k in [k for k, v in _MS_FLOWS.items() if v["expires_at"] < time.time()]:
+        _MS_FLOWS.pop(k, None)
+    flow = secrets.token_urlsafe(12)
+    _MS_FLOWS[flow] = {**d, "client_id": client_id, "tenant": tenant, "email": email_addr, "display_name": dname,
+                       "servers": servers, "next_poll": 0.0}
+    store.audit("user", "credential.gmail.oauth_start", resource="gmail", result="success", detail={"email": email_addr})
+    return {"flow": flow, "user_code": d["user_code"], "verification_uri": d["verification_uri"],
+            "expires_in": int(d["expires_at"] - time.time()), "interval": d["interval"]}
+
+
+@app.get("/sentinel/api/connections/gmail/oauth/{flow}", dependencies=[Depends(ui_auth)])
+async def gmail_oauth_poll(flow: str):
+    f = _MS_FLOWS.get(flow)
+    if not f:
+        raise HTTPException(404, "登录流程不存在或已结束，请重新开始 (flow not found)")
+    if f["expires_at"] < time.time():
+        _MS_FLOWS.pop(flow, None)
+        return {"status": "expired", "error": "登录码已过期，请重新开始 (code expired)"}
+    if time.time() < f["next_poll"]:
+        return {"status": "pending"}
+    f["next_poll"] = time.time() + f["interval"]
+    try:
+        tok = await asyncio.to_thread(mailproviders.ms_device_poll, f["client_id"], f["tenant"], f["device_code"])
+    except mailproviders.OAuthError as e:
+        _MS_FLOWS.pop(flow, None)
+        return {"status": "error", "error": str(e)}
+    if tok is None:
+        return {"status": "pending"}
+    _MS_FLOWS.pop(flow, None)
+    if not tok.get("refresh_token"):
+        return {"status": "error", "error": "微软没有返回 refresh token：请确认权限里包含 offline_access (no refresh token)"}
+    secret = {"oauth": {"client_id": f["client_id"], "tenant": f["tenant"], "refresh_token": tok["refresh_token"],
+                        "_access_token": tok.get("access_token", "")}}
+    try:
+        res = await _mail_connect(f["email"], "outlook", f["display_name"], f["servers"], secret)
+    except HTTPException as e:
+        return {"status": "error", "error": e.detail}
+    return {"status": "done", **res}
 
 
 @app.post("/sentinel/api/connections/gmail/test", dependencies=[Depends(ui_auth)])

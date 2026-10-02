@@ -14,15 +14,17 @@ def _obj(props: dict, required: list[str] | None = None) -> dict:
 
 
 TOOLS: dict[str, dict] = {
-    # ------------------------------------------------------------------ Gmail
+    # ------------------------------------------------------------------ Email (Gmail + other IMAP providers; tool names keep the gmail_ prefix)
     "gmail_search": {
         "connector": "gmail", "capability": "read", "operation": "search", "risk": "low", "data_class": "CONFIDENTIAL",
-        "description": "搜索 Gmail 邮件。Search Gmail using Gmail query syntax, e.g. 'in:inbox newer_than:7d', "
+        "description": "搜索邮件。Search the user's email (Gmail, Outlook, QQ, 163, iCloud, Yahoo… all use the same Gmail query syntax), e.g. 'in:inbox newer_than:7d', "
                        "'from:john is:unread', 'subject:invoice after:2026/09/01', 'category:promotions newer_than:1d'. Returns id, thread_id, from, "
                        "subject, date, snippet, account (which mailbox), and `unsubscribe` (one-click/email/link) when the email can be "
                        "unsubscribed via gmail_unsubscribe. Searches ALL connected mailboxes unless `account` is given. "
-                       "Ids may carry a mailbox prefix like 'g2:123…' — always pass ids back exactly as returned.",
-        "parameters": _obj({"query": {"type": S, "description": "Gmail search query"},
+                       "Ids may carry a mailbox prefix like 'g2:123…' or 'g3:i-42' — always pass ids back exactly as returned. "
+                       "On non-Gmail mailboxes the query is translated to IMAP: no folder = Inbox + Archive, in:sent / in:anywhere / "
+                       "label:<folder> pick folders, category:* is approximated, and the result may include `search_note`.",
+        "parameters": _obj({"query": {"type": S, "description": "Gmail-style search query"},
                             "max_results": {"type": "integer", "description": "1-30 per mailbox, default 10"},
                             "account": {"type": S, "description": "optional: email address of one mailbox; default all"}}, ["query"]),
     },
@@ -38,12 +40,12 @@ TOOLS: dict[str, dict] = {
     },
     "gmail_list_labels": {
         "connector": "gmail", "capability": "read", "operation": "read", "risk": "low", "data_class": "PERSONAL",
-        "description": "列出 Gmail 标签。List Gmail labels/folders of a mailbox.",
+        "description": "列出邮箱的标签/文件夹。List the labels (Gmail) or folders (other providers) of a mailbox.",
         "parameters": _obj({"account": {"type": S, "description": "optional mailbox email; default mailbox"}}),
     },
     "gmail_create_draft": {
         "connector": "gmail", "capability": "draft", "operation": "create", "risk": "medium", "data_class": "CONFIDENTIAL",
-        "description": "在 Gmail 草稿箱创建草稿（不会发送）。Create a draft (NOT sent). For a reply pass reply_to_message_id; "
+        "description": "在邮箱草稿箱创建草稿（不会发送）。Create a draft in the mailbox's Drafts folder (NOT sent). For a reply pass reply_to_message_id; "
                        "'to' and 'subject' may be left empty for replies and will be filled from the original email.",
         "parameters": _obj({"to": {"type": S}, "subject": {"type": S}, "body": {"type": S}, "cc": {"type": S},
                             "reply_to_message_id": {"type": S}, "attachments": {"type": "array", "items": {"type": S}, "description": "optional: workspace file paths to attach (e.g. a filled PDF)"},
@@ -86,12 +88,13 @@ TOOLS: dict[str, dict] = {
     },
     "gmail_archive": {
         "connector": "gmail", "capability": "organize", "operation": "update", "risk": "medium", "data_class": "PERSONAL",
-        "description": "归档邮件（移出收件箱）。Archive emails (remove from inbox).",
+        "description": "归档邮件（移出收件箱）。Archive emails (remove from inbox; on non-Gmail mailboxes they move to the Archive folder).",
         "parameters": _obj({"message_ids": {"type": "array", "items": {"type": S}}}, ["message_ids"]),
     },
     "gmail_label": {
         "connector": "gmail", "capability": "organize", "operation": "update", "risk": "medium", "data_class": "PERSONAL",
-        "description": "给邮件加/去标签，或标记已读。Add/remove labels; use mark_read true/false to change read state.",
+        "description": "给邮件加/去标签，或标记已读。Add/remove labels; use mark_read true/false to change read state. "
+                       "On non-Gmail mailboxes a label is a folder (adding copies the email there), and 'STARRED' = flag.",
         "parameters": _obj({"message_ids": {"type": "array", "items": {"type": S}},
                             "add_labels": {"type": "array", "items": {"type": S}},
                             "remove_labels": {"type": "array", "items": {"type": S}},

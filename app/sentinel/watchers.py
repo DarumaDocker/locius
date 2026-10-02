@@ -14,7 +14,7 @@ from app.sentinel import guard, mailboxes
 
 SOURCES = {
     "gmail.new_email": {"connector": "gmail", "label": "收到新邮件 New email",
-                        "params": {"query": "可选 Gmail 搜索条件，如 from:boss@x.com 或 is:important",
+                        "params": {"query": "可选搜索条件（Gmail 语法，所有邮箱通用），如 from:boss@x.com 或 is:unread",
                                    "account": "可选：只看某个邮箱"}},
     "slack.new_message": {"connector": "slack", "label": "Slack 新消息 New Slack message",
                           "params": {"channel": "频道，如 #sales", "keyword": "可选：包含关键词才触发",
@@ -39,7 +39,7 @@ def _gmail(store, params: dict, cursor: dict | None) -> tuple[list, dict]:
     acc = str(params.get("account") or "").strip()
     accounts = [a for a in mailboxes.ready_accounts(store) if not acc or a["email"].lower() == acc.lower() or a["id"] == acc]
     if not accounts:
-        raise WatchError("Gmail 未连接或找不到指定邮箱 (mailbox not connected)")
+        raise WatchError("邮箱未连接或找不到指定邮箱 (mailbox not connected)")
     q = (str(params.get("query") or "").strip() or "in:inbox") + " newer_than:2d"
     seen = dict((cursor or {}).get("seen") or {})
     events = []

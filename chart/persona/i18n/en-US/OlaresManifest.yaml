@@ -8,7 +8,7 @@ spec:
     **What it does**
 
     - **Chat → plan → act** – describe what you need; OMuse makes a plan and works through it step by step, showing every tool call.
-    - **Gmail** – search, read, draft, reply and send across several mailboxes; one-click unsubscribe from newsletters. Sign-in codes and reset links are hidden from the model.
+    - **Email** – Gmail, Outlook / Hotmail, Yahoo, iCloud, QQ Mail, NetEase 163 / 126, Zoho, AOL or any IMAP mailbox: search, read, draft, reply and send across several mailboxes; one-click unsubscribe from newsletters. Sign-in codes and reset links are hidden from the model.
     - **Notion & Slack** – look things up, write reports into Notion, update task boards, read channels and threads, post messages.
     - **Web browser** – its own Chromium with a restricted API (no arbitrary JavaScript), live view, and human takeover for logins and CAPTCHAs.
     - **MCP connectors** – plug in any MCP server; tool definitions are pinned so a server can't quietly change them.
@@ -25,6 +25,7 @@ spec:
 
     Runs on the local models served by your Olares by default — any OpenAI-compatible endpoint works. English and 中文 interface.
   upgradeDescription: |
+    0.2.35: Email: besides Gmail, connect Outlook / Hotmail (Microsoft sign-in, OAuth 2.0), Yahoo, iCloud, QQ Mail, NetEase 163 / 126, Zoho, AOL or any IMAP / SMTP mailbox; the same search syntax works everywhere.
     0.2.34: Chinese requests for stories, posts and messages run fully in Chinese; Singapore tickers by name; one-day Gantt items; clearer data_query errors
     0.2.33: Chinese text requests get an explicit output-language note; card or ID numbers are pointed to the vault, never stored in memory
     0.2.32: Text you ask for in Chinese (posts, poems, toasts, messages) is written in Chinese even with the app in English; file writes report word counts; fewer 'runtime unavailable' blips
@@ -32,4 +33,3 @@ spec:
     0.2.30: Translations and texts you ask for in another language stay in that language even when the app is in English
     0.2.29: data_query: derived columns, column-to-column filters, having; invest() for regular saving; optional reply-in-your-language setting; web-call budget
     0.2.28: New data_query tool: exact counts, sums, averages, groups, pivots, percentiles, outliers and trends from CSV, Excel and logs
-    0.2.27: Date/time form fields accept free text; search results skip accessories and ads; no image downloads unless asked; test forms use placeholder data

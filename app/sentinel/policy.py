@@ -59,7 +59,7 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
     if not conn["permissions"].get(t["capability"], False):
         return Decision(DENY, t["risk"], f"权限「{t['connector']}.{t['capability']}」已关闭 (permission off in Connections)")
     if t["connector"] == "gmail" and not gmail_ready:
-        return Decision(DENY, t["risk"], "Gmail 尚未配置：请在「连接 Connections」页填写邮箱和应用专用密码 (App Password)")
+        return Decision(DENY, t["risk"], "邮箱尚未连接：请在「连接 Connections」页添加邮箱 (no mailbox connected)")
 
     risk = t["risk"]
     reasons: list[str] = []

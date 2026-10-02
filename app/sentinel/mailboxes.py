@@ -1,7 +1,9 @@
-"""Multiple Gmail accounts.
+"""Multiple mailboxes (Gmail and other providers).
 
-Accounts live in the "gmail" connection config: {"accounts": [{id, email, display_name, imap_host, smtp_host}],
-"default": "g1"}; each account's App Password is its own vault secret (cred_gmail_<n> for id g<n>).
+Accounts live in the "gmail" connection config (the historical name of the email connector):
+{"accounts": [{id, email, display_name, provider, imap_host/port/security, smtp_host/port/security, username, auth}],
+"default": "g1"}; each account's secret is its own vault entry (cred_gmail_<n> for id g<n>): {"app_password": …}
+or, for Outlook, {"oauth": {client_id, tenant, refresh_token}}.
 Message / thread ids of the first account (g1) stay bare numbers (backwards compatible); ids from other
 accounts are prefixed, e.g. "g2:1877319910085372507", so the agent can pass them around without knowing
 which mailbox they came from.
@@ -10,7 +12,28 @@ from __future__ import annotations
 
 import re
 
-_ID = re.compile(r"^(g\d+):(\d{5,25})$")
+from app.sentinel.mailproviders import PROVIDERS
+
+_ID = re.compile(r"^(g\d+):(\S{1,40})$")
+FIELDS = ("id", "email", "display_name", "provider", "imap_host", "imap_port", "imap_security", "smtp_host", "smtp_port",
+          "smtp_security", "username", "auth")
+
+
+def _defaults(a: dict) -> dict:
+    """Fill in fields that older (Gmail-only) configs do not have."""
+    a = dict(a)
+    a.setdefault("provider", "gmail")
+    p = PROVIDERS.get(a["provider"], PROVIDERS["custom"])
+    dom = a.get("email", "").rsplit("@", 1)[-1].lower()
+    a["imap_host"] = a.get("imap_host") or p["imap"][0].format(domain=dom)
+    a["smtp_host"] = a.get("smtp_host") or p["smtp"][0].format(domain=dom)
+    a["imap_port"] = int(a.get("imap_port") or p["imap"][1])
+    a["smtp_port"] = int(a.get("smtp_port") or p["smtp"][1])
+    a["imap_security"] = a.get("imap_security") or p["imap"][2]
+    a["smtp_security"] = a.get("smtp_security") or p["smtp"][2]
+    a["username"] = a.get("username") or a.get("email", "")
+    a["auth"] = a.get("auth") or ("oauth" if p["auth"] == "oauth" else "password")
+    return a
 
 
 def handle(aid: str) -> str:
@@ -26,7 +49,7 @@ def accounts(store) -> list[dict]:
             if cfg.get("email") else []
     out = []
     for a in accs:
-        a = dict(a)
+        a = _defaults(a)
         a["ready"] = store.has_secret(handle(a["id"]))
         out.append(a)
     return out
@@ -67,7 +90,7 @@ def make_id(aid: str, raw: str) -> str:
 
 
 def _write(store, accs: list[dict], default: str | None = None):
-    clean = [{k: a.get(k, "") for k in ("id", "email", "display_name", "imap_host", "smtp_host")} for a in accs]
+    clean = [{k: a.get(k, "") for k in FIELDS} for a in accs]
     cfg = {"accounts": clean}
     if default is not None:
         cfg["default"] = default
@@ -79,17 +102,24 @@ def _write(store, accs: list[dict], default: str | None = None):
     store.save_connection("gmail", cfg)
 
 
-def save_account(store, email: str, app_password: str, display_name: str = "") -> dict:
+def save_account(store, email: str, app_password: str = "", display_name: str = "", provider: str = "gmail",
+                 servers: dict | None = None, oauth: dict | None = None) -> dict:
+    """Add a mailbox, or update it when the email address is already connected (same address = new password)."""
     accs = [dict(a) for a in accounts(store)]
     acc = next((a for a in accs if a["email"].lower() == email.lower()), None)
     if acc is None:
         n = max([int(a["id"][1:]) for a in accs] + [0]) + 1
-        acc = {"id": f"g{n}", "email": email, "display_name": display_name, "imap_host": "imap.gmail.com",
-               "smtp_host": "smtp.gmail.com"}
+        acc = {"id": f"g{n}", "email": email}
         accs.append(acc)
-    else:
-        acc["display_name"] = display_name or acc.get("display_name", "")
-    store.put_secret("gmail", {"app_password": app_password}, handle=handle(acc["id"]))
+    acc["display_name"] = display_name or acc.get("display_name", "")
+    acc["provider"] = provider
+    for k in ("imap_host", "imap_port", "imap_security", "smtp_host", "smtp_port", "smtp_security", "username"):
+        acc.pop(k, None)
+    acc.update(servers or {})
+    acc["auth"] = "oauth" if oauth else "password"
+    acc.update(_defaults(acc))
+    secret = {"oauth": oauth} if oauth else {"app_password": app_password}
+    store.put_secret("gmail", secret, handle=handle(acc["id"]))
     dflt = store.connection("gmail")["config"].get("default") or accs[0]["id"]  # first mailbox stays default
     if not any(a["id"] == dflt for a in accs):
         dflt = acc["id"]

@@ -163,7 +163,7 @@ async function viewChat(root) {
   renderConvList(list);
   if (S.conv && !S.convData) await openConv(S.conv);
   else renderThread(thread);
-  if (S.gmailReady === undefined) {  // only show the "connect Gmail" hint when Gmail really isn't connected
+  if (S.gmailReady === undefined) {  // only show the "connect your email" hint when no mailbox is connected
     sapi('connections').then(r => {
       const gm = (r.connections || []).find(c => c.name === 'gmail');
       S.gmailReady = !!(gm && gm.has_credential);
@@ -322,9 +322,9 @@ function renderThread(thread) {
   if (!d || !d.messages.length) {
     msgs.append(h('div', { class: 'msg' }, h('div', { class: 'card' },
       h('h3', null, T('你好，我是 OMuse 👋')),
-      h('p', { class: 'sub' }, T('运行在你的 Olares One 上的私人 Agent。我可以读写 Gmail、操作浏览器、管理文件、记住你的偏好、定时执行任务。')
+      h('p', { class: 'sub' }, T('运行在你的 Olares One 上的私人 Agent。我可以读写邮件、操作浏览器、管理文件、记住你的偏好、定时执行任务。')
         + T('发送邮件、提交表单、付款、删除等高风险动作，都会由独立的 Sentinel（哨兵）弹出审批，你批准后才会执行。')),
-      S.gmailReady === false ? h('p', { class: 'small muted' }, T('提示：先到「连接 Connections」配置 Gmail 应用专用密码 (App Password)。')) : null)));
+      S.gmailReady === false ? h('p', { class: 'small muted' }, T('提示：先到「连接 Connections」连接你的邮箱（Gmail、Outlook、QQ、163 等）。')) : null)));
   } else {
     const shown = new Set();
     const lastUser = d.messages.map(m => m.role).lastIndexOf('user');
@@ -926,7 +926,7 @@ const GOAL_ST = { active: [T('进行中 Active'), 'st-RUNNING'], paused: [T('已
   failed: [T('未达成 Failed'), 'st-FAILED'], expired: [T('已过期 Expired'), 'st-CANCELLED'], cancelled: [T('已取消 Cancelled'), 'st-CANCELLED'],
   blocked: [T('需要你帮忙 Blocked'), 'st-WAITING_EXTERNAL'] };
 const SRC_FIELDS = {
-  'gmail.new_email': [['query', T('Gmail 搜索条件（可选）'), T('例如 from:boss@acme.com 或 is:important；留空 = 所有新邮件')], ['account', T('只看某个邮箱（可选）'), 'you@gmail.com']],
+  'gmail.new_email': [['query', T('邮件搜索条件（可选）'), T('例如 from:boss@acme.com 或 is:important；留空 = 所有新邮件')], ['account', T('只看某个邮箱（可选）'), 'you@gmail.com']],
   'slack.new_message': [['channel', T('Slack 频道'), '#general'], ['keyword', T('包含关键词才触发（可选）'), T('例如 urgent')], ['mentions_only', T('只在 @我 时触发（填 yes）'), 'yes']],
   'notion.db_changed': [['database_id', T('Notion 数据库 ID 或链接'), 'https://www.notion.so/…']],
   'web.page': [['url', T('要监控的网页'), 'https://…'], ['mode', T('条件：change / text / price_below'), 'price_below'],
@@ -1090,47 +1090,8 @@ async function viewConnections(root) {
       await sapi('connections/' + conn.name, { method: 'PUT', body: { permissions: { [key]: e.target.checked } } }); toast(T('已保存 Saved'));
     }) })));
 
-  // --- Gmail (multiple mailboxes)
-  const accs = gm.accounts || [];
-  const email = h('input', { type: 'email', value: '', placeholder: 'you@gmail.com', autocomplete: 'off' });
-  const pw = h('input', { type: 'password', placeholder: 'xxxx xxxx xxxx xxxx', autocomplete: 'new-password' });
-  const dname = h('input', { type: 'text', value: '', placeholder: T('发件人显示名 (可选) e.g. Alex Chen') });
-  const gmStatus = h('span', { class: 'chip ' + (accs.length ? 'ok' : '') }, accs.length ? Tf("已连接 {0} 个邮箱", (accs.length)) : T('未连接 Not connected'));
-  const accRows = accs.map(a => h('div', { class: 'perm' },
-    h('div', { style: 'min-width:0' }, h('b', null, a.email), a.id === gm.default ? h('span', { class: 'chip ok', style: 'margin-left:6px' }, T('默认 Default')) : null,
-      a.display_name ? h('div', { class: 'small muted' }, a.display_name) : null,
-      a.ready ? null : h('div', { class: 'small', style: 'color:var(--danger)' }, T('缺少密码，请重新添加 (password missing)'))),
-    h('div', { class: 'row', style: 'flex-wrap:nowrap' },
-      h('button', { class: 'btn small', onclick: safe(async () => { const t = await sapi('connections/gmail/test', { method: 'POST', body: { account: a.id } }); toast(t.ok ? Tf("{0} 正常 ✓ 未读 {1}", (a.email), (t.test.unread_inbox)) : t.error, !t.ok); }) }, T('测试')),
-      a.id !== gm.default ? h('button', { class: 'btn small', onclick: safe(async () => { await sapi('connections/gmail/default', { method: 'POST', body: { account: a.id } }); toast(T('已设为默认发件邮箱')); route(); }) }, T('设为默认')) : null,
-      h('button', { class: 'btn danger small', onclick: safe(async () => { if (!confirmInline(Tf("断开 {0}？", (a.email)))) return; await sapi('connections/gmail/accounts/' + a.id, { method: 'DELETE' }); route(); }) }, T('断开')))));
-  const gmail = h('div', { class: 'card stack' },
-    h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, '📧 Gmail'), gmStatus),
-    h('p', { class: 'sub' }, T('可以连接多个 Gmail 邮箱：搜索时一起查，发信时默认用「默认邮箱」，回复总是用原邮件所在的邮箱。每个邮箱用各自的应用专用密码 (App Password)，加密保存在 Sentinel 保险箱 (Vault) 里，Agent 和模型永远看不到。')),
-    accs.length ? h('div', null, ...accRows) : null,
-    h('details', { open: !accs.length },
-      h('summary', null, h('b', null, accs.length ? T('＋ 添加另一个邮箱 Add another mailbox') : T('连接邮箱 Connect a mailbox'))),
-      h('div', { class: 'stack', style: 'margin-top:10px' },
-        h('ol', { class: 'steps-help' },
-          h('li', null, T('确认该 Google 账号已开启两步验证 (2-Step Verification)。')),
-          h('li', null, T('打开 '), h('a', { href: 'https://myaccount.google.com/apppasswords', target: '_blank', rel: 'noopener' }, 'myaccount.google.com/apppasswords'), T('，新建一个应用专用密码。')),
-          h('li', null, T('把 16 位密码粘贴到下方，点击「连接并测试」。同一邮箱再添加一次 = 更新密码。'))),
-        h('label', { class: 'field' }, h('span', null, T('邮箱 Email')), email),
-        h('label', { class: 'field' }, h('span', null, T('应用专用密码 App Password')), pw),
-        h('label', { class: 'field' }, h('span', null, T('显示名 Display name')), dname),
-        h('div', { class: 'row' },
-          h('button', { class: 'btn primary', onclick: safe(async e => {
-            e.target.disabled = true; e.target.textContent = T('连接中…');
-            try {
-              const res = await sapi('connections/gmail/credential', { method: 'POST', body: { email: email.value, app_password: pw.value, display_name: dname.value } });
-              toast(Tf("{0} 已连接 ✓ 收件箱未读 {1} 封", (email.value), (res.test.unread_inbox ?? '?'))); route();
-            } finally { e.target.disabled = false; e.target.textContent = T('连接并测试 Connect & test'); }
-          }) }, T('连接并测试 Connect & test'))))),
-    h('div', null, h('b', null, T('权限 Permissions（读写分离）')),
-      permRow(gm, 'read', T('读取与搜索'), 'read / search', 'low'),
-      permRow(gm, 'organize', T('整理（归档、标签、已读）'), 'organize', 'medium'),
-      permRow(gm, 'draft', T('创建草稿'), 'draft', 'medium'),
-      permRow(gm, 'send', T('发送 / 回复 / 转发（每次需审批）'), 'send — approval', 'high')));
+  // --- Email (Gmail and other providers)
+  const gmail = emailCard(gm, permRow);
 
   // --- Browser
   const blocked = h('textarea', { rows: 2, placeholder: T('每行一个域名，如 example.com') }); blocked.value = (br.config.blocked_domains || []).join('\n');
@@ -1305,6 +1266,135 @@ function phoneCard(c) {
 }
 
 // --- Google Calendar (OAuth with the user's own Google Cloud client; tokens stay in Sentinel's vault)
+// ================================================================== EMAIL (Gmail, Outlook, Yahoo, iCloud, QQ, 163/126, Zoho, AOL, any IMAP)
+const MAIL_LABELS = { qq: 'QQ 邮箱 / Foxmail', netease: '网易邮箱 163 / 126 / yeah.net', custom: '其他邮箱（IMAP / SMTP）' };  // i18n-ok (translated via T below)
+function mailLabel(p) { return MAIL_LABELS[p.key] ? T(MAIL_LABELS[p.key]) : p.label; }
+function mailLink(url, text) { return h('a', { href: url, target: '_blank', rel: 'noopener' }, text || url.replace(/^https:\/\//, '').replace(/\/.*$/, '')); }
+function mailSteps(key) {
+  const li = (...k) => h('li', null, ...k);
+  const S = {
+    gmail: [li(T('确认该 Google 账号已开启两步验证 (2-Step Verification)。')),
+      li(T('打开 '), mailLink('https://myaccount.google.com/apppasswords', 'myaccount.google.com/apppasswords'), T('，新建一个应用专用密码。')),
+      li(T('把 16 位密码粘贴到下方，点击「连接并测试」。同一邮箱再添加一次 = 更新密码。'))],
+    outlook: [li(T('微软从 2024 年 9 月起不再允许 Outlook / Hotmail 用密码连接第三方应用，需要用 OAuth 2.0（开放授权）登录。为此要先在微软 Entra 注册一个你自己的应用（免费，约 5 分钟；只有个人微软账号的话，可能要先免费开通 Azure 账号）。')),
+      li(T('打开 '), mailLink('https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade', 'entra.microsoft.com'), T(' →「应用注册 App registrations」→「新注册 New registration」；支持的账户类型选「任何组织目录中的帐户和个人 Microsoft 帐户」。')),
+      li(T('在「身份验证 Authentication」里打开「允许公共客户端流 Allow public client flows」。')),
+      li(T('在「API 权限 API permissions」→「添加权限」→ Microsoft Graph →「委托的权限」，勾选 IMAP.AccessAsUser.All、SMTP.Send、offline_access。')),
+      li(T('复制「概述 Overview」页的「应用程序(客户端) ID」，和邮箱一起填到下方，点「用微软账号登录」，再按提示在微软页面输入登录码。'))],
+    yahoo: [li(T('打开 '), mailLink('https://login.yahoo.com/account/security'), T('（账户安全 Account security）。')),
+      li(T('点「生成应用密码 Generate app password」，名称填 OMuse。')), li(T('把生成的密码粘贴到下方，点击「连接并测试」。'))],
+    aol: [li(T('打开 '), mailLink('https://login.aol.com/account/security'), T('（账户安全 Account security）。')),
+      li(T('点「生成应用密码 Generate app password」，名称填 OMuse。')), li(T('把生成的密码粘贴到下方，点击「连接并测试」。'))],
+    icloud: [li(T('确认 Apple 账户已开启双重认证，并且已在 iPhone / Mac 上启用 iCloud 邮件。')),
+      li(T('打开 '), mailLink('https://account.apple.com'), T(' →「登录与安全 Sign-In and Security」→「App 专用密码 App-Specific Passwords」，新建一个。')),
+      li(T('邮箱填你的 @icloud.com 地址，把密码粘贴到下方。'))],
+    qq: [li(T('登录 '), mailLink('https://mail.qq.com'), T(' →「设置 → 账号」，找到「POP3/IMAP/SMTP/Exchange/CardDAV 服务」，开启「IMAP/SMTP 服务」。')),
+      li(T('按提示用手机验证后，会得到一个授权码 (authorization code)。')), li(T('把授权码（不是 QQ 密码）粘贴到下方，点击「连接并测试」。'))],
+    netease: [li(T('登录网页版 163 / 126 邮箱 →「设置 → POP3/SMTP/IMAP」，开启「IMAP/SMTP 服务」。')),
+      li(T('按提示获取授权码 (authorization code)。')), li(T('把授权码（不是登录密码）粘贴到下方，点击「连接并测试」。'))],
+    zoho: [li(T('在 Zoho 邮箱「设置 → 邮件帐户 → IMAP 访问」里开启 IMAP。')),
+      li(T('开了两步验证的话，到 '), mailLink('https://accounts.zoho.com/home#security/app_password', 'accounts.zoho.com'), T(' 生成应用专用密码；否则用登录密码。')),
+      li(T('欧洲、印度等地区的数据中心请改选「其他邮箱」，服务器填 imap.zoho.eu / smtp.zoho.eu 等。'))],
+    custom: [li(T('填写邮箱服务商提供的 IMAP（收信）和 SMTP（发信）服务器、端口和加密方式。常见组合：IMAP 993 + SSL/TLS，SMTP 465 + SSL/TLS 或 587 + STARTTLS。')),
+      li(T('用户名一般就是邮箱地址；很多邮箱要求用「应用专用密码」或「授权码」，而不是登录密码。'))],
+  };
+  return h('ol', { class: 'steps-help' }, ...(S[key] || S.custom));
+}
+
+function emailCard(gm, permRow) {
+  const accs = gm.accounts || [], presets = gm.providers || [];
+  const byKey = Object.fromEntries(presets.map(p => [p.key, p]));
+  const prov = h('select', { 'aria-label': T('邮箱服务商 Provider') }, presets.map(p => h('option', { value: p.key }, mailLabel(p))));
+  const email = h('input', { type: 'email', value: '', placeholder: 'you@example.com', autocomplete: 'off' });
+  const pw = h('input', { type: 'password', placeholder: '••••••••••••••••', autocomplete: 'new-password' });
+  const dname = h('input', { type: 'text', value: '', placeholder: T('发件人显示名 (可选) e.g. Alex Chen') });
+  const cid = h('input', { type: 'text', value: '', placeholder: '00000000-0000-0000-0000-000000000000', autocomplete: 'off', spellcheck: 'false' });
+  const sec = v => { const s = h('select', null, h('option', { value: 'ssl' }, 'SSL/TLS'), h('option', { value: 'starttls' }, 'STARTTLS'), h('option', { value: 'none' }, T('不加密（仅限本机地址）'))); s.value = v; return s; };
+  const ih = h('input', { type: 'text', placeholder: 'imap.example.com' }), ip = h('input', { type: 'number', value: '993', min: 1, max: 65535 }), is = sec('ssl');
+  const sh = h('input', { type: 'text', placeholder: 'smtp.example.com' }), sp = h('input', { type: 'number', value: '465', min: 1, max: 65535 }), ss = sec('ssl');
+  const user = h('input', { type: 'text', placeholder: T('留空 = 邮箱地址') });
+  const steps = h('div'), pwLabel = h('span'), msBox = h('div', { class: 'stack' });
+  const fPw = h('label', { class: 'field' }, pwLabel, pw), fCid = h('label', { class: 'field' }, h('span', null, T('应用程序(客户端) ID Application (client) ID')), cid);
+  const fCustom = h('div', { class: 'stack' },
+    h('div', { class: 'row' }, h('label', { class: 'field', style: 'flex:3' }, h('span', null, T('IMAP 服务器（收信）')), ih), h('label', { class: 'field', style: 'flex:1' }, h('span', null, T('端口')), ip), h('label', { class: 'field', style: 'flex:1.4' }, h('span', null, T('加密')), is)),
+    h('div', { class: 'row' }, h('label', { class: 'field', style: 'flex:3' }, h('span', null, T('SMTP 服务器（发信）')), sh), h('label', { class: 'field', style: 'flex:1' }, h('span', null, T('端口')), sp), h('label', { class: 'field', style: 'flex:1.4' }, h('span', null, T('加密')), ss)),
+    h('label', { class: 'field' }, h('span', null, T('用户名 Username')), user));
+  ss.onchange = () => { if (ss.value === 'starttls' && sp.value === '465') sp.value = '587'; if (ss.value === 'ssl' && sp.value === '587') sp.value = '465'; };
+  const btn = h('button', { class: 'btn primary' });
+  const show = () => {
+    const k = prov.value, oauth = (byKey[k] || {}).auth === 'oauth';
+    steps.replaceChildren(mailSteps(k));
+    pwLabel.textContent = k === 'qq' || k === 'netease' ? T('授权码 Authorization code') : k === 'custom' ? T('密码 Password') : T('应用专用密码 App Password');
+    fPw.style.display = oauth ? 'none' : ''; fCid.style.display = oauth ? '' : 'none'; fCustom.style.display = k === 'custom' ? '' : 'none';
+    btn.textContent = oauth ? T('用微软账号登录 Sign in with Microsoft') : T('连接并测试 Connect & test');
+    email.placeholder = { gmail: 'you@gmail.com', outlook: 'you@outlook.com', yahoo: 'you@yahoo.com', icloud: 'you@icloud.com', qq: '12345678@qq.com', netease: 'you@163.com', zoho: 'you@zohomail.com', aol: 'you@aol.com' }[k] || 'you@example.com';
+    msBox.replaceChildren();
+  };
+  prov.onchange = show;
+  email.addEventListener('change', () => {  // pick the provider from the address
+    const dom = (email.value.split('@')[1] || '').toLowerCase().trim();
+    const p = presets.find(x => (x.domains || []).includes(dom));
+    if (p && p.key !== prov.value) { prov.value = p.key; show(); }
+  });
+  const body = () => ({ provider: prov.value, email: email.value.trim(), app_password: pw.value, display_name: dname.value,
+    imap_host: ih.value.trim(), imap_port: +ip.value, imap_security: is.value, smtp_host: sh.value.trim(), smtp_port: +sp.value, smtp_security: ss.value, username: user.value.trim() });
+  const msPoll = async (flow, interval) => {
+    for (;;) {
+      await new Promise(r => setTimeout(r, Math.max(3, interval) * 1000));
+      if (!document.body.contains(msBox)) return;  // left the page
+      const r = await sapi('connections/gmail/oauth/' + flow);
+      if (r.status === 'pending') continue;
+      if (r.status === 'done') { toast(Tf("{0} 已连接 ✓ 收件箱未读 {1} 封", (email.value), (r.test.unread_inbox ?? '?'))); route(); return; }
+      msBox.replaceChildren(h('div', { class: 'small', style: 'color:var(--danger)' }, r.error || r.status)); return;
+    }
+  };
+  btn.onclick = safe(async e => {
+    const label = btn.textContent; btn.disabled = true; btn.textContent = T('连接中…');
+    try {
+      if ((byKey[prov.value] || {}).auth === 'oauth') {
+        const r = await sapi('connections/gmail/oauth/start', { method: 'POST', body: { email: email.value.trim(), client_id: cid.value.trim(), display_name: dname.value } });
+        msBox.replaceChildren(h('div', { class: 'card stack', style: 'background:var(--bg2,transparent)' },
+          h('div', null, T('1. 打开 '), mailLink(r.verification_uri, r.verification_uri.replace(/^https:\/\//, '')), T('，输入下面的登录码：')),
+          h('div', { style: 'font-size:28px;font-weight:700;letter-spacing:4px;user-select:all' }, r.user_code),
+          h('div', null, T('2. 用这个 Outlook 邮箱登录并同意授权。完成后这里会自动连接（等待中…）')),
+          h('div', { class: 'small muted' }, Tf("登录码 {0} 分钟内有效", (Math.round(r.expires_in / 60))))));
+        msPoll(r.flow, r.interval);
+      } else {
+        const res = await sapi('connections/gmail/credential', { method: 'POST', body: body() });
+        toast(Tf("{0} 已连接 ✓ 收件箱未读 {1} 封", (email.value), (res.test.unread_inbox ?? '?'))); route();
+      }
+    } finally { btn.disabled = false; btn.textContent = label; }
+  });
+  show();
+  const gmStatus = h('span', { class: 'chip ' + (accs.length ? 'ok' : '') }, accs.length ? Tf("已连接 {0} 个邮箱", (accs.length)) : T('未连接 Not connected'));
+  const accRows = accs.map(a => h('div', { class: 'perm' },
+    h('div', { style: 'min-width:0' }, h('b', null, a.email), a.id === gm.default ? h('span', { class: 'chip ok', style: 'margin-left:6px' }, T('默认 Default')) : null,
+      h('div', { class: 'small muted' }, [mailLabel(byKey[a.provider] || { key: a.provider, label: a.provider_label || a.provider }), a.display_name].filter(Boolean).join(' · ')),
+      a.ready ? null : h('div', { class: 'small', style: 'color:var(--danger)' }, T('缺少密码，请重新添加 (password missing)'))),
+    h('div', { class: 'row', style: 'flex-wrap:nowrap' },
+      h('button', { class: 'btn small', onclick: safe(async () => { const t = await sapi('connections/gmail/test', { method: 'POST', body: { account: a.id } }); toast(t.ok ? Tf("{0} 正常 ✓ 未读 {1}", (a.email), (t.test.unread_inbox)) : t.error, !t.ok); }) }, T('测试')),
+      a.id !== gm.default ? h('button', { class: 'btn small', onclick: safe(async () => { await sapi('connections/gmail/default', { method: 'POST', body: { account: a.id } }); toast(T('已设为默认发件邮箱')); route(); }) }, T('设为默认')) : null,
+      h('button', { class: 'btn danger small', onclick: safe(async () => { if (!confirmInline(Tf("断开 {0}？", (a.email)))) return; await sapi('connections/gmail/accounts/' + a.id, { method: 'DELETE' }); route(); }) }, T('断开')))));
+  return h('div', { class: 'card stack' },
+    h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, T('📧 邮箱 Email')), gmStatus),
+    h('p', { class: 'sub' }, T('支持 Gmail、Outlook / Hotmail、Yahoo、iCloud、QQ 邮箱、网易 163 / 126、Zoho、AOL 和任何 IMAP 邮箱，可以同时连接多个：搜索时一起查，发信时默认用「默认邮箱」，回复总是用原邮件所在的邮箱。密码 / 授权码加密保存在 Sentinel 保险箱 (Vault) 里，Agent 和模型永远看不到。')),
+    accs.length ? h('div', null, ...accRows) : null,
+    h('details', { open: !accs.length },
+      h('summary', null, h('b', null, accs.length ? T('＋ 添加另一个邮箱 Add another mailbox') : T('连接邮箱 Connect a mailbox'))),
+      h('div', { class: 'stack', style: 'margin-top:10px' },
+        h('label', { class: 'field' }, h('span', null, T('邮箱服务商 Provider')), prov),
+        steps,
+        h('label', { class: 'field' }, h('span', null, T('邮箱 Email')), email),
+        fPw, fCid, fCustom,
+        h('label', { class: 'field' }, h('span', null, T('显示名 Display name')), dname),
+        h('div', { class: 'row' }, btn), msBox)),
+    h('div', null, h('b', null, T('权限 Permissions（读写分离）')),
+      permRow(gm, 'read', T('读取与搜索'), 'read / search', 'low'),
+      permRow(gm, 'organize', T('整理（归档、标签、已读）'), 'organize', 'medium'),
+      permRow(gm, 'draft', T('创建草稿'), 'draft', 'medium'),
+      permRow(gm, 'send', T('发送 / 回复 / 转发（每次需审批）'), 'send — approval', 'high')));
+}
+
 function calendarCard(c, permRow) {
   c = c || { name: 'calendar', config: {}, permissions: {}, enabled: false, has_credential: false };
   const connected = c.has_credential && c.enabled;

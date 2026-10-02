@@ -1027,3 +1027,85 @@ def test_data_query_rejects_unknown_keys(tmp_path):
     p.write_text("a,b\n1,2\n", encoding="utf-8")
     with pytest.raises(D.DataError, match="unknown query key"):
         D.run(str(p), {"queries": [{"col": "a", "op": ">", "value": 0}]})
+
+
+# ---------------------------------------------------------------- other email providers
+def test_mail_query_translation():
+    from datetime import date
+    from app.sentinel.mailproviders import translate_query as tq
+    d = date(2026, 10, 3)
+    r = tq("in:inbox newer_than:7d -category:promotions is:unread", d)
+    assert r["folders"] == ["inbox"] and r["criteria"] == ["SINCE 26-Sep-2026", 'NOT HEADER List-Unsubscribe ""', "UNSEEN"]
+    assert tq("from:boss@x.com", d)["folders"] == ["inbox", "archive"]          # no folder = inbox + archive
+    r = tq('{from:a@x.com from:b@y.com} subject:"hello world" 发票 -报销', d)
+    assert r["criteria"] == ['OR FROM "a@x.com" FROM "b@y.com"', 'SUBJECT "hello world"']
+    assert r["text"] == [("TEXT", "发票", False), ("TEXT", "报销", True)]
+    assert tq("label:工作 in:sent", d)["folders"] == ["label:工作", "sent"]
+    assert tq("after:2026/09/01 before:2026-09-30 larger:2M", d)["criteria"] == ["SINCE 1-Sep-2026", "BEFORE 30-Sep-2026", "LARGER 2097152"]
+    assert tq("invoice OR receipt", d)["criteria"] == ['OR TEXT "invoice" TEXT "receipt"']
+    assert tq("in:anywhere", d)["folders"] == ["*"] and tq("", d)["criteria"] == []
+
+
+def test_mail_presets_and_utf7():
+    from app.sentinel import mailproviders as mp
+    assert mp.mutf7_decode("&g0l6P3ux-") == "草稿箱" and mp.mutf7_encode("草稿箱") == "&g0l6P3ux-"
+    assert mp.mutf7_decode(mp.mutf7_encode("A&B 工作/x")) == "A&B 工作/x"
+    assert mp.guess_provider("x@QQ.com") == "qq" and mp.guess_provider("a@hotmail.com") == "outlook" and mp.guess_provider("a@corp.io") == ""
+    s = mp.server_settings("netease", "me@126.com")
+    assert s["imap_host"] == "imap.126.com" and s["smtp_host"] == "smtp.126.com" and s["username"] == "me@126.com"
+    assert mp.server_settings("outlook", "me@contoso.com")["smtp_host"] == "smtp.office365.com"   # work account
+    assert mp.server_settings("icloud", "me@icloud.com")["smtp_security"] == "starttls"
+    for bad in ({"imap_host": "", "smtp_host": "s"}, {"imap_host": "i.x.com", "smtp_host": "s.x.com", "imap_security": "none"},
+                {"imap_host": "i x", "smtp_host": "s"}):
+        with pytest.raises(ValueError):
+            mp.server_settings("custom", "me@x.com", bad)
+    ok = mp.server_settings("custom", "me@x.com", {"imap_host": "127.0.0.1", "imap_port": 1143, "imap_security": "none",
+                                                   "smtp_host": "smtp.x.com", "smtp_port": "587", "smtp_security": "starttls",
+                                                   "username": "me"})
+    assert ok["imap_port"] == 1143 and ok["smtp_port"] == 587 and ok["username"] == "me"
+
+
+def test_mailboxes_provider_fields(store):
+    from app.sentinel import mailboxes as mb, mailproviders as mp
+    store.put_secret("gmail", {"app_password": "abcdabcdabcdabcd"})
+    store.save_connection("gmail", {"email": "lucas@gmail.com"})
+    a = mb.accounts(store)[0]
+    assert a["provider"] == "gmail" and a["imap_port"] == 993 and a["smtp_security"] == "ssl" and a["auth"] == "password"
+    q = mb.save_account(store, "me@qq.com", "authcode", "", "qq", mp.server_settings("qq", "me@qq.com"))
+    o = mb.save_account(store, "me@outlook.com", "", "", "outlook", mp.server_settings("outlook", "me@outlook.com"),
+                        oauth={"client_id": "c", "tenant": "consumers", "refresh_token": "r"})
+    accs = {x["email"]: x for x in mb.accounts(store)}
+    assert accs["me@qq.com"]["imap_host"] == "imap.qq.com" and accs["me@outlook.com"]["auth"] == "oauth"
+    assert store.get_secret(mb.handle(o["id"]))["oauth"]["refresh_token"] == "r"
+    assert mb.split_id(f"{q['id']}:i-42") == (q["id"], "i-42") and mb.split_id("i-42") == ("g1", "i-42")
+
+
+class FakeIMAPNoUTF8(FakeIMAP):
+    """A non-Gmail server that rejects SEARCH CHARSET UTF-8 (forces local filtering)."""
+    def list(self):
+        return "OK", [b'(\\HasNoChildren) "/" "INBOX"', b'(\\HasNoChildren) "/" "&g0l6P3ux-"', b'(\\HasNoChildren) "/" "Sent Messages"']
+
+    def uid(self, cmd, *args):
+        import imaplib
+        if cmd == "SEARCH" and "CHARSET" in args:
+            raise imaplib.IMAP4.error("BADCHARSET")
+        if cmd == "FETCH":
+            typ, data = super().uid(cmd, *args)
+            return typ, [(d[0].replace(b"X-GM-MSGID 1790000000000001 X-GM-THRID 1790000000000001 ", b"")
+                          .replace(b"X-GM-MSGID 1790000000000002 X-GM-THRID 1790000000000002 ", b""), d[1])
+                         if isinstance(d, tuple) else d for d in data]
+        return super().uid(cmd, *args)
+
+
+def test_generic_search_utf8_fallback(monkeypatch):
+    g = Gmail("me@qq.com", "x", "imap.qq.com", "smtp.qq.com", provider="qq")
+    fake = FakeIMAPNoUTF8()
+    monkeypatch.setattr(g, "_imap", lambda: fake)
+    res = g.search("in:inbox Tuesday", 10)               # ASCII: server-side TEXT search
+    assert {r["id"] for r in res} == {"i-101", "i-102"} and ("SEARCH", ('TEXT "Tuesday"',)) in fake.cmds
+    res = g.search("会议", 10)                            # server refuses UTF-8 -> local filter over newest mail
+    assert res == []
+    res = g.search("verification", 10)
+    assert len(res) == 2
+    f = g.folders(fake)
+    assert f["drafts"] == '"&g0l6P3ux-"' and f["sent"] == '"Sent Messages"' and f["_display"]['"&g0l6P3ux-"'] == "草稿箱"
