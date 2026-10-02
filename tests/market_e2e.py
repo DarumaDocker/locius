@@ -69,5 +69,19 @@ out = t.get("result") or ""
 check("calculate gives the exact payment and schedule", "payment 15,018.71" in out and "| 1 | 15,018.71 | 6,268.71 | 8,750.00 |" in out
       and "pmt(r, 300, 3e6) = 15,018.707108" in out, out[:800])
 check("a bad expression is reported, the rest still computed", "1/0 = ERROR: ZeroDivisionError" in out, out[-300:])
+# ---------------------------------------------------------------- data_query (exact table maths)
+r = c.post(B + "/api/chat", json={"message": "DATAQTEST 分析问卷"}, headers=H).json()
+t0 = time.time()
+while time.time() - t0 < 60:
+    t = c.get(f"{B}/api/tasks/{r['task_id']}").json()
+    if t["status"] in ("COMPLETED", "FAILED", "CANCELLED"):
+        break
+    time.sleep(0.5)
+out = t.get("result") or ""
+check("data_query describes the table", "40 rows × 3 columns" in out and "- nps: number" in out, out[:900])
+check("segments counted exactly", "| det | 14 | 35 |" in out and "| pas | 14 | 35 |" in out and "| pro | 12 | 30 |" in out, out[:2500])
+check("filter + mean + save", "10 of 40 source rows matched" in out and "Saved: data/out.csv" in out, out[:2500])
+check("unknown column explained, other queries still run", "## Query 3: ERROR: no column 'nope'" in out, out[:2500])
+check("log parsed with a pattern", "| /api/b | 2 | 490 |" in out, out[-1500:])
 print("ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}")
 sys.exit(1 if fails else 0)

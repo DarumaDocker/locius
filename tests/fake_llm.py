@@ -315,6 +315,28 @@ async def chat(req: Request):
         if n in (2, 3):   # the second send of the same file is skipped (it is already in the chat)
             return reply("", [tc("send_file", {"path": "reports/summary.docx"})])
         return reply("DOCX RESULTS:\n" + "\n=====\n".join(str(m["content"])[:300] for m in tools_done))
+    if "DATAQTEST" in goal:   # data_query: exact counts from a table (the 2026-10-02 NPS miscount), a log via pattern
+        csv_text = "id,age,nps\n" + "\n".join(f"u{i},{20 + i},{[2, 5, 7, 8, 9, 10][i % 6]}" for i in range(40))
+        log_text = "\n".join(f'2026-10-01T{h:02d}:00:00 1.1.1.1 "GET /api/{p}" {st} {ms}ms'
+                             for h, p, st, ms in [(8, "a", 200, 100), (8, "b", 500, 300), (9, "b", 503, 500), (9, "a", 200, 120)])
+        if n == 0:
+            return reply("", [tc("files_write", {"path": "data/s.csv", "content": csv_text}),
+                              tc("files_write", {"path": "data/app.log", "content": log_text})])
+        if n == 2:
+            return reply("", [tc("data_query", {"path": "data/s.csv"})])
+        if n == 3:
+            return reply("", [tc("data_query", {"path": "data/s.csv", "queries": json.dumps([
+                {"derive": [{"as": "seg", "from": "nps", "bins": [0, 7, 9, 11], "labels": ["det", "pas", "pro"]}],
+                 "group_by": ["seg"], "agg": [{"fn": "count"}, {"fn": "count_share", "as": "pct"}], "sort": ["seg"]},
+                {"where": [{"col": "age", "op": ">=", "value": 50}], "agg": [{"col": "nps", "fn": "mean"}], "save": "data/out.csv"},
+                {"group_by": ["nope"]}])})])
+        if n == 4:
+            return reply("", [tc("data_query", {"path": "data/app.log",
+                                                "pattern": r'^(?P<time>\S+) \S+ "GET (?P<path>[^"]+)" (?P<status>\d{3}) (?P<ms>\d+)ms',
+                                                "queries": [{"derive": [{"as": "err", "expr": "status >= 500"}], "group_by": ["path"],
+                                                             "agg": [{"col": "err", "fn": "sum", "as": "errors"}, {"col": "ms", "fn": "p95"}],
+                                                             "sort": [{"col": "errors", "desc": True}]}]})])
+        return reply("DATAQ RESULTS:\n" + "\n=====\n".join(str(m["content"])[:3000] for m in tools_done))
     if "CALCTEST" in goal:   # calculate: exact loan maths instead of the model's guesses
         if n == 0:
             return reply("", [tc("calculate", {"expressions": ["loan(3000000, 3.5, 25, 2)", "pmt(r, 300, 3e6)", "1/0"],

@@ -37,7 +37,7 @@ SEND_FILE_MAX = 200 * 1024 * 1024    # chat download; Telegram's own bot limit (
 SUBAGENT_TOOLS = {"gmail_search", "gmail_get_message", "gmail_get_thread", "browser_navigate", "browser_snapshot",
                   "browser_search", "browser_read",
                   "browser_click", "browser_type", "browser_press", "browser_scroll", "browser_back", "browser_wait",
-                  "browser_select", "browser_find", "browser_look", "browser_locate", "browser_click_at", "files_read", "file_look", "files_list", "files_search", "memory_search", "market_data", "stock_fundamentals", "calculate"}
+                  "browser_select", "browser_find", "browser_look", "browser_locate", "browser_click_at", "files_read", "file_look", "files_list", "files_search", "memory_search", "market_data", "stock_fundamentals", "calculate", "data_query"}
 # Loop guard: small local models sometimes repeat the exact same call until the step budget is gone
 # (e.g. opening one RSS feed 24 times in a row). Identical calls are refused after REPEAT_STREAK in a row,
 # and read-type calls after REPEAT_TOTAL anywhere in the task. Tools where repeating is normal are exempt from the streak rule.
@@ -259,6 +259,24 @@ LOCAL_TOOLS = [
         {"expressions": {"type": "array", "items": S, "description": "要算的表达式 expressions, e.g. [\"loan(3000000, 3.5, 25, 12)\", \"283.8/4\"]"},
          "variables": {"type": "object", "description": "可选：变量 optional named values (may be expressions), e.g. {\"r\": \"0.035/12\"}"}},
         ["expressions"]),
+    _fn("data_query", "精确分析表格数据（CSV、Excel、日志），不要自己数行或心算：计数、求和、平均、中位数、标准差、百分位（p95）、分组汇总、"
+        "占比、透视表、分段（年龄段、分数段）、筛选、排序、排名、环比、z 分数（找异常值）、线性趋势预测。先不带查询调用一次看列名和概况，"
+        "再一次传多个 queries。结果可 save 成 .csv/.xlsx（make_xlsx 可直接用作 source）。日志等文本文件传 pattern（带命名分组的正则）。"
+        " Exact numbers from tables (CSV, Excel, text logs) — never count rows or add up a column yourself. Call once with only "
+        "path to see the columns, then pass several queries in one call. Query keys, applied in this order: "
+        "where [{col, op (== != > >= < <= contains in between regex empty), value}], where_any (OR), "
+        "derive [{as, expr: arithmetic over columns (use the alias for names with spaces/brackets)} | {as, from, bins:[edges], labels} | "
+        "{as, from, map:{old:new}} | {as, from, date_part: year|quarter|month|week|date|weekday|hour} | {as, from, slice:[0,7]} | "
+        "{as, zscore|pct_change|rank|cumsum: col, by:[cols]}], then ONE of group_by:[cols] + agg:[{col, fn: count|count_distinct|"
+        "sum|mean|median|min|max|std|var|range|p90|p95|share|count_share|mode|list, as}] / pivot:{rows, cols, value, fn, totals} / "
+        "trend:{y, x?, by?, ahead} (least-squares line + forecast); then sort [{col, desc}], select, totals:true, limit, "
+        "save:\"analysis/x.csv\".",
+        {"path": {"type": "string", "description": "工作区里的 .csv / .xlsx / .txt 文件 workspace file (attachments too)"},
+         "sheet": {"type": "string", "description": "可选：工作表名 optional sheet name"},
+         "pattern": {"type": "string", "description": "可选：把文本/日志每行解析成一行数据的正则，用命名分组 optional regex with named groups, "
+                     "e.g. ^(?P<time>\\S+) (?P<ip>\\S+) \"(?P<method>\\S+) (?P<path>[^\"]+)\" (?P<status>\\d{3}) (?P<ms>\\d+)ms"},
+         "queries": {"type": "array", "items": {"type": "object"}, "description": "查询列表（每个是上面说明的对象）list of query objects; omit to describe the table"}},
+        ["path"]),
     _fn("stock_fundamentals", "查公司估值和财报（Yahoo Finance，不用开浏览器）：股价、市值、市盈率 P/E（TTM 和预期）、市净率、EPS、股息率、"
         "最近 4 个季度和 4 个年度的营收、毛利（毛利率）、经营利润、净利润（净利率）、摊薄 EPS。估值对比、财报要点一律先用它。"
         "代码同 market_data（TSLA、1211.HK、300750.SZ…）。分析师观点和新闻仍需查网页。"
@@ -407,7 +425,7 @@ def _out_key(args: dict) -> str:
     return str(args.get("output") or args.get("title") or "").strip().lower()
 
 
-FINISH_TOOLS = {"update_plan", "files_write", "files_read", "file_look", "files_list", "make_pdf", "make_xlsx", "make_docx", "make_chart", "market_data", "stock_fundamentals", "calculate", "send_file", "notify_user",
+FINISH_TOOLS = {"update_plan", "files_write", "files_read", "file_look", "files_list", "make_pdf", "make_xlsx", "make_docx", "make_chart", "market_data", "stock_fundamentals", "calculate", "data_query", "send_file", "notify_user",
                 "memory_remember", "goal_update", "schedule_state_set", "gmail_send", "gmail_reply", "gmail_create_draft",
                 "slack_send_message", "notion_create_page", "notion_append", "calendar_create_event"}
 
@@ -1180,6 +1198,8 @@ class Runtime:
                 continue
             k = AT.kind_of(p)
             head = f"### {os.path.basename(p)} — {k}, {a.get('size') or os.path.getsize(p)} bytes, path: {rel}"
+            if p.lower().endswith((".csv", ".tsv", ".xlsx", ".xlsm", ".log")) or (p.lower().endswith(".txt") and os.path.getsize(p) > 5000):
+                head += "\n(data file: get every count / sum / average / group figure with data_query on this path — don't count by eye)"
             try:
                 if k in ("text", "docx", "xlsx", "pptx", "pdf"):
                     txt = await asyncio.to_thread(AT.text_of, p, min(20000, max(2000, budget)))
@@ -1487,7 +1507,7 @@ class Runtime:
                 ok = False
             await self.audit("executor", name, task_id, resource="local", risk="low", decision="ALLOW",
                              result="success" if ok else "error", detail={"args": _preview_args(args)})
-            if ok and name in ("files_read", "file_look", "files_search"):
+            if ok and name in ("files_read", "file_look", "files_search", "data_query"):
                 # the user's own files are confidential: Sentinel then asks before long text is typed into websites
                 await self._mark_confidential(task_id, name)
         elif name == "browser_navigate" and (blocked := site_blocked(transcript, str(args.get("url", "")))):
@@ -1716,6 +1736,51 @@ class Runtime:
         return (f"已发送到对话 Sent to the chat ({len(items)} file(s)): {names}.{extra} "
                 "图片会直接显示、视频可直接播放 Images show inline and videos play inline — no need to tell the user where to find them.")
 
+    def _data_query(self, a: dict) -> str:
+        from app.common import dataq
+        rel = str(a.get("path") or "")
+        p = self._path(rel)
+        if not os.path.isfile(p):
+            return f"ERROR: 文件不存在 file not found: {rel}"
+        if os.sep + ".quarantine" + os.sep in p:
+            return "ERROR: 隔离区文件不可读取 (quarantined file)"
+        qs = a.get("queries")
+        if isinstance(qs, str):
+            try:
+                qs = json.loads(qs)
+            except ValueError:
+                return "ERROR: queries 应为 JSON 数组 must be a JSON array of query objects"
+        if isinstance(qs, dict):
+            qs = [qs]
+        base = {k: a[k] for k in ("sheet", "pattern", "header") if a.get(k) not in (None, "")}
+        try:
+            if not qs:
+                return dataq.describe(p, base.get("sheet"), base.get("pattern"), base.get("header", True))
+            out = []
+            for i, q in enumerate(qs[:12], 1):
+                if not isinstance(q, dict):
+                    out.append(f"## Query {i}: ERROR: each query must be an object")
+                    continue
+                try:
+                    cols, rows, info = dataq.run(p, {**base, **q})
+                except dataq.DataError as e:
+                    out.append(f"## Query {i}: ERROR: {e}")
+                    continue
+                head = f"## Query {i}: {info['matched_rows']} of {info['source_rows']} source rows matched → {len(rows)} result rows"
+                saved = ""
+                if q.get("save"):
+                    sp = str(q["save"])
+                    if not sp.lower().endswith((".csv", ".xlsx")):
+                        sp += ".csv"
+                    dataq.save(cols, rows, self._path(sp))
+                    saved = f"\nSaved: {sp} (make_xlsx can use it as source; for make_chart pass the labels/values from the table above)"
+                out.append(head + "\n" + dataq.table(cols, rows) + saved)
+            return "\n\n".join(out)
+        except dataq.DataError as e:
+            return f"ERROR: {e}"
+        except (OSError, ValueError, TypeError, KeyError) as e:
+            return f"ERROR: {type(e).__name__}: {str(e)[:200]}"
+
     async def _mark_confidential(self, task_id: str, why: str):
         if task_id in self._confidential:
             return
@@ -1883,6 +1948,8 @@ class Runtime:
             return await self._market_data(tid, a)
         if name == "stock_fundamentals":
             return await self._stock_fundamentals(tid, a)
+        if name == "data_query":
+            return await asyncio.to_thread(self._data_query, a)
         if name == "calculate":
             from app.common import calc
             exprs = a.get("expressions") or a.get("expression") or []

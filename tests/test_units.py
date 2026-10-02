@@ -921,3 +921,25 @@ def test_date_time_inputs_get_their_iso_format():
     assert N("datetime-local", "2026-10-03 9:00") == "2026-10-03T09:00"
     assert N("month", "2026-9") == "2026-09"
     assert N("text", "12:00 PM") == "12:00 PM" and N("time", "noon") == "noon"
+
+
+def test_data_query_exact_tables(tmp_path):
+    from app.common import dataq as D
+    p = tmp_path / "t.csv"
+    p.write_text("姓名,年龄,金额(新元)\nA,25,\"1,200\"\nB,35,S$800\nC,45,300\nD,55,\n", encoding="utf-8")
+    cols, rows, info = D.run(str(p), {"agg": [{"col": "金额(新元)", "fn": "sum"}, {"fn": "count"}]})
+    assert rows[0]["sum(金额(新元))"] == 2300 and rows[0]["count"] == 4
+    cols, rows, _ = D.run(str(p), {"derive": [{"as": "x2", "expr": "金额_新元 * 2"}], "where": [{"col": "年龄", "op": "between", "value": [30, 50]}]})
+    assert [r["x2"] for r in rows] == [1600, 600]
+    cols, rows, _ = D.run(str(p), {"derive": [{"as": "g", "from": "年龄", "bins": [0, 30, 50, 200], "labels": ["<30", "30-49", "50+"]}],
+                                   "group_by": ["g"], "agg": [{"fn": "count"}], "sort": ["g"]})
+    assert [(r["g"], r["count"]) for r in rows] == [("30-49", 2), ("50+", 1), ("<30", 1)]
+    assert D.to_num("12%") == 12 and D.to_num("007") == 7 and D.to_num("2026-10-01") is None
+    assert D._clean("007") == "007"
+    import pytest
+    with pytest.raises(D.DataError):
+        D.run(str(p), {"group_by": ["missing"]})
+    bad = tmp_path / "b.xlsx"
+    bad.write_bytes(b"not a zip")
+    with pytest.raises(D.DataError):
+        D.load(str(bad))
