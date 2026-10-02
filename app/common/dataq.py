@@ -219,10 +219,22 @@ def _eq(a, b) -> bool:
 
 
 def _where(cols, rows, conds, any_of=False):
+    """Conditions are ANDed (any_of: ORed). A value that names a column — or {"col": name} — compares the two columns
+    row by row (e.g. 金额 > 预算)."""
     conds = conds if isinstance(conds, list) else [conds]
-    cc = [(_col(cols, c.get("col")), str(c.get("op") or "=="), c.get("value")) for c in conds]
+    cc = []
+    for c in conds:
+        if not isinstance(c, dict):
+            raise DataError("each condition is an object {col, op, value}")
+        v = c.get("value")
+        other = None
+        if isinstance(v, dict) and v.get("col"):
+            other = _col(cols, v["col"])
+        elif isinstance(v, str) and v in cols and c.get("col") != v:
+            other = v
+        cc.append((_col(cols, c.get("col")), str(c.get("op") or "=="), v, other))
     test = any if any_of else all
-    return [r for r in rows if test(_cmp(r[c], op, v) for c, op, v in cc)]
+    return [r for r in rows if test(_cmp(r[c], op, r[o] if o else v) for c, op, v, o in cc)]
 
 
 _DATE = re.compile(r"(\d{4})[-/.](\d{1,2})(?:[-/.](\d{1,2}))?(?:[T\s]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?")
@@ -266,13 +278,17 @@ def _derive(cols, rows, specs):
             raise DataError("derive needs \"as\" (the new column name)")
         if "expr" in s:
             names = {alias(c): c for c in cols}
+            expr = str(s["expr"])
+            for c in sorted(cols, key=len, reverse=True):   # 金额(新元) - 预算(新元) → 金额_新元 - 预算_新元
+                if c != alias(c) and c in expr:
+                    expr = expr.replace(c, alias(c))
             for r in rows:
                 env = {}
                 for a, c in names.items():
                     n = to_num(r[c])
                     env[a] = n if n is not None else 0.0
                 try:
-                    r[name] = calc.evaluate(str(s["expr"]), env)
+                    r[name] = calc.evaluate(expr, env)
                 except calc.CalcError as e:
                     raise DataError(f"derive {name}: {e} (columns are referred to as {list(names)[:20]})")
                 if isinstance(r[name], bool):
@@ -513,19 +529,21 @@ def run(path: str, q: dict) -> tuple[list[str], list[dict], dict]:
     """Apply one query. Returns (columns, rows, info)."""
     cols, rows = load(path, q.get("sheet"), q.get("pattern"), q.get("header", True))
     info = {"source_rows": len(rows), "columns": list(cols)}
+    if q.get("derive"):     # first, so where / group_by can use derived columns (z-scores see the whole table)
+        cols, rows = _derive(list(cols), rows, q["derive"])
     if q.get("where"):
         rows = _where(cols, rows, q["where"])
     if q.get("where_any"):
         rows = _where(cols, rows, q["where_any"], any_of=True)
     info["matched_rows"] = len(rows)
-    if q.get("derive"):
-        cols, rows = _derive(list(cols), rows, q["derive"])
     if q.get("pivot"):
         cols, rows = _pivot(cols, rows, q["pivot"])
     elif q.get("trend"):
         cols, rows = _trend(cols, rows, q["trend"])
     elif q.get("group_by") or q.get("agg"):
         cols, rows = _group(cols, rows, q.get("group_by") or [], q.get("agg") or [{"fn": "count"}])
+    if q.get("having"):     # filter the grouped / pivoted result
+        rows = _where(cols, rows, q["having"])
     if q.get("sort"):
         rows = _sort(cols, rows, q["sort"])
     if q.get("select"):

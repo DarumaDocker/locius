@@ -63,6 +63,7 @@ DEFAULT_SETTINGS = {
     "timezone": os.environ.get("TZ", "Asia/Singapore"),
     "user_name": "",
     "language": "",          # "" = not chosen yet: the web UI fills it from the browser language on first visit
+    "reply_language": "",    # "" = answer in Settings → Language; "match" = answer in the language of each request
     "memory_extraction": True,
     "memory_consolidation": True,     # tidy memory once a day (merge, promote, expire) and send a short report
     "memory_consolidate_at": "03:30",  # local time (Settings → Timezone)

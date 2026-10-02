@@ -943,3 +943,39 @@ def test_data_query_exact_tables(tmp_path):
     bad.write_bytes(b"not a zip")
     with pytest.raises(D.DataError):
         D.load(str(bad))
+
+
+def test_reply_language_follows_the_request_when_asked():
+    from app.runtime.agent import _TASK_LANG, agent_lang, request_lang
+    assert request_lang("帮我查一下新加坡明天的天气") == "zh" and request_lang("What's the weather in Singapore tomorrow?") == "en"
+    assert request_lang("帮我 summarize 一下这篇 article 的要点") == "zh" and request_lang("Translate 你好 into French") == "en"
+    assert request_lang("https://example.com 12345") == ""
+    tok = _TASK_LANG.set("en")
+    try:
+        assert agent_lang({"language": "zh", "reply_language": "match"}) == "en"
+        assert agent_lang({"language": "zh", "reply_language": ""}) == "zh"     # off: the setting decides
+    finally:
+        _TASK_LANG.reset(tok)
+    assert agent_lang({"language": "en", "reply_language": "match"}) == "en"    # no request language known
+
+
+def test_data_query_derive_first_column_compare_and_having(tmp_path):
+    # 2026-10-02 R5-02: where on a derived column, "金额(新元) - 预算(新元)" in expr, value naming another column
+    from app.common import dataq as D
+    p = tmp_path / "e.csv"
+    p.write_text("月份,金额(新元),预算(新元)\n1,120,100\n1,90,100\n2,130,100\n2,150,100\n", encoding="utf-8")
+    cols, rows, _ = D.run(str(p), {"derive": [{"as": "diff", "expr": "金额(新元) - 预算(新元)"}],
+                                   "where": [{"col": "diff", "op": ">", "value": 0}], "group_by": ["月份"],
+                                   "agg": [{"fn": "count", "as": "n"}], "having": [{"col": "n", "op": ">=", "value": 2}]})
+    assert [(r["月份"], r["n"]) for r in rows] == [(2, 2)]
+    cols, rows, _ = D.run(str(p), {"where": [{"col": "金额(新元)", "op": ">", "value": "预算(新元)"}], "agg": [{"fn": "count"}]})
+    assert rows[0]["count"] == 3
+
+
+def test_invest_schedule_and_sign_free_fv():
+    # 2026-10-02 R5-16: fv(0.04/12, 12, 0, -1000) (Excel signs, lump sum by mistake) gave negative numbers, the model looped
+    from app.common import calc
+    v = calc.invest(1000, 4, 10)
+    assert v["balance"] == 147249.8 and v["contributed"] == 120000 and len(v["years"]) == 10
+    assert round(calc.fv(0.04 / 12, 120, -1000), 2) == 147249.8
+    assert "final balance 147,249.80" in calc.fmt(v)

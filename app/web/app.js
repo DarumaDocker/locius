@@ -1694,8 +1694,16 @@ function langField(s, f) {
     h('option', { value: 'en' }, 'English'));
   sel.value = s.language === 'en' || s.language === 'zh' ? s.language : LANG;
   f.language = sel;
-  return h('label', { class: 'field' }, h('span', null, T('语言'), LANG === 'en' ? null : h('span', { class: 'muted' }, ' Language')), sel,
-    h('div', { class: 'small muted', style: 'font-weight:400' }, T('界面和 Agent 都用这个语言：思考过程、任务计划、回答、通知和定时任务的汇报。选 English 就全部用英文。')));
+  const rep = h('select', { 'aria-label': 'Reply language' },
+    h('option', { value: '' }, T('和上面的语言一致')),
+    h('option', { value: 'match' }, T('跟随我提问用的语言（中文问中文答，英文问英文答）')));
+  rep.value = s.reply_language === 'match' ? 'match' : '';
+  f.reply_language = rep;
+  return h('div', null,
+    h('label', { class: 'field' }, h('span', null, T('语言'), LANG === 'en' ? null : h('span', { class: 'muted' }, ' Language')), sel,
+      h('div', { class: 'small muted', style: 'font-weight:400' }, T('界面和 Agent 都用这个语言：思考过程、任务计划、回答、通知和定时任务的汇报。选 English 就全部用英文。'))),
+    h('label', { class: 'field' }, h('span', null, T('回答语言')), rep,
+      h('div', { class: 'small muted', style: 'font-weight:400' }, T('选「跟随我提问用的语言」时，每个任务按你那条消息的语言来思考和回答；界面、通知和定时任务汇报仍用上面的语言。'))));
 }
 
 // ================================================================== live updates

@@ -44,11 +44,29 @@ def loan(principal: float, annual_rate_pct: float, years: float, rows: int = 12,
 
 
 def fv(rate: float, nper: float, pmt_: float = 0.0, pv: float = 0.0) -> float:
-    """Future value of a lump sum `pv` plus regular deposits `pmt_` (positive numbers)."""
+    """Future value of a lump sum `pv` plus regular deposits `pmt_`. Signs are ignored (Excel writes deposits as
+    negative numbers; models copy that), so the result is always the positive balance."""
+    pmt_, pv = abs(pmt_), abs(pv)
     if rate == 0:
         return pv + pmt_ * nper
     g = (1 + rate) ** nper
     return pv * g + pmt_ * (g - 1) / rate
+
+
+def invest(monthly: float, annual_rate_pct: float, years: float, initial: float = 0.0, per_year: int = 12) -> dict:
+    """Regular saving / investing (定投): balance at the end of each year, money put in, and the gain.
+    Deposits at the end of each period, compounded `per_year` times a year."""
+    r, n = annual_rate_pct / 100 / per_year, int(round(years * per_year))
+    if n <= 0 or n > 1200:
+        raise CalcError("years must give 1–1200 periods")
+    bal, put, rows = abs(float(initial)), abs(float(initial)), []
+    for i in range(1, n + 1):
+        bal = bal * (1 + r) + abs(monthly)
+        put += abs(monthly)
+        if i % per_year == 0 or i == n:
+            rows.append({"year": round(i / per_year, 2), "contributed": round(put, 2), "balance": round(bal, 2),
+                         "gain": round(bal - put, 2)})
+    return {"balance": round(bal, 2), "contributed": round(put, 2), "gain": round(bal - put, 2), "years": rows}
 
 
 def cagr(start: float, end: float, years: float) -> float:
@@ -59,7 +77,7 @@ def cagr(start: float, end: float, years: float) -> float:
 FUNCS = {"abs": abs, "round": round, "min": min, "max": max, "sum": sum, "len": len, "int": int, "float": float,
          "sqrt": math.sqrt, "log": math.log, "log10": math.log10, "exp": math.exp, "ceil": math.ceil, "floor": math.floor,
          "mean": statistics.fmean, "median": statistics.median, "stdev": statistics.stdev,
-         "pmt": pmt, "fv": fv, "cagr": cagr, "loan": loan}
+         "pmt": pmt, "fv": fv, "cagr": cagr, "loan": loan, "invest": invest}
 CONSTS = {"pi": math.pi, "e": math.e}
 
 
@@ -131,6 +149,10 @@ def run(expressions, variables: dict | None = None) -> list[tuple[str, object]]:
 
 
 def fmt(v) -> str:
+    if isinstance(v, dict) and "years" in v and "contributed" in v:
+        head = (f"final balance {v['balance']:,.2f}; contributed {v['contributed']:,.2f}; gain {v['gain']:,.2f}")
+        rows = "\n".join(f"| {r['year']:g} | {r['contributed']:,.2f} | {r['balance']:,.2f} | {r['gain']:,.2f} |" for r in v["years"])
+        return head + "\n| year | contributed | balance | gain |\n|---|---|---|---|\n" + rows
     if isinstance(v, float):
         return f"{v:,.6f}".rstrip("0").rstrip(".") if abs(v) < 1e15 else f"{v:.6g}"
     if isinstance(v, dict) and "schedule" in v:

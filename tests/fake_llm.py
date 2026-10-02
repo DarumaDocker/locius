@@ -315,6 +315,10 @@ async def chat(req: Request):
         if n in (2, 3):   # the second send of the same file is skipped (it is already in the chat)
             return reply("", [tc("send_file", {"path": "reports/summary.docx"})])
         return reply("DOCX RESULTS:\n" + "\n=====\n".join(str(m["content"])[:300] for m in tools_done))
+    if "WEBLOOP" in goal:   # 2026-10-02 R4-04b: endless searching for a cleaner product list → web-budget nudge
+        if "web budget" in allu:
+            return reply(f"WRAPPED after {n} calls")
+        return reply("", [tc("browser_search", {"query": f"anker power bank variant {n}"})])
     if "DATAQTEST" in goal:   # data_query: exact counts from a table (the 2026-10-02 NPS miscount), a log via pattern
         csv_text = "id,age,nps\n" + "\n".join(f"u{i},{20 + i},{[2, 5, 7, 8, 9, 10][i % 6]}" for i in range(40))
         log_text = "\n".join(f'2026-10-01T{h:02d}:00:00 1.1.1.1 "GET /api/{p}" {st} {ms}ms'

@@ -6,6 +6,7 @@ proposed to Sentinel via /internal/act, which decides ALLOW / DENY / ASK_USER.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import base64
 import fnmatch
 import json
@@ -252,10 +253,12 @@ LOCAL_TOOLS = [
         ["output"]),
     _fn("calculate", "精确计算（不要心算）：贷款月供和还款明细、利息、复利、增长率、汇率换算、AA 分摊、百分比、合计和平均。"
         "表达式支持 + - * / ** % 和 round、min、max、sum、mean、median、sqrt、log；金融函数：pmt(月利率, 期数, 本金)、"
-        "loan(本金, 年利率%, 年数, 明细行数) 返回月供+总利息+还款明细、fv(利率, 期数, 每期存入, 现值)、cagr(起始, 结束, 年数)。"
+        "loan(本金, 年利率%, 年数, 明细行数) 返回月供+总利息+还款明细、invest(每月投入, 年化收益%, 年数, 初始本金) 返回每年末余额/累计投入/收益（定投、储蓄）、"
+        "fv(利率, 期数, 每期存入, 现值)、cagr(起始, 结束, 年数)。"
         " Exact arithmetic — never compute figures the user relies on in your head. Operators + - * / ** %, functions round "
         "min max sum mean median sqrt log, finance: pmt(rate, nper, pv), loan(principal, annual_rate_pct, years, rows) → "
-        "payment, totals and amortization rows, fv(rate, nper, pmt, pv), cagr(start, end, years).",
+        "payment, totals and amortization rows, invest(monthly, annual_rate_pct, years, initial) → year-by-year balance, money "
+        "put in and gain (regular saving / investing), fv(rate, nper, pmt, pv), cagr(start, end, years).",
         {"expressions": {"type": "array", "items": S, "description": "要算的表达式 expressions, e.g. [\"loan(3000000, 3.5, 25, 12)\", \"283.8/4\"]"},
          "variables": {"type": "object", "description": "可选：变量 optional named values (may be expressions), e.g. {\"r\": \"0.035/12\"}"}},
         ["expressions"]),
@@ -264,12 +267,13 @@ LOCAL_TOOLS = [
         "再一次传多个 queries。结果可 save 成 .csv/.xlsx（make_xlsx 可直接用作 source）。日志等文本文件传 pattern（带命名分组的正则）。"
         " Exact numbers from tables (CSV, Excel, text logs) — never count rows or add up a column yourself. Call once with only "
         "path to see the columns, then pass several queries in one call. Query keys, applied in this order: "
-        "where [{col, op (== != > >= < <= contains in between regex empty), value}], where_any (OR), "
-        "derive [{as, expr: arithmetic over columns (use the alias for names with spaces/brackets)} | {as, from, bins:[edges], labels} | "
+        "derive [{as, expr: arithmetic over columns written as they are named, e.g. \"Amount (SGD) - Budget (SGD)\"} | {as, from, bins:[edges], labels} | "
         "{as, from, map:{old:new}} | {as, from, date_part: year|quarter|month|week|date|weekday|hour} | {as, from, slice:[0,7]} | "
-        "{as, zscore|pct_change|rank|cumsum: col, by:[cols]}], then ONE of group_by:[cols] + agg:[{col, fn: count|count_distinct|"
+        "{as, zscore|pct_change|rank|cumsum: col, by:[cols]}], where [{col, op (== != > >= < <= contains in between regex "
+        "empty), value — a value naming a column compares the two columns}], where_any (OR), then ONE of group_by:[cols] + agg:[{col, fn: count|count_distinct|"
         "sum|mean|median|min|max|std|var|range|p90|p95|share|count_share|mode|list, as}] / pivot:{rows, cols, value, fn, totals} / "
-        "trend:{y, x?, by?, ahead} (least-squares line + forecast); then sort [{col, desc}], select, totals:true, limit, "
+        "trend:{y, x?, by?, ahead} (least-squares line + forecast); then having (where on the grouped result), "
+        "sort [{col, desc}], select, totals:true, limit, "
         "save:\"analysis/x.csv\".",
         {"path": {"type": "string", "description": "工作区里的 .csv / .xlsx / .txt 文件 workspace file (attachments too)"},
          "sheet": {"type": "string", "description": "可选：工作表名 optional sheet name"},
@@ -417,6 +421,8 @@ RESEARCH_NUDGE_PAGES = 10
 BUDGET_MARK = "step budget"
 BUDGET_MARK_PAGES = "research check"
 TIME_MARK = "time budget"
+WEB_MARK = "web budget"
+WEB_NUDGE = 18        # web tool calls in one task before the agent is told to wrap up
 REMAKE_TOOLS = {"make_xlsx", "make_pdf", "make_docx", "make_chart"}
 REMAKE_MAX = 4   # the 2026-10-02 itinerary run re-made the same Excel file 9 times (≈5 minutes of generation)
 
@@ -580,6 +586,9 @@ class Runtime:
         self.running[task_id] = asyncio.create_task(self._run_guarded(task_id))
 
     async def _run_guarded(self, task_id: str):
+        t0 = self.store.task(task_id) or {}
+        if self.store.settings().get("reply_language") == "match":
+            _TASK_LANG.set(request_lang(t0.get("goal") or ""))   # this asyncio task only (and what it spawns)
         try:
             await self.run(task_id)
         except Exception as e:
@@ -930,6 +939,16 @@ class Runtime:
                     "停止继续搜集，用已有的信息尽快完成用户要的结果（图表、文件、回答），并说明哪些还没核实。",
                     f"(System) [{TIME_MARK}] This task has run for {minutes:.0f} minutes (limit {max_minutes}). Stop gathering "
                     "and deliver what the user asked for with what you have (chart, file, answer); note what is unverified.")})
+            web_calls = sum(1 for m in transcript if m.get("role") == "assistant" for c in (m.get("tool_calls") or [])
+                            if str(((c.get("function") or {}).get("name")) or "").startswith("browser_"))
+            if web_calls >= WEB_NUDGE and WEB_MARK not in "\n".join(
+                    str(m.get("content") or "") for m in transcript if m.get("role") == "user"):
+                # 2026-10-02 R4-04b: a "top 3 products" lookup made 47 web calls in 12 minutes chasing cleaner results
+                transcript.append({"role": "user", "content": prompts.L(
+                    agent_lang(s), f"（系统）[{WEB_MARK}] 这个任务已经调用了 {web_calls} 次网页工具。除非还缺用户必需的关键信息，"
+                    "不要再搜索或打开网页了：现在就用已有的信息完成回答，并说明哪些没核实。",
+                    f"(System) [{WEB_MARK}] This task has made {web_calls} web calls. Unless something the user needs is still "
+                    "missing, stop searching and opening pages: answer now with what you have and note what is unverified.")})
             timed_out = minutes >= max_minutes
             force_final = steps >= max_steps or gave_up or timed_out
             tools = None if force_final else self._tools(catalog, schedule=bool(t["schedule_id"]) and not goal, goal=bool(goal))
@@ -2328,8 +2347,23 @@ class Runtime:
         return {"facts": added, "recent": recent, "profile_suggestions": suggested}
 
 
+_TASK_LANG: contextvars.ContextVar[str] = contextvars.ContextVar("omuse_task_lang", default="")
+
+
+def request_lang(text: str) -> str:
+    """'zh' or 'en' for the language a request is written in ('' when it can't tell, e.g. only numbers or a URL)."""
+    t = re.sub(r"https?://\S+|\[[^\]]*\]|\([^)]*attached[^)]*\)", " ", str(text or ""))[:2000]
+    if not re.search(r"[A-Za-z一-鿿]", t):
+        return ""
+    return "zh" if prompts.cjk_share(t) >= 0.3 else "en"
+
+
 def agent_lang(settings: dict) -> str:
-    """The agent's language: 'en' or 'zh' (Settings → Language; unset = Chinese, as before)."""
+    """The agent's language: 'en' or 'zh'. Settings → Language (unset = Chinese, as before), unless Settings → Reply
+    language is "match": then each task answers in the language its request was written in (set per run)."""
+    lg = _TASK_LANG.get()
+    if lg in ("en", "zh") and (settings or {}).get("reply_language") == "match":
+        return lg
     return "en" if (settings or {}).get("language") == "en" else "zh"
 
 

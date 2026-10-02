@@ -99,5 +99,19 @@ r = c.post(B + "/api/chat", json={"message": "ZHANSWER 帮我看看最重要的�
 t = wait(r["task_id"])
 check("zh: Chinese answers are left alone", (t.get("result") or "").startswith("最重要的邮件"), t.get("result"))
 
+# 0.2.29: Settings → Reply language = "match": each request is answered in the language it was written in
+c.put(B + "/api/settings", json={"language": "zh", "reply_language": "match"}, headers=H)
+r = c.post(B + "/api/chat", json={"message": "LANGCHECK please check my inbox for anything important"}, headers=H).json()
+t = wait(r["task_id"])
+res = t.get("result") or ""
+check("match: an English request gets the English rule (UI stays Chinese)", "RULE=LANGUAGE: ENGLISH" in res, res)
+check("match: planner too", (t.get("plan") or {}).get("objective", "").startswith("PLANRULE=LANGUAGE: ENGLISH"), t.get("plan"))
+t, res = langcheck()
+check("match: a Chinese request gets the Chinese rule", "RULE=语言：简体中文" in res, res)
+c.put(B + "/api/settings", json={"language": "en", "reply_language": "match"}, headers=H)
+t, res = langcheck()
+check("match + English UI: a Chinese request is answered in Chinese", "RULE=语言：简体中文" in res, res)
+c.put(B + "/api/settings", json={"language": "zh", "reply_language": ""}, headers=H)
+
 print("\n" + ("ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}"))
 sys.exit(1 if fails else 0)

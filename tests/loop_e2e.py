@@ -56,6 +56,17 @@ check("EN: notice in English", mine and not cjk(mine[0]["title"].replace("LOOP æ
       [(n.get("title"), n.get("body", "")[-120:]) for n in ns[:3]])
 c.put(B + "/api/settings", json={"language": s0.get("language", "zh")}, headers=H)
 
+# 0.2.29: too many web calls â†’ told once to wrap up and answer with what it has
+c.put(B + "/api/settings", json={"max_steps": 40}, headers=H)
+r = c.post(B + "/api/chat", json={"message": "WEBLOOP top 3 Anker power banks"}, headers=H).json()
+t0 = time.time()
+while time.time() - t0 < 120:
+    t = c.get(f"{B}/api/tasks/{r['task_id']}").json()
+    if t["status"] in ("COMPLETED", "FAILED", "CANCELLED"):
+        break
+    time.sleep(0.5)
+check("web budget nudge ends a search loop", t["status"] == "COMPLETED" and (t.get("result") or "").startswith("WRAPPED after 18"),
+      (t["status"], t.get("result")))
 c.delete(f"{B}/api/schedules/{sid}", headers=H)
 c.put(B + "/api/settings", json={"max_steps": s0.get("max_steps", 30)}, headers=H)
 print("ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}")
