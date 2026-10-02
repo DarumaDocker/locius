@@ -330,6 +330,8 @@ function renderThread(thread) {
     const lastUser = d.messages.map(m => m.role).lastIndexOf('user');
     for (const [mi, m] of d.messages.entries()) {
       if (m.role === 'user') {
+        const atts = (m.meta && m.meta.attachments) || [];
+        if (atts.length) msgs.append(h('div', { class: 'msg user' }, attachStrip(atts)));
         msgs.append(h('div', { class: 'msg user' }, h('div', { class: 'bubble' }, m.content)));
         if (m.task_id && S.tasks[m.task_id]) { msgs.append(taskCard(S.tasks[m.task_id])); shown.add(m.task_id); }
       } else if (m.role === 'assistant') {
@@ -346,6 +348,8 @@ function renderThread(thread) {
               h('span', { class: 'small muted' }, T('已处理 resolved')))));
         } else if (j.type === 'file') {
           msgs.append(fileCard(j));
+        } else if (j.type === 'files') {
+          msgs.append(filesCard(j));
         } else if (j.type === 'choices') {
           msgs.append(choicesCard(j, mi > lastUser));
         } else if (j.type === 'takeover') {
@@ -380,14 +384,49 @@ function renderThread(thread) {
   if (hadFocus) requestAnimationFrame(() => { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); });
   const btn = h('button', { class: 'btn primary send', onclick: () => send(), 'aria-label': T('发送 Send'), title: T('发送 Send') },
     h('span', { class: 'lbl' }, T('发送 Send')), h('span', { class: 'ico', 'aria-hidden': 'true' }, '↑'));
-  comp.append(h('div', { class: 'box' }, ta, btn));
+  const picker = h('input', { type: 'file', multiple: true, style: 'display:none', 'aria-hidden': 'true',
+    accept: 'image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.md,.markdown,.txt,.csv,.json,.zip' });
+  picker.onchange = () => { addFiles([...picker.files]); picker.value = ''; };
+  const plus = h('button', { class: 'btn attach', type: 'button', onclick: () => picker.click(), 'aria-label': T('添加附件 Attach files'),
+    title: T('添加图片、视频、PDF、Word、Markdown 等文件 Attach files') }, '＋');
+  const chips = h('div', { class: 'chips' });
+  S.attach = S.attach || [];
+  const drawChips = () => {
+    chips.replaceChildren(...S.attach.map(a => h('div', { class: 'chip-att' + (a.error ? ' bad' : '') },
+      a.thumb ? h('img', { src: a.thumb, alt: '' }) : h('span', { class: 'ic' }, FILE_ICON(a.file.type || '')),
+      h('span', { class: 'nm', title: a.file.name }, a.file.name),
+      h('span', { class: 'small faint' }, a.error ? T('失败') : a.info ? fmtSize(a.file.size) : Math.round(a.progress * 100) + '%'),
+      h('button', { class: 'x', type: 'button', 'aria-label': T('移除 Remove'), onclick: () => { S.attach = S.attach.filter(x => x !== a); drawChips(); } }, '×'))));
+    chips.style.display = S.attach.length ? '' : 'none';
+  };
+  const addFiles = (files) => {
+    for (const f of files) {
+      if (S.attach.length >= 10) { toast(T('一次最多 10 个附件 At most 10 files'), true); break; }
+      if (f.size > 50 * 1024 * 1024) { toast(Tf("{0} 超过 50 MB", f.name), true); continue; }
+      const a = { file: f, progress: 0, thumb: /^image\//.test(f.type) ? URL.createObjectURL(f) : '' };
+      S.attach.push(a);
+      a.promise = uploadFile(f, p => { a.progress = p; drawChips(); })
+        .then(info => { a.info = info; drawChips(); return info; })
+        .catch(e => { a.error = e.message; drawChips(); toast(Tf("上传失败：{0}", e.message), true); return null; });
+    }
+    drawChips();
+  };
+  comp.addEventListener('dragover', e => { if ([...e.dataTransfer.types].includes('Files')) { e.preventDefault(); comp.classList.add('drop'); } });
+  comp.addEventListener('dragleave', () => comp.classList.remove('drop'));
+  comp.addEventListener('drop', e => { if (e.dataTransfer.files.length) { e.preventDefault(); comp.classList.remove('drop'); addFiles([...e.dataTransfer.files]); } });
+  ta.addEventListener('paste', e => { const fs = [...(e.clipboardData || {}).files || []]; if (fs.length) { e.preventDefault(); addFiles(fs); } });
+  comp.append(chips, h('div', { class: 'box' }, plus, picker, ta, btn));
+  drawChips();
   thread.append(comp);
   requestAnimationFrame(grow);
   async function send() {
-    const text = ta.value.trim(); if (!text || S.sending) return;
+    const text = ta.value.trim(); if ((!text && !S.attach.length) || S.sending) return;
     S.sending = true; btn.disabled = true;
     try {
-      const r = await api('chat', { method: 'POST', body: { message: text, conversation_id: S.conv } });
+      const infos = (await Promise.all(S.attach.map(a => a.promise))).filter(Boolean);
+      if (S.attach.length && infos.length < S.attach.length) throw new Error(T('有附件没有上传成功，请移除后再发送 Some files failed to upload'));
+      const r = await api('chat', { method: 'POST', body: { message: text, conversation_id: S.conv, attachments: infos.map(i => i.path) } });
+      S.attach.forEach(a => a.thumb && URL.revokeObjectURL(a.thumb)); S.attach = []; drawChips();
       ta.value = ''; S.draft = ''; grow();
       S.conv = r.conversation_id;
       await loadConvs(); await openConv(r.conversation_id);
@@ -399,7 +438,7 @@ function renderThread(thread) {
 }
 
 const fmtSize = n => n == null ? '' : n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(0) + ' KB' : (n / 1048576).toFixed(1) + ' MB';
-const FILE_ICON = m => /pdf/.test(m) ? '📕' : /^image\//.test(m) ? '🖼' : /sheet|excel|csv/.test(m) ? '📊' : /word|document/.test(m) ? '📘'
+const FILE_ICON = m => /pdf/.test(m) ? '📕' : /^image\//.test(m) ? '🖼' : /^video\//.test(m) ? '🎬' : /^audio\//.test(m) ? '🎵' : /sheet|excel|csv/.test(m) ? '📊' : /word|document/.test(m) ? '📘'
   : /presentation|powerpoint/.test(m) ? '📙' : /zip|compressed|tar/.test(m) ? '🗜' : '📄';
 // a file the agent sent to the chat (send_file): download it, open it in a new tab, or see an image preview
 function fileCard(j) {
@@ -413,11 +452,60 @@ function fileCard(j) {
         h('div', { style: 'font-weight:600;overflow-wrap:anywhere' }, j.name),
         h('div', { class: 'small muted' }, [fmtSize(j.size), j.path].filter(Boolean).join(' · ')))),
     j.note ? h('div', { class: 'small', style: 'margin-top:6px' }, j.note) : null,
-    /^image\/(png|jpe?g|gif|webp)/.test(mime) ? h('img', { src: url, alt: j.name, loading: 'lazy',
+    /^image\/(png|jpe?g|gif|webp|avif|bmp)/.test(mime) ? h('img', { src: url, alt: j.name, loading: 'lazy',
       style: 'display:block;max-width:100%;max-height:260px;margin-top:8px;border-radius:8px' }) : null,
+    /^(video|audio)\//.test(mime) ? h('div', { style: 'margin-top:8px' }, mediaEl(j)) : null,
     h('div', { class: 'row', style: 'gap:8px;margin-top:8px' },
       h('a', { class: 'btn small primary', href: url + '&download=1', download: j.name, style: 'text-decoration:none' }, T('⬇ 下载 Download')),
       canOpen ? h('a', { class: 'btn small', href: url, target: '_blank', rel: 'noopener', style: 'text-decoration:none' }, T('打开 Open')) : null)));
+}
+
+// upload one file for the chat (raw body PUT; progress via XHR)
+function uploadFile(f, onProgress) {
+  return new Promise((resolve, reject) => {
+    const x = new XMLHttpRequest();
+    x.open('PUT', 'api/upload?name=' + encodeURIComponent(f.name));
+    x.setRequestHeader('X-Persona-UI', '1');
+    x.upload.onprogress = e => { if (e.lengthComputable) onProgress(e.loaded / e.total); };
+    x.onload = () => {
+      let j = {}; try { j = JSON.parse(x.responseText); } catch (e) {}
+      if (x.status >= 200 && x.status < 300) resolve(j); else reject(new Error(j.detail || (x.status === 413 ? T('文件太大 File too large') : 'HTTP ' + x.status)));
+    };
+    x.onerror = () => reject(new Error(T('网络错误 network error')));
+    x.send(f);
+  });
+}
+const rawUrl = p => 'api/files/raw?path=' + encodeURIComponent(p);
+// the files the user attached to a message (shown above their bubble)
+function attachStrip(atts) {
+  return h('div', { class: 'att-strip' }, atts.map(a => /^image\//.test(a.mime || '')
+    ? h('a', { href: rawUrl(a.path), target: '_blank', rel: 'noopener', title: a.name }, h('img', { src: rawUrl(a.path), alt: a.name, loading: 'lazy' }))
+    : h('a', { class: 'att-doc', href: rawUrl(a.path), target: '_blank', rel: 'noopener', title: a.name },
+        h('span', { class: 'ic' }, /^video\//.test(a.mime || '') ? '🎬' : /^audio\//.test(a.mime || '') ? '🎵' : FILE_ICON(a.mime || '')),
+        h('span', { class: 'nm' }, a.name), h('span', { class: 'small faint' }, fmtSize(a.size)))));
+}
+// media inside a card the agent sent: image preview, video / audio player
+function mediaEl(it) {
+  const url = rawUrl(it.path), m = it.mime || '';
+  if (/^image\/(png|jpe?g|gif|webp|avif|bmp)/.test(m)) return h('a', { href: url, target: '_blank', rel: 'noopener' },
+    h('img', { src: url, alt: it.name, loading: 'lazy', class: 'media-img' }));
+  if (/^video\//.test(m)) return h('video', { src: url, controls: true, preload: 'metadata', playsinline: true, class: 'media-vid' });
+  if (/^audio\//.test(m)) return h('audio', { src: url, controls: true, preload: 'metadata', style: 'width:100%' });
+  return null;
+}
+// several files the agent sent at once (send_file paths=[…]): a gallery for photos, players for video, rows for the rest
+function filesCard(j) {
+  const items = j.items || [];
+  const media = items.filter(it => /^(image|video|audio)\//.test(it.mime || ''));
+  const other = items.filter(it => !media.includes(it));
+  return h('div', { class: 'msg assistant' }, h('div', { class: 'bubble filecard', style: 'max-width:640px' },
+    j.note ? h('div', { class: 'small', style: 'margin-bottom:8px' }, j.note) : null,
+    media.length ? h('div', { class: 'gallery' + (media.length === 1 ? ' one' : '') }, media.map(it => h('div', { class: 'g-item', title: it.name }, mediaEl(it)))) : null,
+    other.map(it => h('div', { class: 'row', style: 'gap:8px;align-items:center;margin-top:6px' },
+      h('span', null, FILE_ICON(it.mime || '')), h('span', { style: 'flex:1;min-width:0;overflow-wrap:anywhere' }, it.name),
+      h('span', { class: 'small faint' }, fmtSize(it.size)))),
+    h('div', { class: 'row small', style: 'gap:10px;margin-top:8px;flex-wrap:wrap' }, items.map(it =>
+      h('a', { href: rawUrl(it.path) + '&download=1', download: it.name }, Tf("⬇ {0}", it.name))))));
 }
 
 // options the agent offered (present_choices). "verified" = every name/detail was found in pages it actually read
@@ -1574,6 +1662,7 @@ async function viewSettings(root) {
       field('model_base_url', T('接口地址'), 'Base URL'), field('model_name', T('执行模型'), 'Model'),
       field('planner_model', T('规划模型（留空=同上）'), 'Planner model'),
       field('vision_model', T('视觉模型（看网页截图，留空=同执行模型）'), 'Vision model'),
+      field('stt_model', T('语音转文字模型（听音视频附件，留空=自动寻找 whisper 类模型）'), 'Speech-to-text model'),
       field('temperature', T('温度'), 'Temperature', 'number'), field('max_tokens', T('单次最大输出'), 'Max tokens', 'number'),
       field('llm_timeout', T('超时（秒）'), 'Timeout s', 'number'),
       tog('disable_thinking', T('关闭思考模式（更快，复杂任务效果可能下降）Disable thinking')),

@@ -85,7 +85,18 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
         elif ctx["injection"] and dom not in ctx["domains"] and not trusted and carries_data:
             risk = _bump(risk, "high")
             reasons.append("本任务读到疑似提示注入的内容后，要访问一个带参数的新网址 (possible exfiltration after injection)")
-    if tool in ("browser_click", "browser_click_at", "browser_type", "browser_select", "browser_press", "browser_upload") and page:
+    if tool == "browser_save_media":
+        if args.get("url") and not str(args["url"]).startswith("data:"):
+            ok, why = guard.check_url(str(args["url"]))
+            if not ok:
+                return Decision(DENY, "high", why)
+            mdom = guard.domain_of(str(args["url"]))
+            if mdom in set(conn["config"].get("blocked_domains") or []):
+                return Decision(DENY, "high", f"域名 {mdom} 在黑名单中 (blocked domain)")
+        if not args.get("ref") and not args.get("url"):
+            return Decision(DENY, "low", "需要 ref 或 url (give the element ref or the media URL)")
+    if tool in ("browser_click", "browser_click_at", "browser_type", "browser_select", "browser_press", "browser_upload",
+                "browser_save_media") and page:
         dom = guard.domain_of(page.get("url", ""))
         if dom and dom in set(conn["config"].get("blocked_domains") or []):
             return Decision(DENY, "high", f"域名 {dom} 在黑名单中 (blocked domain)")

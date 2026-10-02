@@ -772,3 +772,53 @@ def test_profile_suggestion_shapes_and_one_per_field(tmp_path):
     plan = asyncio.run(MT.plan(RT()))
     assert plan["llm"]["rewrite"] == []                               # rewrites may not grow / add details
     assert [(s["field"], s["value"]) for s in plan["llm"]["profile"]] == [("address_work", "#1001 20 Anson Rd, Singapore 079912")]
+
+
+# ---------------------------------------------------------------- 0.2.20: attachments
+def _mini_docx(path):
+    import zipfile
+    W = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    doc = (f'<w:document {W}><w:body>'
+           '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Quarterly report</w:t></w:r></w:p>'
+           '<w:p><w:r><w:t>Revenue grew </w:t></w:r><w:r><w:t>12%.</w:t></w:r></w:p>'
+           '<w:tbl><w:tr><w:tc><w:p><w:r><w:t>Q1</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>100</w:t></w:r></w:p></w:tc></w:tr></w:tbl>'
+           '</w:body></w:document>')
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("[Content_Types].xml", "<Types/>")
+        z.writestr("word/document.xml", doc)
+
+
+def test_attachment_extraction(tmp_path):
+    import subprocess
+    from app.runtime import attachments as AT
+    ws = str(tmp_path)
+    info = AT.save_upload(ws, "../../etc/pa ss?.md", b"# Title\nhello")
+    assert info["path"].startswith("uploads/") and info["name"] == "pa ss_.md" and info["kind"] == "text"
+    again = AT.save_upload(ws, "pa ss_.md", b"x")
+    assert again["name"] == "pa ss_ (2).md"
+    with pytest.raises(AT.AttachmentError):
+        AT.save_upload(ws, "evil.exe", b"MZ")
+    with pytest.raises(AT.AttachmentError):
+        AT.save_upload(ws, "empty.txt", b"")
+    d = tmp_path / "r.docx"
+    _mini_docx(d)
+    txt = AT.text_of(str(d))
+    assert "# Quarterly report" in txt and "Revenue grew 12%." in txt and "| Q1 | 100 |" in txt
+    assert "Permission" in AT.text_of("tests/pages/permission_slip.pdf") or AT.text_of("tests/pages/permission_slip.pdf")
+    # image: any format → JPEG for the vision model
+    from PIL import Image
+    Image.new("RGB", (3000, 1000), "red").save(tmp_path / "big.png")
+    b64, mime = AT.image_b64(str(tmp_path / "big.png"))
+    assert mime == "image/jpeg" and len(b64) > 100
+    # video: frames + contact sheet + soundtrack
+    exe = AT.ffmpeg_exe()
+    vid = tmp_path / "clip.mp4"
+    subprocess.run([exe, "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=duration=4:size=320x240:rate=10", "-f", "lavfi",
+                    "-i", "sine=frequency=440:duration=4", "-shortest", "-pix_fmt", "yuv420p", str(vid)], check=True)
+    assert 3.5 < AT.media_duration(str(vid)) < 4.5
+    frames = AT.video_frames(str(vid), 4)
+    assert len(frames) == 4 and frames[0][1][:2] == b"\xff\xd8"
+    sheet, m2 = AT.contact_sheet(frames)
+    assert m2 == "image/jpeg" and sheet[:2] == b"\xff\xd8"
+    assert AT.audio_wav(str(vid))[:4] == b"RIFF"
+    assert AT.kind_of("a.HEIC") == "image" and AT.kind_of("b.mov") == "video" and AT.kind_of("c.pptx") == "pptx"

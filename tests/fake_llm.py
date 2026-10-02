@@ -50,6 +50,10 @@ async def chat(req: Request):
         from fastapi.responses import JSONResponse
         return JSONResponse({"error": {"message": "image input is not supported by this model"}}, status_code=400)
     sys = msgs[0]["content"] if msgs and msgs[0]["role"] == "system" else ""
+    if sys.startswith("You look at a file"):   # file_look / attachment reading
+        txt = json.dumps(msgs[-1]["content"])
+        what = "a video contact sheet with numbered frames" if "contact sheet" in txt else "a red square labelled HELLO"
+        return reply(f"VISION-SEEN: {what}")
     if sys.startswith("You look at a screenshot"):   # the vision helper behind browser_look
         return reply(fake_vision(msgs[-1]["content"]))
     if sys.startswith(("You locate things", "This is a zoomed-in part", "A red circle with a crosshair")):   # browser_locate
@@ -309,6 +313,28 @@ async def chat(req: Request):
             m = re.search(r"\[(e\d+)\] textbox \\\"Password", last_tool)
             return reply("", [tc("browser_type", {"ref": m.group(1) if m else "e1", "text": "hunter2"})])
         return reply(f"Typed. {last_tool[:300]}")
+    if "MEDIASHOP" in goal:   # save photos + a video from a page and send them into the chat as one gallery
+        if n == 0:
+            return reply("", [tc("browser_navigate", {"url": PAGE.replace("page.html", "gallery.html")})])
+        if n == 1:
+            def ref(pat):
+                m = re.search(r"\[(e\d+)\] " + pat, last_tool)
+                return m.group(1) if m else "e999"
+            return reply("", [tc("browser_save_media", {"ref": ref(r'img \\"Velvet lipstick')}),
+                              tc("browser_save_media", {"ref": ref(r'link \\"Glow serum')}),
+                              tc("browser_save_media", {"ref": ref(r'video ')})])
+        if n == 4:
+            paths = re.findall(r'"saved": "(media/[^"]+)"', "\n".join(m["content"] for m in tools_done[-3:]))
+            return reply("", [tc("send_file", {"paths": paths, "note": "OMG best sellers"})])
+        return reply(f"MEDIADONE {last_tool[:300]}")
+    if "ATTACHTEST" in goal:   # files attached to the message: their content arrives with the message
+        return reply("ATTACHOK docx=" + str("Quarterly report" in goal) + " img=" + str("VISION-SEEN" in goal)
+                     + " md=" + str("hello-markdown" in goal))
+    if "ATTACHFOLLOW" in goal:   # a later message about an earlier attachment: the agent looks at it again
+        if n == 0:
+            m = re.search(r"- (uploads/[^\n]+?\.png) \(", sys)
+            return reply("", [tc("file_look", {"path": m.group(1) if m else "x.png", "question": "what colour?"})])
+        return reply(f"FOLLOWOK {last_tool[:200]}")
     if "VAULTFILL" in goal:   # fill a membership number from the vault (approved), then try to look at the page
         if n == 0:
             return reply("", [tc("browser_navigate", {"url": PAGE.replace("page.html", "checkout.html")})])

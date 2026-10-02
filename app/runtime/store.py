@@ -54,6 +54,7 @@ DEFAULT_SETTINGS = {
     "model_name": os.environ.get("OMUSE_MODEL") or os.environ.get("PERSONA_MODEL", "Olares/unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL"),
     "planner_model": "",
     "vision_model": "",       # "" = the executor model (Qwen3.x on Olares can read images)
+    "stt_model": "",          # speech-to-text for audio/video attachments; "" = a whisper-like model on the endpoint, if any
     "temperature": 0.3,
     "max_steps": 40,
     "max_tokens": 4096,
@@ -135,6 +136,12 @@ class RStore:
         cols = {r["name"] for r in self.db.all("PRAGMA table_info(schedules)")}
         if "goal_id" not in cols:
             self.db.execute("ALTER TABLE schedules ADD COLUMN goal_id TEXT DEFAULT ''")
+        mcols = {r["name"] for r in self.db.all("PRAGMA table_info(messages)")}
+        if "meta" not in mcols:
+            self.db.execute("ALTER TABLE messages ADD COLUMN meta TEXT DEFAULT ''")   # e.g. the user's attachments
+        tcols = {r["name"] for r in self.db.all("PRAGMA table_info(tasks)")}
+        if "attachments" not in tcols:
+            self.db.execute("ALTER TABLE tasks ADD COLUMN attachments TEXT DEFAULT ''")
         fcols = {r["name"] for r in self.db.all("PRAGMA table_info(facts)")}
         for col, ddl in (("tier", "TEXT DEFAULT 'long'"), ("uses", "INTEGER DEFAULT 0"), ("last_used", "REAL"),
                          ("expires_at", "REAL"), ("history", "TEXT DEFAULT ''")):
@@ -167,24 +174,35 @@ class RStore:
     def conv(self, cid: str) -> dict | None:
         return self.db.one("SELECT * FROM conversations WHERE id=?", (cid,))
 
-    def add_msg(self, cid: str, role: str, content: str, task_id: str = "") -> int:
+    def add_msg(self, cid: str, role: str, content: str, task_id: str = "", meta: dict | None = None) -> int:
         mid = self.db.insert("messages", {"conv_id": cid, "role": role, "content": content, "task_id": task_id,
-                                          "created_at": now_ts()})
+                                          "created_at": now_ts(), "meta": dumps(meta) if meta else ""})
         self.db.execute("UPDATE conversations SET updated_at=? WHERE id=?", (now_ts(), cid))
         return mid
 
     def msgs(self, cid: str, limit=200) -> list[dict]:
         rows = self.db.all("SELECT * FROM messages WHERE conv_id=? ORDER BY id DESC LIMIT ?", (cid, limit))
+        for r in rows:
+            r["meta"] = loads(r.get("meta") or "", None)
         return list(reversed(rows))
+
+    def conv_attachments(self, cid: str) -> list[dict]:
+        """Every file the user attached in this conversation (oldest first)."""
+        out = []
+        for m in self.msgs(cid, 400):
+            for a in ((m.get("meta") or {}).get("attachments") or []) if isinstance(m.get("meta"), dict) else []:
+                out.append(a)
+        return out
 
     def delete_conv(self, cid: str):
         self.db.execute("DELETE FROM messages WHERE conv_id=?", (cid,))
         self.db.execute("DELETE FROM conversations WHERE id=?", (cid,))
 
     # ------------------------------------------------------------ tasks
-    def create_task(self, goal: str, conv_id: str, source: str = "chat", schedule_id: str = "", parent_id: str = "") -> dict:
+    def create_task(self, goal: str, conv_id: str, source: str = "chat", schedule_id: str = "", parent_id: str = "",
+                    attachments: list | None = None) -> dict:
         tid = new_id("task")
-        self.db.insert("tasks", {
+        self.db.insert("tasks", {"attachments": dumps(attachments) if attachments else "",
             "id": tid, "conv_id": conv_id, "goal": goal, "status": "CREATED", "plan": dumps({}), "transcript": dumps([]),
             "pending": dumps(None), "result": "", "error": "", "source": source, "schedule_id": schedule_id,
             "parent_id": parent_id, "steps": 0, "waiting": dumps(None), "created_at": now_ts(), "updated_at": now_ts(),
@@ -198,6 +216,7 @@ class RStore:
             return None
         for k, d in (("plan", {}), ("transcript", []), ("pending", None), ("waiting", None)):
             r[k] = loads(r[k], d)
+        r["attachments"] = loads(r.get("attachments") or "", []) or []
         return r
 
     def update_task(self, tid: str, **kw):

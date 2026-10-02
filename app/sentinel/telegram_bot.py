@@ -155,7 +155,8 @@ class TelegramBot:
             msg_id = res.get("message_id")
         return msg_id
 
-    async def send_document(self, name: str, data: bytes, caption: str = "") -> int | None:
+    async def send_document(self, name: str, data: bytes, caption: str = "", mime: str = "") -> int | None:
+        """Photos go as photos (shown inline, ≤10 MB), MP4 videos as videos, everything else as a document."""
         cfg = self.config()
         if not cfg or not self.client:
             raise RuntimeError("Telegram 未连接 (not connected)")
@@ -163,11 +164,20 @@ class TelegramBot:
         params = {"chat_id": chat}
         if caption:
             params["caption"] = caption[:1000]
-        r = await self.client.post(f"{TG_API}/bot{token}/sendDocument", data=params, files={"document": (name, data)},
+        method, field = "sendDocument", "document"
+        if mime in ("image/jpeg", "image/png", "image/webp") and len(data) <= 10 * 1024 * 1024:
+            method, field = "sendPhoto", "photo"
+        elif mime == "video/mp4":
+            method, field = "sendVideo", "video"
+        r = await self.client.post(f"{TG_API}/bot{token}/{method}", data=params, files={field: (name, data)},
                                    timeout=httpx.Timeout(120.0, connect=10.0))
         res = r.json() if r.content else {}
+        if not res.get("ok") and method != "sendDocument":      # e.g. a photo Telegram can't process: send it as a file
+            r = await self.client.post(f"{TG_API}/bot{token}/sendDocument", data=params, files={"document": (name, data)},
+                                       timeout=httpx.Timeout(120.0, connect=10.0))
+            res = r.json() if r.content else {}
         if not res.get("ok"):
-            raise RuntimeError(f"telegram sendDocument: {res.get('description') or r.status_code}")
+            raise RuntimeError(f"telegram {method}: {res.get('description') or r.status_code}")
         return (res.get("result") or {}).get("message_id")
 
     async def edit(self, msg_id: int, text: str, markup: dict | None = None):

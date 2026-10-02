@@ -654,5 +654,15 @@ window.OMUSE_EN = {
 "证件 ID document": "ID document",
 "会员 Membership": "Membership",
 "银行卡 Card": "Card",
-"其他 Other": "Other"
+"其他 Other": "Other",
+"{0} 超过 50 MB": "{0} is over 50 MB",
+"一次最多 10 个附件 At most 10 files": "At most 10 files at a time",
+"上传失败：{0}": "Upload failed: {0}",
+"文件太大 File too large": "File too large",
+"有附件没有上传成功，请移除后再发送 Some files failed to upload": "Some files failed to upload — remove them and send again",
+"添加图片、视频、PDF、Word、Markdown 等文件 Attach files": "Attach images, videos, PDF, Word, Markdown and other files",
+"添加附件 Attach files": "Attach files",
+"移除 Remove": "Remove",
+"网络错误 network error": "Network error",
+"语音转文字模型（听音视频附件，留空=自动寻找 whisper 类模型）": "Speech-to-text model (for audio/video attachments; empty = find a whisper-like model)"
 };

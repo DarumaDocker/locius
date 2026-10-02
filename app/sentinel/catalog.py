@@ -134,6 +134,17 @@ TOOLS: dict[str, dict] = {
                             "field": {"type": S, "description": "which field of the item, e.g. number / expiry / cvc / holder / name"}},
                            ["ref", "item_id", "field"]),
     },
+    "browser_save_media": {
+        "connector": "browser", "capability": "download", "operation": "download", "risk": "low", "data_class": "PUBLIC",
+        "description": "把当前网页上的图片/视频/音频保存到工作区（media/ 文件夹），之后用 send_file 发给用户。给 ref（图片、视频元素或带背景图的元素）"
+                       "或直接给媒体网址。Save an image / video / audio from the current page into the workspace (media/…) so you can "
+                       "send_file it to the user or file_look at it. Pass the ref of the img / video element (or of an element with a "
+                       "background image), or the media URL. Up to 50 MB; if the file can't be fetched an image falls back to a screenshot "
+                       "of the element. Save several and then send them together with send_file paths=[…].",
+        "parameters": _obj({"ref": {"type": S, "description": "img / video element ref from the latest snapshot"},
+                            "url": {"type": S, "description": "or the media URL (http/https)"},
+                            "name": {"type": S, "description": "optional file name (without extension)"}}),
+    },
     "browser_select": {
         "connector": "browser", "capability": "interact", "operation": "select", "risk": "low", "data_class": "PUBLIC",
         "description": "选择下拉框选项。Select an option (by label or value) in a <select> element by ref.",

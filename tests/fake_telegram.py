@@ -17,12 +17,12 @@ async def log():
 
 @app.api_route("/bot{token}/{method}", methods=["GET", "POST"])
 async def api(token: str, method: str, req: Request):
-    if method == "sendDocument":   # multipart upload
+    if method in ("sendDocument", "sendPhoto", "sendVideo"):   # multipart upload
         f = await req.form()
-        doc = f["document"]
+        doc = f[{"sendDocument": "document", "sendPhoto": "photo", "sendVideo": "video"}[method]]
         data = await doc.read()
         DOCS.append({"chat_id": f.get("chat_id"), "caption": f.get("caption"), "name": doc.filename, "size": len(data),
-                     "head": data[:80].decode("utf-8", "replace")})
+                     "head": data[:80].decode("utf-8", "replace"), "method": method})
         return {"ok": True, "result": {"message_id": next(ids)}}
     try:
         b = await req.json()

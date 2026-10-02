@@ -84,6 +84,49 @@ class LLM:
         ids = [i for i in ids if i != exclude and not any(k in i.lower() for k in ("embed", "rerank", "whisper", "tts"))]
         return ids[0] if ids else ""
 
+    async def stt_model(self) -> str:
+        """Speech-to-text model: Settings → stt_model, else the first whisper-like model the endpoint serves ('' = none)."""
+        s = self.get_settings()
+        if s.get("stt_model"):
+            return str(s["stt_model"])
+        base = str(s["model_base_url"]).rstrip("/")
+        try:
+            async with httpx.AsyncClient(timeout=15) as c:
+                r = await c.get(f"{base}/models")
+            ids = [m.get("id") for m in (r.json().get("data") or []) if m.get("id")]
+        except Exception:
+            return ""
+        for i in ids:
+            if any(k in i.lower() for k in ("whisper", "sensevoice", "paraformer", "asr", "speech-to-text", "stt")):
+                return i
+        return ""
+
+    async def transcribe(self, audio: bytes, filename: str = "audio.wav", task_id: str = "") -> str:
+        """OpenAI-compatible /audio/transcriptions. Raises LLMError when no speech model is available."""
+        s = self.get_settings()
+        base = str(s["model_base_url"]).rstrip("/")
+        model = await self.stt_model()
+        if not model:
+            raise LLMError("没有语音转文字模型 (no speech-to-text model on the model endpoint; set Settings → Speech-to-text model)")
+        t0 = time.time()
+        async with self.sem:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(float(s.get("llm_timeout") or 600), connect=15)) as c:
+                r = await c.post(f"{base}/audio/transcriptions", data={"model": model, "response_format": "json"},
+                                 files={"file": (filename, audio, "audio/wav")})
+        if r.status_code >= 400:
+            raise LLMError(f"语音转文字失败 transcription failed HTTP {r.status_code}: {r.text[:200]}")
+        try:
+            text = r.json().get("text") or ""
+        except Exception:
+            text = r.text
+        if self.on_call:
+            try:
+                await self.on_call({"purpose": "stt", "task_id": task_id, "model": model, "latency_s": round(time.time() - t0, 2),
+                                    "prompt_tokens": None, "completion_tokens": None, "tool_calls": []})
+            except Exception:
+                pass
+        return text.strip()
+
     async def chat(self, messages: list[dict], tools: list[dict] | None = None, *, temperature: float | None = None,
                    max_tokens: int | None = None, purpose: str = "executor", task_id: str = "", model: str | None = None,
                    no_think: bool = False) -> dict:

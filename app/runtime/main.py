@@ -61,17 +61,48 @@ async def health():
 
 
 # ------------------------------------------------------------------ chat & conversations
+@app.put("/api/upload")
+async def upload(req: Request, name: str = ""):
+    """The chat's ＋ button: the raw file is the request body; it is stored under workspace/uploads/<YYYY-MM>/."""
+    from app.runtime import attachments as AT
+    if int(req.headers.get("content-length") or 0) > AT.UPLOAD_MAX:
+        raise HTTPException(413, f"文件超过 {AT.UPLOAD_MAX // 1024 // 1024} MB (file too large)")
+    data = await req.body()
+    try:
+        info = await asyncio.to_thread(AT.save_upload, WORKSPACE, name, data)
+    except AT.AttachmentError as e:
+        raise HTTPException(400, str(e))
+    await rt.audit("user", "file.upload", resource=info["path"], detail={"size": info["size"], "mime": info["mime"]})
+    return info
+
+
+def _attachments(raw) -> list[dict]:
+    from app.runtime import attachments as AT
+    out = []
+    for x in (raw or [])[:AT.UPLOAD_MAX_FILES]:
+        rel = str((x or {}).get("path") if isinstance(x, dict) else x or "").strip().lstrip("/")
+        fp = os.path.realpath(os.path.join(WORKSPACE, rel))
+        if not rel.startswith("uploads/") or not fp.startswith(os.path.join(WORKSPACE, "uploads") + os.sep) or not os.path.isfile(fp):
+            raise HTTPException(400, f"附件不存在 attachment not found: {rel}")
+        out.append(AT.info(WORKSPACE, fp))
+    return out
+
+
 @app.post("/api/chat")
 async def chat(req: Request):
     b = await req.json()
     text = str(b.get("message", "")).strip()
+    atts = _attachments(b.get("attachments"))
+    if not text and atts:
+        en = rt.store.settings().get("language") == "en"
+        text = "Please look at the attached file(s)." if en else "请看一下附件。"
     if not text:
         raise HTTPException(400, "message is empty")
     cid = b.get("conversation_id")
     if not cid or not rt.store.conv(cid):
         cid = rt.store.create_conv(text[:40])
-    rt.store.add_msg(cid, "user", text)
-    t = await rt.submit(cid, text)
+    rt.store.add_msg(cid, "user", text, meta={"attachments": atts} if atts else None)
+    t = await rt.submit(cid, text, attachments=atts)
     rt.store.db.execute("UPDATE messages SET task_id=? WHERE id=(SELECT MAX(id) FROM messages WHERE conv_id=? AND role='user')", (t["id"], cid))
     await publish({"kind": "conv_update", "conv_id": cid})
     return {"conversation_id": cid, "task_id": t["id"]}
@@ -132,7 +163,7 @@ async def task_action(tid: str, action: str):
     elif action == "retry":
         if t["status"] not in TERMINAL:
             raise HTTPException(409, "task still active")
-        nt = await rt.submit(t["conv_id"], t["goal"], t["source"], t["schedule_id"])
+        nt = await rt.submit(t["conv_id"], t["goal"], t["source"], t["schedule_id"], attachments=t.get("attachments") or None)
         return {"ok": True, "task_id": nt["id"]}
     else:
         raise HTTPException(404, "unknown action")

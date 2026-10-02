@@ -252,7 +252,7 @@ async def internal_send_file(req: Request):
             return {"sent": False, "error": f"读取文件失败 (HTTP {r.status_code})"}
         if len(r.content) > TG_FILE_MAX:
             return {"sent": False, "error": "文件超过 Telegram 的 50 MB 上限 (over Telegram's 50 MB limit)"}
-        await bot.send_document(name, r.content, str(b.get("caption", ""))[:900])
+        await bot.send_document(name, r.content, str(b.get("caption", ""))[:900], str(b.get("mime", "")))
     except Exception as e:
         return {"sent": False, "error": str(e)[:200]}
     store.audit("sentinel", "telegram.send_file", task_id=str(b.get("task_id", "")), resource=name, result="success",
@@ -290,7 +290,11 @@ async def internal_browser_state():
 
 async def _context_for(tool: str, args: dict, task_id: str) -> tuple[dict | None, dict | None]:
     """Ask the broker what a ref points to so the policy can judge the click/type."""
-    if tool in ("browser_click", "browser_type", "browser_select", "browser_upload", "browser_fill_secret"):
+    if tool == "browser_save_media" and not args.get("ref"):
+        st = await actions.broker("GET", "/state", timeout=10)
+        url = next((x.get("url", "") for x in st.get("tasks") or [] if x.get("task_id") == task_id), st.get("url", ""))
+        return None, {"url": url, "title": ""}
+    if tool in ("browser_click", "browser_type", "browser_select", "browser_upload", "browser_fill_secret", "browser_save_media"):
         info = await actions.broker("POST", "/agent/describe", {"task_id": task_id, "ref": args.get("ref", "")}, timeout=20)
         return info, {"url": info.get("page_url", ""), "title": info.get("page_title", "")}
     if tool == "browser_click_at":

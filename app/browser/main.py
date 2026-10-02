@@ -424,6 +424,90 @@ class Broker:
             frame, fx, fy = child, fx - bx, fy - by
         return {"tag": "", "name": "", "frames": frames}
 
+    MEDIA_MAX = 50 * 1024 * 1024
+    MEDIA_TYPES = {"image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif", "image/webp": ".webp", "image/avif": ".avif",
+                   "image/bmp": ".bmp", "video/mp4": ".mp4", "video/webm": ".webm", "video/quicktime": ".mov",
+                   "audio/mpeg": ".mp3", "audio/mp4": ".m4a", "audio/ogg": ".ogg", "audio/wav": ".wav", "audio/x-wav": ".wav"}
+
+    async def save_media(self, task_id: str, page, ref: str = "", url: str = "", name: str = "") -> dict:
+        """Save an image / video / audio from the page into workspace/media/<YYYY-MM>/ (the agent then send_files it).
+        By element ref (img, video, picture, element with a background image) or by its URL. Falls back to a screenshot of
+        the element when the file itself can't be fetched (e.g. blob: images)."""
+        import base64 as _b64
+        loc = None
+        if ref:
+            loc = self.locate(task_id, ref)
+            try:
+                found = await loc.evaluate("""el => {
+                    const pick = e => {
+                      if (!e) return '';
+                      if (e.tagName === 'IMG') return e.currentSrc || e.src || '';
+                      if (e.tagName === 'VIDEO' || e.tagName === 'AUDIO') {
+                        const s = e.currentSrc || e.src || (e.querySelector('source[src]') || {}).src || '';
+                        return s || (e.poster || '');
+                      }
+                      if (e.tagName === 'SOURCE') return e.src || '';
+                      const bg = getComputedStyle(e).backgroundImage || '';
+                      const m = bg.match(/url\(["']?(.*?)["']?\)/);
+                      return m ? new URL(m[1], location.href).href : '';
+                    };
+                    let u = pick(el);
+                    if (!u) { const inner = el.querySelector('img,video,audio,picture img'); u = pick(inner); }
+                    return {url: u, tag: el.tagName.toLowerCase(), alt: (el.alt || el.title || el.getAttribute('aria-label') || '').slice(0, 80)};
+                }""", timeout=5000)
+            except Exception as e:
+                raise HTTPException(409, f"找不到元素 {ref}，请重新获取快照 (element not found): {str(e)[:100]}")
+            url = url or found.get("url") or ""
+            name = name or found.get("alt") or ""
+        url = (url or "").strip()
+        data, mime, how = b"", "", "download"
+        if url.startswith("data:"):
+            m = re.match(r"data:([\w/+.-]+)(;base64)?,(.*)", url, re.S)
+            if m and m.group(2):
+                data, mime = _b64.b64decode(m.group(3)[: self.MEDIA_MAX * 2]), m.group(1).lower()
+        elif url.startswith(("http://", "https://")):
+            ok, why = check_url(url)
+            if not ok:
+                raise HTTPException(403, why)
+            try:
+                resp = await page.context.request.get(url, timeout=45000, max_redirects=5,
+                                                      headers={"Referer": page.url, "Accept": "image/*,video/*,audio/*,*/*;q=0.5"})
+                mime = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
+                if int(resp.headers.get("content-length") or 0) > self.MEDIA_MAX:
+                    raise HTTPException(413, "文件超过 50 MB (file over 50 MB)")
+                if resp.ok:
+                    data = await resp.body()
+                await resp.dispose()
+            except HTTPException:
+                raise
+            except Exception:
+                data = b""
+        if data and mime not in self.MEDIA_TYPES:
+            data = b""                                    # html, svg, scripts… are never saved as media
+        if not data and loc is not None:
+            try:                                          # last resort: what the user sees
+                data, mime, how = await loc.screenshot(type="png", timeout=10000), "image/png", "screenshot"
+            except Exception:
+                data = b""
+        if not data:
+            raise HTTPException(422, "无法保存这个图片/视频（可能是流媒体或受保护内容）(could not save this media — it may be "
+                                     "streamed or protected; try another element or a screenshot)")
+        if len(data) > self.MEDIA_MAX:
+            raise HTTPException(413, "文件超过 50 MB (file over 50 MB)")
+        stem = re.sub(r"[^\w\-() 一-鿿]+", "_", name or os.path.splitext(os.path.basename(urlparse(url).path or ""))[0] or "media")
+        stem = stem.strip("_ ")[:60] or "media"
+        folder = os.path.join(WORKSPACE, "media", time.strftime("%Y-%m"))
+        os.makedirs(folder, exist_ok=True)
+        ext = self.MEDIA_TYPES[mime]
+        dest, n = os.path.join(folder, stem + ext), 1
+        while os.path.exists(dest):
+            n += 1
+            dest = os.path.join(folder, f"{stem}_{n}{ext}")
+        with open(dest, "wb") as f:
+            f.write(data)
+        return {"path": os.path.relpath(dest, WORKSPACE), "mime": mime, "size": len(data), "method": how,
+                "source": url[:300] if not url.startswith("data:") else "data: URL"}
+
     def locate(self, task_id: str, ref: str):
         ref = str(ref).strip().strip("[]")
         m = re.fullmatch(r"(f\d+)?e\d+", ref)
@@ -720,6 +804,9 @@ async def agent_action(action: str, req: Request):
             elif action == "wait":
                 secs = max(1, min(int(body.get("seconds", 5)), 120))
                 await asyncio.sleep(secs)
+            elif action == "save_media":
+                saved = await broker.save_media(task_id, page, str(body.get("ref") or ""), str(body.get("url") or ""),
+                                                str(body.get("name") or ""))
             elif action == "upload":
                 rel = str(body.get("path", ""))
                 full = os.path.realpath(os.path.join(WORKSPACE, rel.lstrip("/")))
@@ -736,6 +823,8 @@ async def agent_action(action: str, req: Request):
             raise
         except Exception as e:
             raise HTTPException(500, f"浏览器错误 browser error: {str(e)[:300]}")
+        if action == "save_media":
+            return {"saved": saved, "url": page.url, "title": await page.title()}
         near = action == "scroll" or bool(body.get("near"))
         snap = await broker.snapshot(task_id, body.get("max_chars", 12000), near=near)
         if action in ("navigate", "click", "snapshot", "back", "wait", "press"):

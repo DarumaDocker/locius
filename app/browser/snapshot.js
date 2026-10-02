@@ -80,7 +80,7 @@
     const nm = ((el.name || '') + ' ' + (el.id || '')).toLowerCase();
     return ty === 'password' || ac.startsWith('cc-') || ac.includes('password') || ac === 'one-time-code' || /(card.?num|cvv|cvc|ssn|passw|otp)/.test(nm);
   };
-  let buf = '';
+  let buf = '', mediaN = 0;
   // prices drawn in pieces (Amazon: "S$ 24 67", others "S$ 24 . 67") -> "S$24.67", so they read (and quote) as one price
   const PRICE_PIECES = /((?:[A-Z]{1,3})?\$|€|£|¥|￥|RM)\s?(\d{1,3}(?:,\d{3})+|\d+)(?:\s*\.\s+|\s+\.\s*|\s+)(\d{2})(?![\d.,%])/g;
   const glue = s => (s || '').replace(PRICE_PIECES, '$1$2.$3');
@@ -105,6 +105,8 @@
     } else if (el.isContentEditable) {
       line += ` value="${cut(el.innerText, 80)}"`;
     }
+    if (el.tagName === 'IMG') line += ' (photo)';
+    if (el.tagName === 'VIDEO') line += ' (video)';
     if (el.getAttribute('aria-checked')) line += ` [${el.getAttribute('aria-checked') === 'true' ? 'checked' : 'unchecked'}]`;
     if (el.getAttribute('aria-expanded')) line += ` [expanded=${el.getAttribute('aria-expanded')}]`;
     if (el.disabled || el.getAttribute('aria-disabled') === 'true') line += ' [disabled]';
@@ -144,6 +146,11 @@
         flush();
         emitEl(el);
         continue;
+      }
+      // photos and videos get a ref too, so the agent can save them (browser_save_media) and send them to the user
+      if ((el.tagName === 'IMG' || el.tagName === 'VIDEO') && mediaN < 40) {
+        const r = el.getBoundingClientRect();
+        if (el.tagName === 'VIDEO' || (r.width >= 100 && r.height >= 100)) { flush(); mediaN++; emitEl(el); continue; }
       }
       const block = /^(H[1-6]|P|LI|TR|DIV|SECTION|ARTICLE|HEADER|FOOTER|NAV|MAIN|ASIDE|FORM|TABLE|UL|OL|DL|DT|DD|BLOCKQUOTE|PRE|LABEL|FIELDSET|LEGEND)$/.test(el.tagName);
       if (/^H[1-6]$/.test(el.tagName)) { flush(); const t = clean(el.innerText); if (t) lines.push('#'.repeat(+el.tagName[1]) + ' ' + cut(t, 160)); if (!el.querySelector(INTERACTIVE)) continue; }

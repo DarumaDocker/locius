@@ -325,6 +325,13 @@ async def _browser(store, tool: str, args: dict, task_id: str) -> dict:
         out = vault.scrub(store, _snap_envelope(store, task_id, snap))
         out["filled"] = f"已填写 filled: {vault.summary_text(vault.item(store, str(args.get('item_id', ''))) or {'label': '?', 'masked': ''}, str(args.get('field', '')))}"
         return out
+    if action == "save_media":
+        res = await broker("POST", "/agent/save_media", payload, timeout=90.0)
+        sv = res.get("saved") or {}
+        return {"saved": sv.get("path"), "mime": sv.get("mime"), "size": sv.get("size"), "method": sv.get("method"),
+                "from_page": res.get("url"),
+                "next": "用 send_file 发给用户（多张一起用 paths），或用 file_look 查看 — send_file it to the user (several at once with "
+                        "paths) or file_look it." + (" (保存的是元素截图 saved as a screenshot of the element)" if sv.get("method") == "screenshot" else "")}
     snap = await broker("POST", f"/agent/{action}", payload, timeout=180.0 if action == "wait" else 90.0)
     out = vault.scrub(store, _snap_envelope(store, task_id, snap))
     if action == "locate" and snap.get("image_b64"):
