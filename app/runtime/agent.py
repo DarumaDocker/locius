@@ -212,7 +212,8 @@ def invented_id_guard(transcript: list[dict], call: dict, known: set | None = No
 
 # Reading the same mail / page / file again while its full result is still in the context only makes the context (and
 # every following model call) bigger: answer with a pointer instead. A compressed or failed earlier result is re-read.
-REREAD_TOOLS = re.compile(r"^(gmail_get_message|gmail_get_thread|notion_get_page|notion_read|files_read|web_read|browser_read)")
+REREAD_TOOLS = re.compile(r"^(gmail_get_message|gmail_get_thread|notion_get_page|notion_read|files_read|web_read|browser_read|"
+                          r"browser_search|gmail_search|gmail_find_receipts|gmail_read_amounts)$")
 COMPRESSED_MARK = "older result compressed"
 
 
@@ -238,8 +239,22 @@ def reread_guard(transcript: list[dict], call: dict) -> str | None:
                 return (f"已读取过 — 这个内容在上文调用 {m['tool_call_id']} 的结果里，完整保留着，没有再读一次。请直接使用它；"
                         "如果需要的东西都已经有了，就继续下一步或写最终回答。"
                         f" Already read: the full result is above (call {m['tool_call_id']}); use it instead of reading again. "
-                        "If you have what you need, move on or write the final answer.")
+                        "If you have what you need, move on or write the final answer." + _next_step_hint(name, call, c))
     return None
+
+
+def _next_step_hint(name: str, call: dict, earlier: str) -> str:
+    """A concrete, copyable next call for a model that keeps repeating a search (2026-10-04 TC27, M3-21)."""
+    if name == "browser_search":
+        urls = list(dict.fromkeys(u.rstrip('.,)"\'') for u in re.findall(r"https?://[^\s\"'<>]+", earlier)))[:3]
+        if urls:
+            return ("\n下一步 Next: 打开这些结果页读取详情 open the result pages: browser_read(urls=" + json.dumps(urls) + ")"
+                    "，或者换一个不同的搜索词 or search with DIFFERENT words.")
+    if name == "gmail_search":
+        alts = search_alternatives(str((call.get("args") or {}).get("query") or ""))
+        return ("\n下一步 Next: 用结果里的 id 调用 gmail_read_amounts / gmail_get_message；或换查询 or try: " + " | ".join(alts)
+                if alts else "\n下一步 Next: 用结果里的 id 调用 gmail_read_amounts / gmail_get_message (ids from the result above).")
+    return ""
 
 
 # Dead-end sources: a web host that failed (error, bot wall, refused repeat) HOST_FAIL_MAX times in one task is

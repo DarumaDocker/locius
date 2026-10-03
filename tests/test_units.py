@@ -1231,3 +1231,12 @@ def test_find_receipts(monkeypatch):
     assert any("in:anywhere from:uber.com after:2026/09/01" == q for q in g.queries), g.queries
     out = A.find_receipts(None, "t", {})
     assert out["count"] == 0 and "hint" in out and "newer_than:30d" in g.queries[-1]
+
+
+def test_repeated_web_search_points_to_results():
+    from app.runtime.agent import reread_guard as g
+    tr = [{"role": "assistant", "content": "", "tool_calls": [{"id": "a", "type": "function", "function": {
+        "name": "browser_search", "arguments": json.dumps({"query": "tokyo hotel"})}}]},
+          {"role": "tool", "tool_call_id": "a", "content": "1. Hotel A https://a.example/h1\n2. Hotel B https://b.example/h2"}]
+    msg = g(tr, {"id": "b", "name": "browser_search", "args": {"query": "tokyo hotel"}})
+    assert "browser_read" in msg and "https://a.example/h1" in msg
