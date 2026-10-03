@@ -25,6 +25,7 @@ spec:
 
     Runs on the local models served by your Olares by default — any OpenAI-compatible endpoint works. English and 中文 interface.
   upgradeDescription: |
+    0.2.36: More accurate money math: NPV, IRR, true APR of instalment plans and payback periods; yearly deposits; warnings when a rate looks like a fraction; coupon stacking and stated assumptions.
     0.2.35: Email: besides Gmail, connect Outlook / Hotmail (Microsoft sign-in, OAuth 2.0), Yahoo, iCloud, QQ Mail, NetEase 163 / 126, Zoho, AOL or any IMAP / SMTP mailbox; the same search syntax works everywhere.
     0.2.34: Chinese requests for stories, posts and messages run fully in Chinese; Singapore tickers by name; one-day Gantt items; clearer data_query errors
     0.2.33: Chinese text requests get an explicit output-language note; card or ID numbers are pointed to the vault, never stored in memory
@@ -32,4 +33,3 @@ spec:
     0.2.31: Answers written mid-task are no longer lost behind a short 'see above' reply; plans skip services that aren't connected
     0.2.30: Translations and texts you ask for in another language stay in that language even when the app is in English
     0.2.29: data_query: derived columns, column-to-column filters, having; invest() for regular saving; optional reply-in-your-language setting; web-call budget
-    0.2.28: New data_query tool: exact counts, sums, averages, groups, pivots, percentiles, outliers and trends from CSV, Excel and logs

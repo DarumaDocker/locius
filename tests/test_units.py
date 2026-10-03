@@ -1109,3 +1109,18 @@ def test_generic_search_utf8_fallback(monkeypatch):
     assert len(res) == 2
     f = g.folders(fake)
     assert f["drafts"] == '"&g0l6P3ux-"' and f["sent"] == '"Sent Messages"' and f["_display"]['"&g0l6P3ux-"'] == "草稿箱"
+
+
+def test_calc_finance_helpers():
+    from app.common import calc
+    assert round(calc.evaluate("npv(6, [-50000, 12000, 12000, 12000, 12000, 12000])"), 2) == 548.37
+    assert round(calc.evaluate("irr([-50000, 12000, 12000, 12000, 12000, 12000])"), 2) == 6.40
+    a = calc.evaluate("apr(3000, 265, 12)")
+    assert a["apr_pct"] == 10.896 and a["effective_pct"] == 11.457 and a["total_interest"] == 180
+    assert calc.evaluate("payback(4500, 800)") == 5.625
+    v = calc.evaluate("invest(1358.5, 4, 10, 0, 1)")                  # yearly deposits
+    assert v["balance"] == 16310.3 and "note" not in v
+    v = calc.evaluate("invest(100, 0.04, 10)")                         # 0.04 meant 4% -> warn, don't guess
+    assert "call again with 4" in v["note"] and "NOTE" in calc.fmt(v)
+    assert round(calc.evaluate("fv(4, 10, 1358.5)"), 1) == 16310.3     # 4 read as 4%
+    assert round(calc.evaluate("pmt(0.035/12, 240, -300000)"), 2) == 1739.88

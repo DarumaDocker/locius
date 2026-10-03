@@ -254,12 +254,15 @@ LOCAL_TOOLS = [
         ["output"]),
     _fn("calculate", "精确计算（不要心算）：贷款月供和还款明细、利息、复利、增长率、汇率换算、AA 分摊、百分比、合计和平均。"
         "表达式支持 + - * / ** % 和 round、min、max、sum、mean、median、sqrt、log；金融函数：pmt(月利率, 期数, 本金)、"
-        "loan(本金, 年利率%, 年数, 明细行数) 返回月供+总利息+还款明细、invest(每月投入, 年化收益%, 年数, 初始本金) 返回每年末余额/累计投入/收益（定投、储蓄）、"
-        "fv(利率, 期数, 每期存入, 现值)、cagr(起始, 结束, 年数)。"
+        "loan(本金, 年利率%, 年数, 明细行数) 返回月供+总利息+还款明细、invest(每期投入, 年化收益%, 年数, 初始本金, 每年期数) 返回每年末余额/累计投入/收益（定投、储蓄；每年存一次用 per_year=1）、"
+        "fv(每期利率, 期数, 每期存入, 现值)、cagr(起始, 结束, 年数)、npv(折现率%, [现金流…]) 净现值、irr([现金流…]) 内部收益率%、"
+        "apr(本金, 每期还款, 期数) 分期/贷款的真实年利率、payback(成本, 每期节省) 回本期数。年利率一律写百分数（4% 写 4）。"
         " Exact arithmetic — never compute figures the user relies on in your head. Operators + - * / ** %, functions round "
         "min max sum mean median sqrt log, finance: pmt(rate, nper, pv), loan(principal, annual_rate_pct, years, rows) → "
-        "payment, totals and amortization rows, invest(monthly, annual_rate_pct, years, initial) → year-by-year balance, money "
-        "put in and gain (regular saving / investing), fv(rate, nper, pmt, pv), cagr(start, end, years).",
+        "payment, totals and amortization rows, invest(deposit, annual_rate_pct, years, initial, per_year=12) → year-by-year balance, money "
+        "put in and gain (regular saving / investing; per_year=1 for one deposit a year), fv(rate_per_period, nper, pmt, pv), cagr(start, end, years), "
+        "npv(rate_pct, [flow0_now, flow1, …]), irr([flows]) → % per period, apr(principal, payment, nper) → true APR and effective "
+        "rate of an instalment plan, payback(cost, saving_per_period). Annual rates are percentages: 4% is 4, not 0.04.",
         {"expressions": {"type": "array", "items": S, "description": "要算的表达式 expressions, e.g. [\"loan(3000000, 3.5, 25, 12)\", \"283.8/4\"]"},
          "variables": {"type": "object", "description": "可选：变量 optional named values (may be expressions), e.g. {\"r\": \"0.035/12\"}"}},
         ["expressions"]),
