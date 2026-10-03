@@ -1178,3 +1178,10 @@ def test_invented_id_guard_and_money_lines():
     assert g(tr, {"id": "x", "name": "gmail_read_amounts", "args": {"message_ids": ["g2:1878038399524851319", "999999999999"]}}) is None
     assert g(tr, {"id": "x", "name": "gmail_search", "args": {"query": "x"}}) is None
     assert money_lines("Thanks\nTotal\nHK$101.31\nTrip fare HK$95.00\nDue date: 10 October 2026") == ["Total HK$101.31", "Trip fare HK$95.00"]
+
+
+def test_normalize_query():
+    from app.sentinel.actions import normalize_query as n
+    assert n("x newer_than:2026-08-03") == ("x after:2026/08/03", True)
+    assert n("after:2026-9-1 before:2026.10.01") == ("after:2026/9/1 before:2026/10/01", True)
+    assert n("newer_than:30d from:grab.com") == ("newer_than:30d from:grab.com", False)

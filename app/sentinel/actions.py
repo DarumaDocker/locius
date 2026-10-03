@@ -119,6 +119,15 @@ def compact_message(m: dict, multi: bool = True) -> dict:
     return out
 
 
+def normalize_query(q: str) -> tuple[str, bool]:
+    """Fix the date forms models get wrong: newer_than:2026-08-03 → after:2026/08/03, after:2026-08-03 → after:2026/08/03."""
+    orig = q
+    q = re.sub(r"\bnewer_than:(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})\b", r"after:\1/\2/\3", q)
+    q = re.sub(r"\bolder_than:(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})\b", r"before:\1/\2/\3", q)
+    q = re.sub(r"\b(after|before):(\d{4})[-.](\d{1,2})[-.](\d{1,2})\b", r"\1:\2/\3/\4", q)
+    return q, q != orig
+
+
 MAX_AMOUNT_READS = 40
 _MONEY = re.compile(r"(?:S\$|SGD|US\$|USD|HK\$|HKD|A\$|AUD|NT\$|RM|MYR|CHF|EUR|GBP|JPY|CNY|RMB|THB|IDR|INR|KRW|"
                     r"[$€£¥₩฿₹]|元|円)\s?-?\d[\d,]*(?:\.\d{1,2})?|\d[\d,]*(?:\.\d{1,2})?\s?(?:SGD|USD|HKD|CHF|EUR|GBP|JPY|CNY|"
@@ -299,9 +308,10 @@ def _gmail_sync(store, tool: str, args: dict, task_id: str) -> dict:
             if not clients:
                 raise ActionError("邮箱尚未连接 (no mailbox connected)")
             n = max(1, min(int(args.get("max_results") or 10), MAX_SEARCH))
+            query, fixed = normalize_query(str(args.get("query", "")))
             items, more = [], []
             for g in clients:
-                found = g.search(str(args.get("query", "")), n)
+                found = g.search(query, n)
                 if len(found) >= n:
                     more.append(g.email)
                 items += [_tag(m, g) for m in found]
@@ -318,6 +328,14 @@ def _gmail_sync(store, tool: str, args: dict, task_id: str) -> dict:
                 out["more_results"] = ("Only the newest results were returned for " + ", ".join(more) + ". For a complete "
                                        "count or total, search again with a higher max_results (up to 100) or split the "
                                        "period with after:/before: dates.")
+            if fixed:
+                out["query_used"] = query
+            if not items:
+                out["hint"] = ("0 results. Check the query syntax: dates are after:YYYY/MM/DD before:YYYY/MM/DD or newer_than:30d; "
+                               "try fewer terms, or drop in:inbox to search all mail.")
+            elif len(items) >= 100:
+                out["hint"] = ("Broad query — many results. For counts or totals run narrower searches (one sender per search, "
+                               "e.g. from:anthropic.com newer_than:60d) and pass their ids to gmail_read_amounts.")
             notes = sorted({n for g in clients for n in getattr(g, "search_notes", []) or []})
             if notes:
                 out["search_note"] = "; ".join(notes)

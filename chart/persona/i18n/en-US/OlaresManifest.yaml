@@ -25,6 +25,7 @@ spec:
 
     Runs on the local models served by your Olares by default — any OpenAI-compatible endpoint works. English and 中文 interface.
   upgradeDescription: |
+    0.2.39: Mail search fixes wrong date formats and hints how to narrow broad or empty searches
     0.2.38: Batch amount reading from receipts (gmail_read_amounts), safer context handling (no more 'context exceeded' failures), no invented email ids, smarter re-reads, better follow-up and scam detection
     0.2.37: Answers with figures no tool computed are recomputed once; email search returns up to 100 compact results per mailbox (counts and totals no longer miss emails); amounts in several currencies are converted before adding up.
     0.2.36: More accurate money math: NPV, IRR, true APR of instalment plans and payback periods; yearly deposits; warnings when a rate looks like a fraction; coupon stacking and stated assumptions.
@@ -32,4 +33,3 @@ spec:
     0.2.34: Chinese requests for stories, posts and messages run fully in Chinese; Singapore tickers by name; one-day Gantt items; clearer data_query errors
     0.2.33: Chinese text requests get an explicit output-language note; card or ID numbers are pointed to the vault, never stored in memory
     0.2.32: Text you ask for in Chinese (posts, poems, toasts, messages) is written in Chinese even with the app in English; file writes report word counts; fewer 'runtime unavailable' blips
-    0.2.31: Answers written mid-task are no longer lost behind a short 'see above' reply; plans skip services that aren't connected
