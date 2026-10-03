@@ -1240,3 +1240,17 @@ def test_repeated_web_search_points_to_results():
           {"role": "tool", "tool_call_id": "a", "content": "1. Hotel A https://a.example/h1\n2. Hotel B https://b.example/h2"}]
     msg = g(tr, {"id": "b", "name": "browser_search", "args": {"query": "tokyo hotel"}})
     assert "browser_read" in msg and "https://a.example/h1" in msg
+
+
+def test_forget_removes_episodes_that_quote_the_fact():
+    from app.runtime.store import RStore
+    st = RStore(tempfile.mkdtemp())
+    fid = st.add_fact("每月打车预算 300 新元（SGD）", "preference", "", source="user-request:t", confidence=0.95)
+    fid = fid if isinstance(fid, str) else (fid or {}).get("id") if isinstance(fid, dict) else None
+    if not fid:
+        fid = st.facts(10)[0]["id"]
+    st.add_episode("t1", "[测试] 请记住：我每月打车预算 300 新元 → 已记住：打车 300 新元/月")
+    st.add_episode("t2", "[测试] 买一双徒步鞋，预算不超过 S$250 → 已筛选 3 双")
+    st.delete_fact(fid)
+    left = [e["summary"] for e in st.episodes(10)]
+    assert len(left) == 1 and "徒步鞋" in left[0]

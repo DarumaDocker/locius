@@ -128,6 +128,21 @@ def looks_sensitive(text: str) -> bool:
     return bool(_SENSITIVE.search(text or ""))
 
 
+def mentions_fact(fact: str, text: str) -> bool:
+    """Whether `text` restates `fact`: its numbers plus at least two of its words (CJK bigrams or latin words)."""
+    import re as _re
+    nums = set(_re.findall(r"\d[\d,.]*\d|\d{2,}", fact))
+    toks = set()
+    for run in _re.findall(r"[\u4e00-\u9fff]+", fact):
+        toks |= {run[i:i + 2] for i in range(len(run) - 1)}
+    toks |= {w.lower() for w in _re.findall(r"[A-Za-z]{4,}", fact)}
+    low = text.lower()
+    hits = sum(1 for t in toks if t in low)
+    if nums:
+        return any(n in text for n in nums) and hits >= 2
+    return bool(toks) and hits >= max(3, len(toks) // 2)
+
+
 class RStore:
     def __init__(self, data_dir: str):
         self.db = DB(os.path.join(data_dir, "runtime.db"))
@@ -307,8 +322,15 @@ class RStore:
         return self.fact(fid)
 
     def delete_fact(self, fid: str):
+        row = self.db.one("SELECT fact FROM facts WHERE id=?", (fid,))
         self.db.execute("DELETE FROM facts WHERE id=?", (fid,))
         self.db.execute("DELETE FROM facts_fts WHERE id=?", (fid,))
+        if row and row.get("fact"):
+            # 2026-10-04 M4-21: after "forget my taxi budget" the agent still answered "300" from a past-task summary —
+            # a forgotten fact must not live on in the episodes that quote it
+            for e in self.db.all("SELECT id, summary FROM episodes"):
+                if mentions_fact(row["fact"], e["summary"] or ""):
+                    self.db.execute("DELETE FROM episodes WHERE id=?", (e["id"],))
 
     def _live(self, r: dict) -> bool:
         if r.get("expires_at") and r["expires_at"] < now_ts():
