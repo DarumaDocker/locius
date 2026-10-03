@@ -370,7 +370,7 @@ class Gmail:
         return msg
 
     def search(self, query: str, max_results: int = 10) -> list[dict]:
-        max_results = max(1, min(int(max_results or 10), 30))
+        max_results = max(1, min(int(max_results or 10), 100))
         m = self._imap()
         try:
             if not self._gm():

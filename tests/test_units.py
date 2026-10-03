@@ -1124,3 +1124,15 @@ def test_calc_finance_helpers():
     assert "call again with 4" in v["note"] and "NOTE" in calc.fmt(v)
     assert round(calc.evaluate("fv(4, 10, 1358.5)"), 1) == 16310.3     # 4 read as 4%
     assert round(calc.evaluate("pmt(0.035/12, 240, -300000)"), 2) == 1739.88
+
+
+def test_ungrounded_numbers():
+    from app.runtime.agent import ungrounded_numbers as u
+    tr = [{"role": "user", "content": "每天一杯 6.5 新元的咖啡"},
+          {"role": "assistant", "content": "", "tool_calls": [{"id": "1", "type": "function", "function": {"name": "calculate", "arguments": "{}"}}]},
+          {"role": "tool", "content": "6.5*365 - 6.5*3*52 = 1,358.5\ninvest(1358.5, 4, 10, 0, 1) = final balance 16,310.30"}]
+    assert u(tr, "一年省 $1,358.50，10 年后约 $16,310.30（约 1.63 万，约 16,300）。2026-10-03") == []
+    assert u(tr, "10 年后约 **$17,016.64**") == ["17,016.64"]
+    tr2 = [tr[0], {"role": "assistant", "content": "", "tool_calls": [{"id": "1", "type": "function", "function": {"name": "gmail_search", "arguments": "{}"}}]},
+           {"role": "tool", "content": "x"}]
+    assert u(tr2, "total 12,345.67") == []          # no calculation in this run -> not checked

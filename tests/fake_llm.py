@@ -315,6 +315,12 @@ async def chat(req: Request):
         if n in (2, 3):   # the second send of the same file is skipped (it is already in the chat)
             return reply("", [tc("send_file", {"path": "reports/summary.docx"})])
         return reply("DOCX RESULTS:\n" + "\n=====\n".join(str(m["content"])[:300] for m in tools_done))
+    if "NUMCHECK" in goal:   # 2026-10-03 M1-06: an answer with figures no tool produced is sent back once
+        if n == 0:
+            return reply("", [tc("calculate", {"expressions": ["6.5*365 - 6.5*3*52", "invest(1358.5, 4, 10, 0, 1)"]})])
+        if "do not appear in any tool result" in allu or "没有出现在任何工具结果" in allu:
+            return reply("FIXED: saves 1,358.50 a year; after 10 years 16,310.30")
+        return reply("Saves 1,358.50 a year; after 10 years about 17,016.64")
     if "WEBLOOP" in goal:   # 2026-10-02 R4-04b: endless searching for a cleaner product list → web-budget nudge
         if "web budget" in allu:
             return reply(f"WRAPPED after {n} calls")

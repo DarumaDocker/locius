@@ -25,7 +25,7 @@ TOOLS: dict[str, dict] = {
                        "On non-Gmail mailboxes the query is translated to IMAP: no folder = Inbox + Archive, in:sent / in:anywhere / "
                        "label:<folder> pick folders, category:* is approximated, and the result may include `search_note`.",
         "parameters": _obj({"query": {"type": S, "description": "Gmail-style search query"},
-                            "max_results": {"type": "integer", "description": "1-30 per mailbox, default 10"},
+                            "max_results": {"type": "integer", "description": "1-100 per mailbox, default 10. Use 50-100 when counting or totalling (receipts, trips, bills); results are compact and snippets often contain the amount"},
                             "account": {"type": S, "description": "optional: email address of one mailbox; default all"}}, ["query"]),
     },
     "gmail_get_message": {

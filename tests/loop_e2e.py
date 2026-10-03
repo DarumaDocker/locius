@@ -67,6 +67,17 @@ while time.time() - t0 < 120:
     time.sleep(0.5)
 check("web budget nudge ends a search loop", t["status"] == "COMPLETED" and (t.get("result") or "").startswith("WRAPPED after 18"),
       (t["status"], t.get("result")))
+# 0.2.37: figures that no tool produced are sent back for recomputation once
+r = c.post(B + "/api/chat", json={"message": "NUMCHECK coffee savings"}, headers=H).json()
+t0 = time.time()
+while time.time() - t0 < 60:
+    t = c.get(f"{B}/api/tasks/{r['task_id']}").json()
+    if t["status"] in ("COMPLETED", "FAILED", "CANCELLED"):
+        break
+    time.sleep(0.5)
+ev = [e for e in t.get("events", []) if e["type"] == "number_check"]
+check("made-up figures sent back once", t["status"] == "COMPLETED" and (t.get("result") or "").startswith("FIXED")
+      and ev and ev[0]["data"]["unsupported"] == ["17,016.64"], (t["status"], t.get("result"), ev))
 c.delete(f"{B}/api/schedules/{sid}", headers=H)
 c.put(B + "/api/settings", json={"max_steps": s0.get("max_steps", 30)}, headers=H)
 print("ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}")

@@ -34,6 +34,7 @@ SKILLS_DIR = os.environ.get("SKILLS_DIR", os.path.join(os.path.dirname(os.path.d
 TERMINAL = {"COMPLETED", "FAILED", "CANCELLED"}
 WAITING = {"WAITING_APPROVAL", "WAITING_EXTERNAL", "PAUSED"}
 RESULT_LIMIT = 9000
+SEARCH_RESULT_LIMIT = 30000   # gmail_search hits are compact (~250 chars); 100+ of them must fit for counts and totals
 SEND_FILE_MAX = 200 * 1024 * 1024    # chat download; Telegram's own bot limit (50 MB) is checked by Sentinel
 SUBAGENT_TOOLS = {"gmail_search", "gmail_get_message", "gmail_get_thread", "browser_navigate", "browser_snapshot",
                   "browser_search", "browser_read",
@@ -937,6 +938,7 @@ class Runtime:
         stuck = 0          # turns in a row where every call was refused by a loop guard
         gave_up = False    # set when the agent keeps going round in circles: it must answer now, without tools
         nudged = False
+        numbers_checked = False
         while True:
             if task_id in self.cancel_flags:
                 return
@@ -1067,6 +1069,23 @@ class Runtime:
                         if st.get("status") == "done"]
                 final = prompts.L(agent_lang(s), "（任务已结束，但模型没有返回文字说明。）" + ("已完成：" + "；".join(map(str, done)) if done else ""),
                                   "(The task ended but the model wrote no answer.)" + (" Done: " + "; ".join(map(str, done)) if done else ""))
+            if final and not numbers_checked and not force_final and not timed_out and steps < max_steps - 1:
+                numbers_checked = True
+                bad = ungrounded_numbers(transcript, final, t["goal"])
+                if bad:
+                    # 2026-10-03 M1-06: calculate returned the right building blocks, the answer then carried a
+                    # hand-made table whose balances came from nowhere (17,016.64 instead of 16,962.71)
+                    await self.event(task_id, "number_check", {"unsupported": bad[:10]})
+                    transcript.append({"role": "assistant", "content": final})
+                    transcript.append({"role": "user", "content": prompts.L(
+                        agent_lang(s),
+                        "（系统）你回答里的这些数字没有出现在任何工具结果里：" + "、".join(bad[:10]) + "。"
+                        "请用 calculate（表格数据用 data_query）把它们重新算一遍——如果之前某个工具结果看起来不对，就改正输入再算——"
+                        "然后重新写完整的最终回答，只使用工具算出的数字。",
+                        "(System) These figures in your answer do not appear in any tool result: " + ", ".join(bad[:10]) + ". "
+                        "Recompute them with calculate (data_query for table data) — if an earlier result looked wrong, fix the "
+                        "inputs — then write the complete final answer again using only figures the tools produced.")})
+                    continue
             final = merge_stranded_answer(transcript, final)
             if agent_lang(s) == "en" and prompts.cjk_share(final) > 0.5 and not prompts.wants_cjk_output(t["goal"]):
                 final = await self._rewrite_in_english(task_id, transcript, final)
@@ -1496,7 +1515,8 @@ class Runtime:
                 warn = ""
                 if isinstance(body, dict) and body.get("injection_warning"):
                     warn = f" injection_warning=\"{','.join(body['injection_warning'])}\""
-                return f"<untrusted_content source=\"{truncate(str(src), 120)}\"{warn}>\n{truncate(txt, RESULT_LIMIT)}\n</untrusted_content>"
+                limit = SEARCH_RESULT_LIMIT if name == "gmail_search" else RESULT_LIMIT
+                return f"<untrusted_content source=\"{truncate(str(src), 120)}\"{warn}>\n{truncate(txt, limit)}\n</untrusted_content>"
             return truncate(txt, RESULT_LIMIT)
         if st == "denied":
             return (f"DENIED by Sentinel: {res.get('reason') or res.get('error')}. "
@@ -2398,6 +2418,53 @@ def merge_stranded_answer(transcript: list[dict], final: str) -> str:
         if len(txt) >= 300 and txt not in f:
             return txt + "\n\n" + f
     return final
+
+
+_NUM = re.compile(r"(?<![\w.\-/:])(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+\.\d+|\d{3,})(\s*万)?(?![\w\-/:]|\.\d)")
+_DATEISH = re.compile(r"\d{4}[-/.年]\d{1,2}|\d{1,2}[:：]\d{2}")
+CALC_TOOLS = {"calculate", "data_query"}
+
+
+def _num(tok: str, wan: str | None) -> float:
+    v = float(tok.replace(",", ""))
+    return v * 10000 if wan else v
+
+
+def ungrounded_numbers(transcript: list[dict], final: str, goal: str = "") -> list[str]:
+    """Figures in a computed answer that no tool result (or the request itself) contains — the model made them up.
+    Only for tasks that used calculate / data_query since the last user turn; years, dates, times and small whole
+    numbers are ignored; a figure counts as supported when it matches a source number to the precision it is written
+    with (or within 0.1%, for rounded figures like "约 16,300")."""
+    run: list[dict] = []
+    for m in reversed(transcript):
+        if m.get("role") == "user" and not str(m.get("content") or "").startswith(("(System)", "（系统）")):
+            run.append(m)
+            break
+        run.append(m)
+    used = {((c.get("function") or {}).get("name")) for m in run for c in (m.get("tool_calls") or [])}
+    if not used & CALC_TOOLS:
+        return []
+    src_text = str(goal or "") + "\n" + "\n".join(str(m.get("content") or "") for m in transcript
+                                                 if m.get("role") in ("tool", "user", "system"))
+    src = [_num(a, b) for a, b in _NUM.findall(src_text)]
+    src += [float(x) for x in re.findall(r"(?<![\d.])\d{1,2}(?:\.\d+)?(?![\d.])", src_text)]
+    text = _DATEISH.sub(" ", str(final or ""))
+    bad: list[str] = []
+    for m in _NUM.finditer(text):
+        tok, wan = m.group(1), m.group(2)
+        v = _num(tok, wan)
+        if not wan and "." not in tok and v < 1000 or (not wan and "." not in tok and 1900 <= v <= 2100 and "," not in tok):
+            continue
+        dec = len(tok.split(".")[1]) if "." in tok else 0
+        tol = 0.5 * 10 ** (-dec) * (10000 if wan else 1)
+        if any(abs(v - x) <= max(tol, 0.001 * abs(x)) for x in src):
+            continue
+        if any(abs(v + x) <= max(tol, 0.001 * abs(x)) for x in src):     # sign shown differently
+            continue
+        lbl = tok + (wan or "")
+        if lbl not in bad:
+            bad.append(lbl)
+    return bad
 
 
 _TASK_LANG: contextvars.ContextVar[str] = contextvars.ContextVar("omuse_task_lang", default="")
