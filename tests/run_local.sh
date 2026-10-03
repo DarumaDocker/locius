@@ -13,7 +13,8 @@ RUNTIME_DATA=$T/data PERSONA_MODEL_URL=http://127.0.0.1:8090/v1 PERSONA_MODEL=fa
 python3 -m uvicorn tests.fake_telegram:app --port 8091 >$T/tg.log 2>&1 &
 python3 -m uvicorn tests.fake_mcp:app --port 8093 >$T/mcp.log 2>&1 &
 python3 -m uvicorn tests.fake_apps:app --port 8094 >$T/apps.log 2>&1 &
+python3 -m uvicorn tests.fake_dial:app --port 8096 >$T/dial.log 2>&1 &
 env -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy python3 -m uvicorn tests.fake_voice:app --port 8095 >$T/voice.log 2>&1 &
-TELNYX_API=http://127.0.0.1:8095 OPENAI_API=http://127.0.0.1:8095 OPENAI_REALTIME_URL=ws://127.0.0.1:8095/v1/realtime VOICE_PORT=8083 VOICE_ALLOW_HTTP=1 NOTION_API=http://127.0.0.1:8094 SLACK_API=http://127.0.0.1:8094/api GOOGLE_AUTH_URL=http://127.0.0.1:8094/g/auth GOOGLE_TOKEN_URL=http://127.0.0.1:8094/g/token GOOGLE_USERINFO_URL=http://127.0.0.1:8094/g/userinfo GCAL_API=http://127.0.0.1:8094/cal TELEGRAM_API=http://127.0.0.1:8091 MARKET_DATA_HOSTS=http://127.0.0.1:8094/yahoo1,http://127.0.0.1:8094/yahoo2 SENTINEL_DATA=$T/sdata python3 -m uvicorn app.sentinel.main:app --port 8080 >$T/sentinel.log 2>&1 &
+DIALMCP_URL=http://127.0.0.1:8096/mcp TELNYX_API=http://127.0.0.1:8095 OPENAI_API=http://127.0.0.1:8095 OPENAI_REALTIME_URL=ws://127.0.0.1:8095/v1/realtime VOICE_PORT=8083 VOICE_ALLOW_HTTP=1 NOTION_API=http://127.0.0.1:8094 SLACK_API=http://127.0.0.1:8094/api GOOGLE_AUTH_URL=http://127.0.0.1:8094/g/auth GOOGLE_TOKEN_URL=http://127.0.0.1:8094/g/token GOOGLE_USERINFO_URL=http://127.0.0.1:8094/g/userinfo GCAL_API=http://127.0.0.1:8094/cal TELEGRAM_API=http://127.0.0.1:8091 MARKET_DATA_HOSTS=http://127.0.0.1:8094/yahoo1,http://127.0.0.1:8094/yahoo2 SENTINEL_DATA=$T/sdata python3 -m uvicorn app.sentinel.main:app --port 8080 >$T/sentinel.log 2>&1 &
 sleep 6
 for p in 8080 8081 8082 8090 8091 8093 8094; do curl -s --noproxy '*' -o /dev/null -w "$p %{http_code}\n" http://127.0.0.1:$p/ ; done

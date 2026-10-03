@@ -394,11 +394,14 @@ TOOLS.update({
                        "you're calling, what to ask/request, what counts as done, and what to do if they can't help. Put "
                        "everything the AI may tell them (name, booking/order number, dates…) in `may_share` — it can't share "
                        "anything else. Returns a call_id right away; then call phone_call_status to wait for the transcript "
-                       "and outcome. Use full international numbers (+65…, +1…).",
+                       "and outcome. Use full international numbers (+65…, +1…). Which line places it is shown under "
+                       "Connections: DialMCP calls US/Canadian (+1) numbers from the user's own number, only 8:00–21:00 at the "
+                       "callee's local time, max 10 minutes, recorded, and returns a listen_url to share with the user.",
         "parameters": _obj({"to": {"type": S, "description": "number to call, e.g. +6562345678"},
                             "purpose": {"type": S, "description": "complete brief for the voice AI"},
                             "may_share": {"type": S, "description": "facts it may tell them, e.g. 'Name: Liang Lu; order #123'"},
                             "language": {"type": S, "description": "e.g. English, 中文, 日本語 (default: match the other side)"},
+                            "callee_name": {"type": S, "description": "who you are calling, e.g. 'Zuni Café' (optional)"},
                             "max_minutes": {"type": "integer", "description": "hard limit, default and max set in Connections"}},
                            ["to", "purpose"]),
     },

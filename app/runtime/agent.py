@@ -46,7 +46,8 @@ SUBAGENT_TOOLS = {"gmail_search", "gmail_get_message", "gmail_get_thread", "gmai
 REPEAT_STREAK = 2
 REPEAT_TOTAL = 3
 PLAN_STREAK = 3   # update_plan calls in a row (with nothing else between) before the next one is refused
-REPEAT_STREAK_OK = {"browser_scroll", "browser_press", "browser_wait", "browser_click", "browser_back", "update_plan"}
+REPEAT_STREAK_OK = {"browser_scroll", "browser_press", "browser_wait", "browser_click", "browser_back", "update_plan",
+                    "phone_call_status"}   # polling a live call is expected to repeat
 REPEAT_READ = re.compile(r"navigate|search|read|list|_get|fetch|query")
 
 

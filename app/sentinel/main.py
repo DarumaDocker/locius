@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.common.util import VERSION, token_ok, truncate
@@ -28,6 +28,7 @@ from app.sentinel.policy import ALLOW, ASK, DENY, PER_USE_TOOLS, decide
 from app.sentinel.store import Store
 from app.sentinel.telegram_bot import TelegramBot
 from app.sentinel import phone
+from app.sentinel import dialmcp, mcp_oauth
 from app.sentinel import vault
 
 SDATA = os.environ.get("SENTINEL_DATA", "/sdata")
@@ -178,6 +179,7 @@ async def catalog():
                         "workspace": c["config"].get("workspace") or c["config"].get("team") or "" if name in ("notion", "slack") else "",
                         "account": c["config"].get("email", "") if name in ("gmail", "calendar") else "",
                         "time_zone": c["config"].get("time_zone", "") if name == "calendar" else "",
+                        "lines": phone.lines_summary(store) if name == "phone" and ready else "",
                         "accounts": [a["email"] for a in sorted(mailboxes.ready_accounts(store), key=lambda a: a["id"] != mailboxes.default_id(store))] if name == "gmail" else [],
                         "providers": {a["email"]: mailproviders.label(a["provider"]) for a in mailboxes.ready_accounts(store)} if name == "gmail" else {}}
     status["mcp"] = mcp_hub.status(store)
@@ -393,10 +395,12 @@ async def _summary(tool: str, args: dict, elem: dict | None, page: dict | None) 
         s["body"] = args.get("body", "")
     elif tool == "phone_call":
         cfg = phone.config(store)
-        n, why = phone.check_number(str(args.get("to", "")), cfg)
-        mins = max(1, min(int(args.get("max_minutes") or cfg["max_minutes"]), cfg["max_minutes"]))
+        n, line, why = phone.check_call(store, str(args.get("to", "")), cfg)
+        mins = max(1, min(int(args.get("max_minutes") or cfg["max_minutes"]), cfg["max_minutes"],
+                          10 if line == "dialmcp" else phone.MAX_MINUTES_CAP))
         s["title"] = "打电话 Phone call"
-        s["fields"] = [["拨打 To", n or str(args.get("to", ""))], ["来电显示 From", cfg["from_number"]],
+        s["fields"] = [["拨打 To", n or str(args.get("to", ""))], ["来电显示 From", phone.caller_id(store, line, cfg) if line else ""],
+                       ["线路 Line", {"dialmcp": "DialMCP（美国/加拿大 US/CA，会录音 recorded）", "telnyx": "Telnyx + OpenAI Realtime"}.get(line, "—")],
                        ["可以告诉对方 May share", args.get("may_share") or "（无 nothing）"],
                        ["语言 Language", args.get("language") or "跟随对方 match them"],
                        ["最长 Max", f"{mins} 分钟 min"],
@@ -767,6 +771,10 @@ def _conn_view(name: str) -> dict:
         c["providers"] = mailproviders.public_presets()
         c["default"] = mailboxes.default_id(store)
         c["has_credential"] = bool(mailboxes.ready_accounts(store))
+    if name == "phone":
+        c["dialmcp"] = {"connected": dialmcp.ready(store), "account": dialmcp.account(store), "url": dialmcp.url(store)}
+        c["telnyx_ready"] = phone.telnyx_ready(store)
+        c["ready"] = phone.ready(store)
     return c
 
 
@@ -805,6 +813,8 @@ def _phone_cfg(b: dict) -> dict:
     for k in ("from_number", "connection_id", "owner_name", "voice", "model"):
         if k in b and b[k] is not None:
             out[k] = str(b[k]).strip()[:200]
+    if b.get("provider") in ("auto", "telnyx", "dialmcp"):
+        out["provider"] = b["provider"]
     if "from_number" in out:
         out["from_number"] = phone.normalize(out["from_number"])
     if b.get("public_url") is not None:
@@ -867,6 +877,103 @@ async def phone_test_call(req: Request):
         raise HTTPException(400, str(e))
     store.audit("user", "phone.test_call", resource=r["to"], result="success", detail={"call_id": r["call_id"]})
     return r
+
+
+# ------------------------------------------------------------------ OAuth 2.1 sign-in for MCP servers (DialMCP, MCP hub)
+OAUTH_CALLBACK = "/sentinel/api/oauth/callback"
+
+
+def _oauth_redirect(req: Request, b: dict) -> str:
+    host = req.headers.get("x-forwarded-host") or req.headers.get("host", "")
+    try:
+        return mcp_oauth.check_redirect(str(b.get("redirect_uri", "")), host, OAUTH_CALLBACK)
+    except mcp_oauth.OAuthError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/sentinel/api/connections/phone/dialmcp/start", dependencies=[Depends(ui_auth)])
+async def dialmcp_start(req: Request):
+    b = await req.json()
+    redirect = _oauth_redirect(req, b)
+    try:
+        r = await mcp_oauth.begin(dialmcp.url(store), redirect, "phone")
+    except (mcp_oauth.OAuthError, Exception) as e:
+        store.audit("user", "credential.dialmcp.start", resource="phone", result="failed", detail={"error": str(e)[:300]})
+        raise HTTPException(400, f"无法开始 DialMCP 登录 (cannot start sign-in): {e}")
+    store.audit("user", "credential.dialmcp.start", resource="phone", result="success")
+    return {"auth_url": r["auth_url"]}
+
+
+@app.delete("/sentinel/api/connections/phone/dialmcp", dependencies=[Depends(ui_auth)])
+async def dialmcp_disconnect():
+    store.delete_secret(dialmcp.HANDLE)
+    await dialmcp._drop()
+    store.audit("user", "credential.dialmcp.delete", resource="phone", result="success")
+    return _conn_view("phone")
+
+
+@app.post("/sentinel/api/mcp/oauth/start", dependencies=[Depends(ui_auth)])
+async def mcp_oauth_start(req: Request):
+    b = await req.json()
+    redirect = _oauth_redirect(req, b)
+    name = str(b.get("name", "")).strip()[:40]
+    if not name:
+        raise HTTPException(400, "请给这个服务器起个名字 (name required)")
+    try:
+        url = mcp_hub.check_server_url(str(b.get("url", "")))
+        r = await mcp_oauth.begin(url, redirect, "mcp", {"name": name, "url": url,
+                                                         "data_class": str(b.get("data_class", "CONFIDENTIAL"))})
+    except Exception as e:
+        raise HTTPException(400, f"无法开始 OAuth 登录 (cannot start sign-in): {e}")
+    return {"auth_url": r["auth_url"]}
+
+
+def _oauth_page(ok: bool, msg: str) -> HTMLResponse:
+    import html as _h
+    color = "#1a7f37" if ok else "#c62828"
+    body = (f"<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+            f"<title>OMuse</title><body style='font-family:system-ui;padding:32px;max-width:560px;margin:auto'>"
+            f"<h2 style='color:{color}'>{'✅' if ok else '⚠️'} {_h.escape(msg)}</h2>"
+            f"<p>{'可以关闭这个页面，回到 OMuse。You can close this tab and return to OMuse.' if ok else '请回到 OMuse 重试。Go back to OMuse and try again.'}</p>"
+            f"<p><a href='../../../#connections'>OMuse →</a></p>"
+            f"<script>try{{window.opener&&window.opener.postMessage({{omuseOAuth:{'true' if ok else 'false'}}},location.origin)}}catch(e){{}}"
+            f"{'setTimeout(()=>window.close(),1500)' if ok else ''}</script></body>")
+    return HTMLResponse(body, status_code=200 if ok else 400)
+
+
+@app.get(OAUTH_CALLBACK)
+async def oauth_callback(state: str = "", code: str = "", error: str = "", error_description: str = ""):
+    """The browser comes back here from the provider's login page. Protected by the single-use `state`."""
+    try:
+        flow, rec = await mcp_oauth.complete(state, code, f"{error} {error_description}".strip())
+    except mcp_oauth.OAuthError as e:
+        store.audit("user", "credential.oauth.callback", resource="oauth", result="failed", detail={"error": str(e)[:300]})
+        return _oauth_page(False, str(e))
+    if flow["purpose"] == "phone":
+        mcp_oauth.save(store, dialmcp.HANDLE, "phone", rec)
+        await dialmcp._drop()
+        try:
+            acct = await dialmcp.whoami(store)
+        except Exception as e:
+            acct = {}
+            store.audit("user", "credential.dialmcp.whoami", resource="phone", result="failed", detail={"error": str(e)[:300]})
+        sec = store.get_secret(dialmcp.HANDLE) or {}
+        store.put_secret("phone", {**sec, "account": acct}, handle=dialmcp.HANDLE)
+        store.save_connection("phone", {"dialmcp_url": flow["server_url"]}, permissions={"call": True}, enabled=True)
+        store.audit("user", "credential.dialmcp.set", resource="phone", result="success", detail={"phone": acct.get("phone", "")})
+        return _oauth_page(True, f"DialMCP 已连接 connected {acct.get('phone', '')}".strip())
+    if flow["purpose"] == "mcp":
+        x = flow["extra"]
+        try:
+            srv = await mcp_hub.add_server(store, name=x["name"], url=x["url"], data_class=x.get("data_class", "CONFIDENTIAL"),
+                                           oauth=rec)
+        except mcp_hub.HubError as e:
+            store.audit("user", "mcp.add", resource=x["url"][:200], result="failed", detail={"error": str(e)[:300], "auth": "oauth"})
+            return _oauth_page(False, str(e))
+        store.audit("user", "mcp.add", resource=srv["id"], result="success",
+                    detail={"url": srv["url"], "auth": "oauth", "tools": [t["name"] for t in srv["tools"]]})
+        return _oauth_page(True, f"MCP「{srv['name']}」已连接 connected")
+    return _oauth_page(False, "unknown sign-in")
 
 
 def _mail_form(b: dict) -> tuple[str, str, str, dict]:

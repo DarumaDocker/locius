@@ -154,6 +154,17 @@ async def chat(req: Request):
                 {"label": "Kickstand Case for iPhone 17 Pro Max", "details": ["S$33.90"],
                  "source_url": "http://shop.test:8099/shop.html", "note": "带支架"}]})])
         return reply("CHOICES DONE: " + last_tool[:400])
+    if "DIALCALL" in goal:   # a +1 number goes out through DialMCP; poll until the call is over
+        if n == 0:
+            return reply("", [tc("phone_call", {"to": "+1 415 555 0123", "callee_name": "Zuni Cafe",
+                                                "purpose": "Book a table for 2 tonight at 19:30; acceptable window 19:00-20:30.",
+                                                "may_share": "Name: Lucas Lu"})])
+        ids = re.findall(r"(call_[0-9a-f]{12})", " ".join(str(m["content"]) for m in tools_done))
+        if n > 15 or not ids:
+            return reply("DIAL GAVE UP: " + last_tool[:600])
+        if any(f'"status": "{x}"' in last_tool for x in ("ended", "no_answer", "failed")):
+            return reply("DIAL DONE: " + last_tool[:2500])
+        return reply("", [tc("phone_call_status", {"call_id": ids[0], "wait_seconds": 30})])
     if "PHONECALL" in goal:
         if n == 0:
             return reply("", [tc("phone_call", {"to": "+65 6123 4567", "language": "English",

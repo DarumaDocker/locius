@@ -1187,9 +1187,38 @@ async function viewConnections(root) {
 }
 
 // --- Phone calls (Telnyx number + OpenAI Realtime voice); keys stay in Sentinel's vault
+// OAuth 2.1 sign-in (DialMCP, MCP servers): opens the provider's login page; the callback page tells us when it's done
+async function oauthPopup(path, body) {
+  const redirect_uri = new URL('sentinel/api/oauth/callback', location.href).href.split('#')[0];
+  const r = await sapi(path, { method: 'POST', body: Object.assign({}, body || {}, { redirect_uri }) });
+  const done = e => {
+    if (e.origin !== location.origin || !e.data || !('omuseOAuth' in e.data)) return;
+    window.removeEventListener('message', done);
+    if (e.data.omuseOAuth) { toast(T('登录完成 ✓ Signed in')); route(); }
+  };
+  window.addEventListener('message', done);
+  const w = window.open(r.auth_url, '_blank');
+  if (!w) location.href = r.auth_url;
+  else toast(T('请在新打开的页面里登录，完成后回到这里'));
+}
+
 function phoneCard(c) {
   c = c || { name: 'phone', config: {}, permissions: {}, enabled: false, has_credential: false };
   const cf = c.config || {};
+  const dm = c.dialmcp || {};
+  const dmConnect = safe(async () => { await oauthPopup('connections/phone/dialmcp/start', {}); });
+  const dmDisconnect = safe(async () => { if (!confirmInline(T('断开 DialMCP？令牌会被删除。'))) return; await sapi('connections/phone/dialmcp', { method: 'DELETE' }); route(); });
+  const provider = h('select', { onchange: safe(async e => { await sapi('connections/phone', { method: 'PUT', body: { config: { provider: e.target.value } } }); toast(T('已保存')); }) },
+    [['auto', T('自动：+1 号码走 DialMCP，其他走 Telnyx')], ['dialmcp', T('只用 DialMCP')], ['telnyx', T('只用 Telnyx')]]
+      .map(([v, l]) => h('option', { value: v, selected: (cf.provider || 'auto') === v }, l)));
+  const dmBox = h('div', { class: 'card stack', style: 'background:var(--bg2,transparent)' },
+    h('div', { class: 'row' }, h('b', { style: 'flex:1' }, T('DialMCP — 用你自己的号码打美国/加拿大电话')),
+      h('span', { class: 'chip ' + (dm.connected ? 'ok' : '') }, dm.connected ? Tf("已连接 {0}", ((dm.account || {}).phone || '')) : T('未连接'))),
+    h('div', { class: 'small muted' }, T('DialMCP 的语音 AI 会先说明自己是替你打电话的 AI、通话会录音；只能打 +1（美国/加拿大）号码，对方当地时间 8:00–21:00，每通最长 10 分钟。登录一次即可，令牌加密保存在 Sentinel 保险箱。')),
+    h('div', { class: 'row' }, dm.connected
+      ? h('button', { class: 'btn danger small', onclick: dmDisconnect }, T('断开 DialMCP'))
+      : h('button', { class: 'btn primary small', onclick: dmConnect }, T('连接 DialMCP（登录）')),
+      h('label', { class: 'field', style: 'flex:1;min-width:220px' }, h('span', null, T('线路选择 Line')), provider)));
   const inp = (v, ph, type) => { const i = h('input', { type: type || 'text', placeholder: ph || '', autocomplete: 'off' }); i.value = v || ''; return i; };
   const owner = inp(cf.owner_name, 'Lucas Lu');
   const from = inp(cf.from_number, '+19793471777');
@@ -1222,24 +1251,29 @@ function phoneCard(c) {
   });
   const calls = h('div', { class: 'stack small' });
   const ST = { dialing: T('📞 拨号中'), connected: T('🟢 通话中'), ended: T('✔ 已结束'), no_answer: T('无人接听'), failed: T('❌ 失败') };
+  const link = (u, label) => u ? h('a', { href: u, target: '_blank', rel: 'noopener noreferrer' }, label) : null;
   const loadCalls = async () => {
     const r = await sapi('phone/calls?limit=10'); calls.innerHTML = '';
     if (!r.calls.length) { calls.append(h('div', { class: 'muted' }, T('还没有通话记录'))); return; }
     r.calls.forEach(x => calls.append(h('details', null,
-      h('summary', null, h('b', null, x.to), ' · ', ST[x.status] || x.status, ' · ', fmtTime(x.created_at), x.outcome ? ' · ' + x.outcome : ''),
+      h('summary', null, h('b', null, x.to), ' · ', ST[x.status] || x.status, ' · ', fmtTime(x.created_at), x.outcome ? ' · ' + x.outcome : '',
+        x.line === 'dialmcp' ? ' · DialMCP' : ''),
       h('div', { class: 'stack', style: 'margin:6px 0 10px' },
+        (x.listen_url || x.recording_url) ? h('div', { class: 'row' }, link(x.listen_url, T('🎧 旁听 / 通话页 Listen')), link(x.recording_url, T('⏺ 录音 Recording'))) : null,
         h('div', null, h('b', null, T('目的 Purpose')), ' ', x.purpose),
         x.summary ? h('div', null, h('b', null, T('结果 Summary')), ' ', x.summary) : null,
         (x.hangup_cause || x.error) ? h('div', { class: 'muted' }, B(x.error || x.hangup_cause)) : null,
         h('pre', { class: 'md', style: 'white-space:pre-wrap;max-height:260px;overflow:auto' },
           (x.transcript || []).map(t => `[${t.t}s] ${t.who === 'omuse' ? 'OMuse' : T('对方')}: ${t.text}`).join('\n') || T('（没有对话内容）'))))));
   };
-  const ready = c.has_credential && c.enabled && cf.connection_id && cf.from_number && /^https?:\/\//.test(cf.public_url || '');
+  const tReady = c.has_credential && c.enabled && cf.connection_id && cf.from_number && /^https?:\/\//.test(cf.public_url || '');
+  const ready = c.enabled && (tReady || dm.connected);
   const field = (label, el, hint) => h('label', { class: 'field' }, h('span', null, label), el, hint ? h('small', { class: 'muted' }, hint) : null);
   const card = h('div', { class: 'card stack' },
-    h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, T('☎️ 电话 Phone calls')), h('span', { class: 'chip ' + (ready ? 'ok' : '') }, ready ? Tf("已配置 {0}", (cf.from_number)) : T('未配置 Not set up'))),
-    h('p', { class: 'sub' }, T('让 OMuse 用你的 Telnyx 号码替你打电话（问客服、预约、确认订单）。语音由 OpenAI Realtime 实时对话；每通电话都要你批准，开头会说明自己是替你打电话的 AI；不会付款、不会报卡号密码验证码。')),
-    h('details', { open: !ready }, h('summary', null, h('b', null, ready ? T('修改设置 Settings') : T('设置 Set up'))),
+    h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, T('☎️ 电话 Phone calls')), h('span', { class: 'chip ' + (ready ? 'ok' : '') }, ready ? Tf("已配置 {0}", (tReady ? cf.from_number : ((dm.account || {}).phone || 'DialMCP'))) : T('未配置 Not set up'))),
+    h('p', { class: 'sub' }, T('让 OMuse 替你打电话（问客服、预约、确认订单）。每通电话都要你批准，开头会说明自己是替你打电话的 AI；不会付款、不会报卡号密码验证码。两条线路：DialMCP（美国/加拿大，用你自己的号码）和 Telnyx（自己的号码 + OpenAI Realtime，可打其他国家）。')),
+    dmBox,
+    h('details', { open: !tReady && !dm.connected }, h('summary', null, h('b', null, tReady ? T('Telnyx 线路设置 Settings') : T('Telnyx 线路（可选）Set up'))),
       h('div', { class: 'stack', style: 'margin-top:10px' },
         h('ol', { class: 'steps-help' },
           h('li', null, T('Telnyx 控制台 → Voice → Programmable Voice → 新建 Voice API 应用（Call Control），Webhook 填下面「公开地址」+ /voice/webhook；复制它的 Application ID')),
@@ -1258,9 +1292,9 @@ function phoneCard(c) {
           c.has_credential ? h('button', { class: 'btn small', onclick: check }, T('重新检查 Check')) : null), checks)),
     ready ? h('div', { class: 'row', style: 'flex-wrap:nowrap' }, testTo, h('button', { class: 'btn small', style: 'white-space:nowrap', onclick: testCall }, T('打给我测试 Test call'))) : null,
     h('div', null, h('b', null, T('最近通话 Recent calls')), ' ', h('button', { class: 'btn small', onclick: safe(loadCalls) }, T('刷新'))), calls,
-    c.has_credential ? h('div', { class: 'row' },
+    (c.has_credential || dm.connected) ? h('div', { class: 'row' },
       h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: c.enabled, onchange: safe(async e => { await sapi('connections/phone', { method: 'PUT', body: { enabled: e.target.checked } }); }) }), T('启用')),
-      h('button', { class: 'btn danger small', onclick: safe(async () => { if (!confirmInline(T('断开电话？密钥会被删除。'))) return; await sapi('connections/phone/credential', { method: 'DELETE' }); route(); }) }, T('断开 Disconnect'))) : null);
+      c.has_credential ? h('button', { class: 'btn danger small', onclick: safe(async () => { if (!confirmInline(T('断开电话？密钥会被删除。'))) return; await sapi('connections/phone/credential', { method: 'DELETE' }); route(); }) }, T('断开 Telnyx Disconnect')) : null) : null);
   loadCalls().catch(() => {});
   return card;
 }
@@ -1446,15 +1480,17 @@ async function mcpCard() {
   const name = h('input', { type: 'text', placeholder: T('例如 GitHub、公司知识库') });
   const url = h('input', { type: 'url', placeholder: 'https://…/mcp', autocomplete: 'off' });
   const auth = authSel();
+  auth.append(h('option', { value: 'oauth' }, T('OAuth 登录 Sign in')));
   const hname = h('input', { type: 'text', placeholder: 'X-API-Key' });
   const token = h('input', { type: 'password', placeholder: T('令牌 token（加密保存，不会显示）'), autocomplete: 'new-password' });
   const hnameField = h('label', { class: 'field', style: 'display:none' }, h('span', null, T('请求头名称 Header name')), hname);
   const tokenField = h('label', { class: 'field', style: 'display:none' }, h('span', null, T('令牌 Token')), token);
-  auth.onchange = () => { hnameField.style.display = auth.value === 'header' ? '' : 'none'; tokenField.style.display = auth.value === 'none' ? 'none' : ''; };
+  auth.onchange = () => { hnameField.style.display = auth.value === 'header' ? '' : 'none'; tokenField.style.display = ['none', 'oauth'].includes(auth.value) ? 'none' : ''; };
   const dc = h('select', null, MCP_DC.map(([v, l]) => h('option', { value: v }, l)));
   const addBtn = h('button', { class: 'btn primary', onclick: safe(async e => {
     e.target.disabled = true; e.target.textContent = T('连接中…');
     try {
+      if (auth.value === 'oauth') { await oauthPopup('mcp/oauth/start', { name: name.value, url: url.value, data_class: dc.value }); return; }
       const s = await sapi('mcp/servers', { method: 'POST', body: { name: name.value, url: url.value, auth_type: auth.value, token: token.value, header_name: hname.value, data_class: dc.value } });
       const off = s.tools.filter(t => t.flags && t.flags.length).length;
       toast(Tf("「{0}」已连接 ✓ 读到 {1} 个工具", (s.name), (s.tools.length)) + (off ? Tf("，其中 {0} 个疑似有注入内容，已关闭", (off)) : ''));

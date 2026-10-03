@@ -221,17 +221,19 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
     if t["connector"] == "phone":
         from app.sentinel import phone
         if not phone.ready(store):
-            return Decision(DENY, t["risk"], "电话功能还没配置好：请在「连接 → 电话」填写 Telnyx 与 OpenAI 设置 (phone not configured)")
+            return Decision(DENY, t["risk"], "电话功能还没配置好：请在「连接 → 电话」连接 DialMCP 或填写 Telnyx 设置 (phone not configured)")
         if tool == "phone_call":
             cfg = phone.config(store)
-            n, why = phone.check_number(str(args.get("to", "")), cfg)
+            n, line, why = phone.check_call(store, str(args.get("to", "")), cfg)
             if not n:
                 return Decision(DENY, "high", why, dest)
             if phone.calls_today(store) >= cfg["daily_limit"]:
                 return Decision(DENY, "high", f"今天已达到拨打上限 {cfg['daily_limit']} 通 (daily call limit reached)", dest)
             if len(str(args.get("purpose") or "").strip()) < 10:
                 return Decision(DENY, "high", "请写清楚这通电话要做什么 (purpose is required)", dest)
-            reasons.append("用你的名义打电话，语音 AI 会和对方实时对话（按通话时长计费）(places a phone call on your behalf)")
+            reasons.append("用你自己的号码通过 DialMCP 打电话，对方看到的是你的号码，通话会录音 (places a call from your own number via DialMCP; recorded)"
+                           if line == "dialmcp" else
+                           "用你的名义打电话，语音 AI 会和对方实时对话（按通话时长计费）(places a phone call on your behalf)")
 
     # ---------------------------------------------------------------- prompt-injection escalation
     if ctx["injection"] and RISK_ORDER[risk] >= RISK_ORDER["medium"]:

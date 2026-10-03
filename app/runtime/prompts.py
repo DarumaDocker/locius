@@ -222,6 +222,7 @@ def executor_system(*, user_name: str, tz: str, connections: dict, plan: dict | 
         f"- Slack: {('connected (' + (connections.get('slack') or {}).get('workspace', '') + ')') if (connections.get('slack') or {}).get('ready') else 'NOT connected'}",
         f"- Google Calendar: {('connected (' + (connections.get('calendar') or {}).get('account', '') + ', time zone ' + ((connections.get('calendar') or {}).get('time_zone') or '?') + ')') if (connections.get('calendar') or {}).get('ready') else 'NOT connected (the user can connect it in 连接 Connections). Do not look for it on the web: do the rest of the task (e.g. write the timetable) and mention it'}",
         f"- Workspace files (Olares Files → Data/{APP_ID}/workspace): ready",
+        f"- Phone calls (phone_call): {('ready — lines: ' + (connections.get('phone') or {}).get('lines', '')) if (connections.get('phone') or {}).get('ready') else 'NOT configured — say so and tell the user they can set it up in 连接 Connections → 电话 Phone (DialMCP for US/Canada numbers, or Telnyx); never pretend a call was made'}",
     ]
     mcp = connections.get("mcp") or {}
     live = [x for x in mcp.get("servers") or [] if x.get("enabled") and x.get("tools")]

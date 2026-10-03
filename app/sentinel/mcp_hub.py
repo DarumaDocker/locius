@@ -26,7 +26,7 @@ import re
 import time
 
 from app.common.util import truncate
-from app.sentinel import guard
+from app.sentinel import guard, mcp_oauth
 from app.sentinel.catalog import TOOLS
 from app.sentinel.mcp_client import MCPError, check_server_url, connect
 
@@ -251,13 +251,23 @@ async def _drop(sid: str):
             pass
 
 
-async def _session(store, s: dict):
+async def _headers(store, s: dict, force_refresh: bool = False) -> dict:
+    """Stored static headers, or a fresh OAuth bearer token (refreshed when near expiry or after a 401)."""
+    if s.get("auth") == "oauth":
+        try:
+            return await mcp_oauth.auth_headers(store, handle(s["id"]), force_refresh=force_refresh)
+        except mcp_oauth.OAuthError as e:
+            raise MCPError(f"OAuth 授权失效，请在「连接 → MCP」重新登录 (sign in again): {e}", auth=True)
+    return (store.get_secret(handle(s["id"])) or {}).get("headers") or {}
+
+
+async def _session(store, s: dict, force_refresh: bool = False):
     lock = _locks.setdefault(s["id"], asyncio.Lock())
     async with lock:
         c = _sessions.get(s["id"])
-        if c is not None:
+        if c is not None and not force_refresh:
             return c
-        headers = (store.get_secret(handle(s["id"])) or {}).get("headers") or {}
+        headers = await _headers(store, s, force_refresh)
         c = await connect(s["url"], headers, s.get("transport") or "auto")
         _sessions[s["id"]] = c
         return c
@@ -278,7 +288,7 @@ async def _discover(url: str, headers: dict, transport: str = "auto") -> tuple[o
 
 # ------------------------------------------------------------------ user operations
 async def add_server(store, *, name: str, url: str, auth_type: str = "none", token: str = "", header_name: str = "",
-                     data_class: str = "CONFIDENTIAL") -> dict:
+                     data_class: str = "CONFIDENTIAL", oauth: dict | None = None) -> dict:
     name = _clean_text(name, 40)
     if not name:
         raise HubError("请给这个服务器起个名字 (name required)")
@@ -291,7 +301,7 @@ async def add_server(store, *, name: str, url: str, auth_type: str = "none", tok
         raise HubError(str(e))
     if any(s["url"] == url for s in srvs):
         raise HubError("这个地址已经添加过了 (already added)")
-    headers = build_headers(auth_type, token, header_name)
+    headers = {"Authorization": f"Bearer {oauth['access_token']}"} if oauth else build_headers(auth_type, token, header_name)
     try:
         client, raw_tools = await _discover(url, headers)
     except MCPError as e:
@@ -300,11 +310,13 @@ async def add_server(store, *, name: str, url: str, auth_type: str = "none", tok
     tools, _ = _merge_tools([], raw_tools, first=True)
     rec = {"id": sid, "name": name, "url": url, "transport": client.transport, "enabled": True,
            "data_class": data_class if data_class in DATA_CLASSES else "CONFIDENTIAL",
-           "auth": auth_type if headers else "none", "header_name": header_name if auth_type == "header" else "",
+           "auth": "oauth" if oauth else (auth_type if headers else "none"), "header_name": header_name if auth_type == "header" else "",
            "server_info": {k: str(v)[:80] for k, v in (client.server_info or {}).items() if k in ("name", "version", "title")},
            "protocol": client.protocol_version, "instructions": _clean_text(client.instructions, 1500),
            "tools": tools, "last_sync": time.time(), "last_error": "", "created_at": time.time()}
-    if headers:
+    if oauth:
+        mcp_oauth.save(store, handle(sid), "mcp", oauth)
+    elif headers:
         store.put_secret("mcp", {"headers": headers}, handle=handle(sid))
     await _drop(sid)
     _sessions[sid] = client
@@ -317,8 +329,8 @@ async def refresh(store, sid: str) -> dict:
     if not s:
         raise HubError("找不到这个 MCP 服务器 (server not found)")
     await _drop(sid)
-    headers = (store.get_secret(handle(sid)) or {}).get("headers") or {}
     try:
+        headers = await _headers(store, s)
         client, raw = await _discover(s["url"], headers, s.get("transport") or "auto")
     except MCPError as e:
         _update(store, sid, lambda x: {**x, "last_error": str(e)[:300]})
@@ -421,8 +433,15 @@ async def call(store, tool: str, args: dict, task_id: str) -> dict:
     if not s.get("enabled", True):
         raise ActionError(f"MCP 服务器「{s['name']}」已停用 (server disabled)")
     try:
-        c = await _session(store, s)
-        res = await c.call_tool(rec["name"], args or {}, timeout=180)
+        try:
+            c = await _session(store, s)
+            res = await c.call_tool(rec["name"], args or {}, timeout=180)
+        except MCPError as e:
+            if not (e.auth and s.get("auth") == "oauth"):
+                raise
+            await _drop(s["id"])           # the access token expired early or was revoked: refresh once and retry
+            c = await _session(store, s, force_refresh=True)
+            res = await c.call_tool(rec["name"], args or {}, timeout=180)
     except MCPError as e:
         await _drop(s["id"])
         raise ActionError(f"MCP「{s['name']}」调用失败 call failed：{e}")

@@ -64,6 +64,7 @@ def config(store) -> dict:
         "daily_limit": max(1, min(int(c.get("daily_limit") or 10), 100)),
         "voice": str(c.get("voice") or "marin"),
         "model": str(c.get("model") or "gpt-realtime"),
+        "provider": c.get("provider") if c.get("provider") in ("auto", "telnyx", "dialmcp") else "auto",
     }
 
 
@@ -71,10 +72,63 @@ def keys(store) -> dict:
     return store.get_secret("cred_phone_1") or {}
 
 
-def ready(store) -> bool:
+def telnyx_ready(store) -> bool:
     c, k = config(store), keys(store)
     return bool(k.get("telnyx_api_key") and k.get("openai_api_key") and c["from_number"] and c["connection_id"]
                 and public_ok(c["public_url"]))
+
+
+def ready(store) -> bool:
+    """At least one line works: Telnyx (any allowed country) or DialMCP (US / Canada, the user's own number)."""
+    from app.sentinel import dialmcp
+    return telnyx_ready(store) or dialmcp.ready(store)
+
+
+def line_for(store, n: str, cfg: dict | None = None) -> tuple[str, str]:
+    """Which line calls normalized number `n`: ("dialmcp"|"telnyx", "") or ("", reason)."""
+    from app.sentinel import dialmcp
+    cfg = cfg or config(store)
+    tel, dial = telnyx_ready(store), dialmcp.ready(store)
+    pref = cfg.get("provider") or "auto"
+    dial_why = dialmcp.check_number(n, store) if dial else "DialMCP 未连接 (DialMCP not connected)"
+    if pref == "dialmcp" or (pref == "auto" and dial and not dial_why):
+        return ("dialmcp", "") if not dial_why else ("", dial_why)
+    if tel and pref in ("auto", "telnyx"):
+        return "telnyx", ""
+    if pref == "telnyx":
+        return "", "Telnyx 线路还没配置好 (the Telnyx line is not set up)"
+    return "", dial_why if dial else "电话功能还没配置好 (phone not configured)"
+
+
+def check_call(store, number: str, cfg: dict | None = None) -> tuple[str, str, str]:
+    """-> (normalized number, line, "") if OMuse may call it, else ("", "", reason)."""
+    cfg = cfg or config(store)
+    n, why = check_number(number, cfg)
+    if not n:
+        return "", "", why
+    line, why = line_for(store, n, cfg)
+    if not line:
+        return "", "", why
+    return n, line, ""
+
+
+def lines_summary(store) -> str:
+    """For the agent's prompt: which numbers each line can call."""
+    from app.sentinel import dialmcp
+    cfg, out = config(store), []
+    if dialmcp.ready(store) and cfg.get("provider") in ("auto", "dialmcp"):
+        out.append(f"DialMCP — US and Canadian (+1) numbers only, from the user's own number {dialmcp.account(store).get('phone', '')}, "
+                   "only 8:00–21:00 at the callee's local time, max 10 min, recorded; gives a listen_url for the user")
+    if telnyx_ready(store) and cfg.get("provider") in ("auto", "telnyx"):
+        out.append(f"Telnyx — numbers starting {', '.join(cfg['allowed_prefixes']) or 'any'} from {cfg['from_number']}")
+    return "; ".join(out)
+
+
+def caller_id(store, line: str, cfg: dict | None = None) -> str:
+    from app.sentinel import dialmcp
+    if line == "dialmcp":
+        return dialmcp.account(store).get("phone", "") + "（你自己的号码 your own number, via DialMCP）"
+    return (cfg or config(store))["from_number"]
 
 
 def public_ok(url: str) -> bool:
@@ -233,10 +287,12 @@ async def _telnyx(store, method: str, path: str, body: dict | None = None, param
 async def start_call(store, args: dict, task_id: str) -> dict:
     cfg = config(store)
     if not ready(store):
-        raise PhoneError("电话功能还没配置好：请在「连接 → 电话」填写 Telnyx 和 OpenAI 的设置 (phone not configured)", "denied")
-    to, why = check_number(str(args.get("to", "")), cfg)
+        raise PhoneError("电话功能还没配置好：请在「连接 → 电话」连接 DialMCP 或填写 Telnyx 设置 (phone not configured)", "denied")
+    to, line, why = check_call(store, str(args.get("to", "")), cfg)
     if not to:
         raise PhoneError(why, "denied")
+    if line == "dialmcp":
+        return await _dial_start(store, args, task_id, to, cfg)
     if calls_today(store) >= cfg["daily_limit"]:
         raise PhoneError(f"今天已达到拨打上限 {cfg['daily_limit']} 通 (daily call limit reached)", "denied")
     purpose = str(args.get("purpose") or "").strip()
@@ -244,7 +300,8 @@ async def start_call(store, args: dict, task_id: str) -> dict:
         raise PhoneError("请写清楚这通电话要做什么 (purpose is required)", "denied")
     minutes = max(1, min(int(args.get("max_minutes") or cfg["max_minutes"]), cfg["max_minutes"]))
     token = secrets.token_urlsafe(24)
-    call = {"id": new_id("call"), "task_id": task_id, "to": to, "from": cfg["from_number"], "purpose": truncate(purpose, 3000),
+    call = {"id": new_id("call"), "task_id": task_id, "to": to, "from": cfg["from_number"], "line": "telnyx",
+            "purpose": truncate(purpose, 3000),
             "may_share": truncate(str(args.get("may_share") or ""), 1500), "language": str(args.get("language") or "")[:40],
             "max_minutes": minutes, "status": "dialing", "created_at": now_ts(), "answered_at": None, "ended_at": None,
             "transcript": [], "outcome": "", "summary": "", "error": "", "telnyx_id": "", "hangup_cause": "",
@@ -273,6 +330,16 @@ async def start_call(store, args: dict, task_id: str) -> dict:
 
 
 async def hangup(store, call: dict, reason: str = ""):
+    if call.get("line") == "dialmcp":
+        from app.sentinel import dialmcp
+        if call.get("remote_id") and call["status"] in ("dialing", "connected"):
+            try:
+                await dialmcp.end(store, call["remote_id"])
+            except Exception as e:
+                call["error"] = call.get("error") or f"hangup: {e}"
+        if reason and not call.get("hangup_cause"):
+            call["hangup_cause"] = reason
+        return
     if call.get("telnyx_id") and call["status"] not in ("ended", "failed", "no_answer"):
         try:
             await _telnyx(store, "POST", f"/v2/calls/{call['telnyx_id']}/actions/hangup", {})
@@ -332,12 +399,16 @@ async def _watchdog(store, call: dict):
 
 def status_view(call: dict, max_lines: int = 80) -> dict:
     tr = call.get("transcript") or []
-    lines = [f"[{x['t']:>6.1f}s] {'OMuse' if x['who'] == 'omuse' else 'Them'}: {x['text']}" for x in tr[-max_lines:]]
+    lines = [(f"[{x['t']:>6.1f}s] " if x.get("t") else "") + f"{'OMuse' if x['who'] == 'omuse' else 'Them'}: {x['text']}"
+             for x in tr[-max_lines:]]
     return {"trust": "untrusted", "source": f"phone call {call['to']}",
             "call_id": call["id"], "to": call["to"], "status": call["status"], "seconds": _duration(call),
             "outcome": call.get("outcome", ""), "summary": call.get("summary", ""),
             "hangup_cause": call.get("hangup_cause", ""), "error": call.get("error", ""),
-            "transcript": "\n".join(lines) + (f"\n… ({len(tr) - max_lines} earlier lines omitted)" if len(tr) > max_lines else "")}
+            "transcript": "\n".join(lines) + (f"\n… ({len(tr) - max_lines} earlier lines omitted)" if len(tr) > max_lines else ""),
+            **({"line": "DialMCP", "listen_url": call.get("listen_url", ""), "recording_url": call.get("recording_url", ""),
+                "note_for_user": "Give the user the listen_url: they can hear the call live / the recording there."}
+               if call.get("line") == "dialmcp" else {})}
 
 
 async def wait_status(store, call_id: str, wait_seconds: float) -> dict:
@@ -354,6 +425,82 @@ async def wait_status(store, call_id: str, wait_seconds: float) -> dict:
     if call["status"] in ("dialing", "connected"):
         v["note"] = "通话还在进行，可以再次调用 phone_call_status 等待 (still in progress — call phone_call_status again)"
     return v
+
+
+# ------------------------------------------------------------------ DialMCP line (US / Canada, the user's own number)
+async def _dial_start(store, args: dict, task_id: str, to: str, cfg: dict) -> dict:
+    from app.sentinel import dialmcp
+    if calls_today(store) >= cfg["daily_limit"]:
+        raise PhoneError(f"今天已达到拨打上限 {cfg['daily_limit']} 通 (daily call limit reached)", "denied")
+    purpose = str(args.get("purpose") or "").strip()
+    if len(purpose) < 10:
+        raise PhoneError("请写清楚这通电话要做什么 (purpose is required)", "denied")
+    minutes = max(1, min(int(args.get("max_minutes") or cfg["max_minutes"]), cfg["max_minutes"], dialmcp.MAX_MINUTES))
+    acct = dialmcp.account(store)
+    call = {"id": new_id("call"), "task_id": task_id, "to": to, "from": acct.get("phone", ""), "line": "dialmcp",
+            "purpose": truncate(purpose, 2000), "may_share": truncate(str(args.get("may_share") or ""), 1500),
+            "language": str(args.get("language") or "")[:40], "callee_name": str(args.get("callee_name") or "")[:200],
+            "max_minutes": minutes, "status": "dialing", "created_at": now_ts(), "answered_at": None, "ended_at": None,
+            "transcript": [], "outcome": "", "summary": "", "error": "", "remote_id": "", "listen_url": "", "hangup_cause": "",
+            "_done": asyncio.Event()}
+    _live[call["id"]] = call
+    try:
+        d = await dialmcp.place(store, call, cfg.get("owner_name") or acct.get("name", ""))
+    except dialmcp.DialError as e:
+        call.update(status="failed", error=truncate(str(e), 500), ended_at=now_ts())
+        _finish(store, call)
+        _live.pop(call["id"], None)
+        raise PhoneError(str(e))
+    call["remote_id"] = str(d.get("call_id") or d.get("id") or "")
+    if not call["remote_id"]:
+        call.update(status="failed", error="DialMCP 没有返回 call_id (no call_id)", ended_at=now_ts())
+        _finish(store, call)
+        _live.pop(call["id"], None)
+        raise PhoneError(call["error"])
+    dialmcp.apply(call, d, now_ts())
+    _save(store, call)
+    asyncio.create_task(_dial_watch(store, call))
+    store.audit("sentinel", "phone.dial", task_id=task_id, resource=to, result="success",
+                detail={"call_id": call["id"], "line": "dialmcp", "remote_id": call["remote_id"], "max_minutes": minutes})
+    return {"call_id": call["id"], "status": call["status"], "to": to, "line": "DialMCP", "from": acct.get("phone", ""),
+            "listen_url": call.get("listen_url", ""),
+            "note": "拨号中（DialMCP，从你自己的号码外呼）。把 listen_url 发给用户可以实时旁听；用 phone_call_status 等待结果 "
+                    "(dialing via DialMCP — share listen_url with the user so they can listen live; use phone_call_status to wait)"}
+
+
+async def _dial_watch(store, call: dict):
+    """Long-poll DialMCP until the call is over (plus a few seconds for the resolution), then finish the record."""
+    from app.sentinel import dialmcp
+    deadline = time.time() + call["max_minutes"] * 60 + 15 * 60
+    errors, extra = 0, 0
+    try:
+        while time.time() < deadline:
+            try:
+                d = await dialmcp.get(store, call["remote_id"], 45 if call["status"] in ("dialing", "connected") else 8)
+                errors = 0
+            except Exception as e:
+                errors += 1
+                if errors >= 6:
+                    call["error"] = call.get("error") or truncate(f"lost track of the call: {e}", 300)
+                    call["status"] = "failed" if call["status"] == "dialing" else call["status"]
+                    break
+                await asyncio.sleep(5)
+                continue
+            over = dialmcp.apply(call, d, now_ts())
+            _save(store, call)
+            if over:
+                if (call.get("resolution") or call["status"] != "ended") and (call.get("recording_url") or extra >= 2):
+                    break
+                extra += 1
+                if extra > 4:
+                    break
+        else:
+            call["error"] = call.get("error") or "status timeout"
+            if call["status"] in ("dialing", "connected"):
+                await hangup(store, call, "status timeout")
+    finally:
+        _finish(store, call)
+        _live.pop(call["id"], None)
 
 
 # ------------------------------------------------------------------ the bridge: Telnyx media stream <-> OpenAI Realtime
