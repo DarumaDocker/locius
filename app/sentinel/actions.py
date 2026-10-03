@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import threading
 import time
 
@@ -116,6 +117,60 @@ def compact_message(m: dict, multi: bool = True) -> dict:
         if m.get(k):
             out[k] = m[k]
     return out
+
+
+MAX_AMOUNT_READS = 40
+_MONEY = re.compile(r"(?:S\$|SGD|US\$|USD|HK\$|HKD|A\$|AUD|NT\$|RM|MYR|CHF|EUR|GBP|JPY|CNY|RMB|THB|IDR|INR|KRW|"
+                    r"[$€£¥₩฿₹]|元|円)\s?-?\d[\d,]*(?:\.\d{1,2})?|\d[\d,]*(?:\.\d{1,2})?\s?(?:SGD|USD|HKD|CHF|EUR|GBP|JPY|CNY|"
+                    r"MYR|THB|AUD|元|円|新元|美元|港币|日元|欧元)", re.I)
+_MONEY_KEY = re.compile(r"total|amount|charged|paid|payment|fare|balance|due|subtotal|grand|tax|gst|tip|refund|"
+                        r"合计|总计|金额|实付|应付|付款|总额|小计|退款", re.I)
+
+
+def money_lines(body: str, limit: int = 8) -> list[str]:
+    """The lines of an email that carry an amount, keyword lines (Total, Amount charged…) first."""
+    lines, seen, used = [], set(), set()
+    raw = [ln.strip() for ln in re.split(r"[\r\n]+", body or "") if ln.strip()]
+    for i, ln in enumerate(raw):
+        if i in used:
+            continue
+        if not _MONEY.search(ln):
+            # "Total" on one line and the amount on the next is common in HTML receipts
+            if (_MONEY_KEY.search(ln) and len(ln) < 30 and not re.search(r"\d", ln) and i + 1 < len(raw)
+                    and _MONEY.search(raw[i + 1]) and len(raw[i + 1]) < 30):
+                ln = ln + " " + raw[i + 1]
+                used.add(i + 1)
+            else:
+                continue
+        ln = re.sub(r"\s+", " ", ln)[:140]
+        if ln.lower() in seen:
+            continue
+        seen.add(ln.lower())
+        lines.append(ln)
+    lines.sort(key=lambda x: 0 if _MONEY_KEY.search(x) else 1)
+    return lines[:limit]
+
+
+def read_amounts(store, task_id: str, ids: list[str]) -> list[dict]:
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(mid):
+        try:
+            g, raw = client_for_id(store, mid)
+            m = _email_envelope(store, task_id, _tag(g.get_message(raw), g))
+            out = {"id": mid, "date": _short_date(m.get("date", "")), "from": str(m.get("from", ""))[:70],
+                   "subject": str(m.get("subject", ""))[:110],
+                   "money": money_lines(f"{m.get('subject', '')}\n{m.get('body', '')}") or ["(no amount found in the text)"]}
+            if m.get("attachments"):
+                out["attachments"] = [a.get("filename") if isinstance(a, dict) else str(a) for a in m["attachments"]][:4]
+            if m.get("injection_warning"):
+                out["injection_warning"] = m["injection_warning"]
+            return out
+        except Exception as e:   # one bad id must not lose the others
+            return {"id": mid, "error": f"{type(e).__name__}: {str(e)[:120]}"}
+
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        return list(ex.map(one, ids))
 
 
 def client_for_id(store, mid: str) -> tuple[Gmail, str]:
@@ -270,6 +325,15 @@ def _gmail_sync(store, tool: str, args: dict, task_id: str) -> dict:
         if tool == "gmail_get_message":
             g, raw = client_for_id(store, args["message_id"])
             return _email_envelope(store, task_id, _tag(g.get_message(raw), g))
+        if tool == "gmail_read_amounts":
+            ids = [str(x).strip() for x in (args.get("message_ids") or []) if str(x).strip()]
+            if isinstance(args.get("message_ids"), str):
+                ids = [x.strip() for x in re.split(r"[,\s]+", args["message_ids"]) if x.strip()]
+            if not ids:
+                raise ActionError("message_ids is empty — pass ids from gmail_search")
+            ids = list(dict.fromkeys(ids))[:MAX_AMOUNT_READS]
+            return {"count": len(ids), "emails": read_amounts(store, task_id, ids),
+                    "note": "Only money lines are shown. One purchase often has several emails (receipt + charge summary): count it once."}
         if tool == "gmail_get_thread":
             g, raw = client_for_id(store, args["thread_id"])
             msgs = [_email_envelope(store, task_id, _tag(m, g)) for m in g.get_thread(raw)]

@@ -315,6 +315,17 @@ async def chat(req: Request):
         if n in (2, 3):   # the second send of the same file is skipped (it is already in the chat)
             return reply("", [tc("send_file", {"path": "reports/summary.docx"})])
         return reply("DOCX RESULTS:\n" + "\n=====\n".join(str(m["content"])[:300] for m in tools_done))
+    if "CTXTEST" in goal:   # 2026-10-04 M2-02: three big results in one turn overflowed the model's context window
+        body_chars = sum(len(str(m.get("content") or "")) for m in msgs[1:])
+        if body_chars > 15000:
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"error": {"code": 500, "message": "Context size has been exceeded.", "type": "server_error"}},
+                                status_code=500)
+        if n == 0:
+            return reply("", [tc("files_write", {"path": f"data/big{i}.txt", "content": f"line {i} " * 1300}) for i in range(3)])
+        if n == 3:
+            return reply("", [tc("files_read", {"path": f"data/big{i}.txt"}) for i in range(3)])
+        return reply(f"CTX OK after {n} results, body {body_chars} chars")
     if "NUMCHECK" in goal:   # 2026-10-03 M1-06: an answer with figures no tool produced is sent back once
         if n == 0:
             return reply("", [tc("calculate", {"expressions": ["6.5*365 - 6.5*3*52", "invest(1358.5, 4, 10, 0, 1)"]})])

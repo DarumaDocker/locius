@@ -78,6 +78,17 @@ while time.time() - t0 < 60:
 ev = [e for e in t.get("events", []) if e["type"] == "number_check"]
 check("made-up figures sent back once", t["status"] == "COMPLETED" and (t.get("result") or "").startswith("FIXED")
       and ev and ev[0]["data"]["unsupported"] == ["17,016.64"], (t["status"], t.get("result"), ev))
+r = c.post(B + "/api/chat", json={"message": "CTXTEST read three big files"}, headers=H).json()
+t0 = time.time()
+while time.time() - t0 < 60:
+    t = c.get(f"{B}/api/tasks/{r['task_id']}").json()
+    if t["status"] in ("COMPLETED", "FAILED", "CANCELLED"):
+        break
+    time.sleep(0.5)
+ev = [e for e in t.get("events", []) if e["type"] == "context_shrunk"]
+# (a second run in the same runtime process already knows the limit and shrinks before sending: no event then)
+check("context overflow shrinks and retries", t["status"] == "COMPLETED" and (t.get("result") or "").startswith("CTX OK"),
+      (t["status"], t.get("result"), t.get("error"), ev))
 c.delete(f"{B}/api/schedules/{sid}", headers=H)
 c.put(B + "/api/settings", json={"max_steps": s0.get("max_steps", 30)}, headers=H)
 print("ALL PASS" if not fails else f"{len(fails)} FAILED: {fails}")

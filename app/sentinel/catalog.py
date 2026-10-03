@@ -33,6 +33,15 @@ TOOLS: dict[str, dict] = {
         "description": "读取一封邮件全文。Read one email (body, attachments list) by message id from gmail_search.",
         "parameters": _obj({"message_id": {"type": S}}, ["message_id"]),
     },
+    "gmail_read_amounts": {
+        "connector": "gmail", "capability": "read", "operation": "read", "risk": "low", "data_class": "CONFIDENTIAL",
+        "description": "批量读取多封邮件里的金额行（收据、账单、发票）。Open up to 40 emails at once (ids from gmail_search) and return, "
+                       "for each, its date, sender, subject and only the lines that carry money (totals, amounts charged, fares, "
+                       "due amounts, with their currency). Use it to count or total receipts / bills / orders instead of calling "
+                       "gmail_get_message on each email — much faster and keeps the context small.",
+        "parameters": _obj({"message_ids": {"type": "array", "items": {"type": S}, "description": "1-40 ids exactly as returned by gmail_search"}},
+                           ["message_ids"]),
+    },
     "gmail_get_thread": {
         "connector": "gmail", "capability": "read", "operation": "read", "risk": "low", "data_class": "CONFIDENTIAL",
         "description": "读取整个邮件会话。Read a whole email thread by thread_id.",

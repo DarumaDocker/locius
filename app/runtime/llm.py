@@ -33,6 +33,19 @@ class LLMError(Exception):
     pass
 
 
+class LLMContextError(LLMError):
+    """The prompt is larger than the model server's context window: retrying the same request cannot help."""
+    def __init__(self, msg: str, chars: int = 0):
+        super().__init__(msg)
+        self.chars = chars
+
+
+def _context_exceeded(text: str) -> bool:
+    t = (text or "").lower()
+    return ("context" in t and any(k in t for k in ("exceed", "too long", "too large", "maximum context", "context length",
+                                                     "context size", "n_ctx"))) or "prompt is too long" in t
+
+
 def parse_args(raw) -> dict:
     if isinstance(raw, dict):
         return raw
@@ -184,6 +197,9 @@ class LLM:
                 try:
                     async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=15)) as c:
                         r = await c.post(f"{base}/chat/completions", json=body)
+                    if r.status_code in (400, 413, 500) and _context_exceeded(r.text):
+                        raise LLMContextError(f"上下文太长 (prompt exceeds the model's context window): {r.text[:200]}",
+                                              chars=sum(len(str(m.get("content") or "")) for m in messages))
                     if r.status_code in (429, 500, 502, 503, 504):
                         last_err = f"HTTP {r.status_code}: {r.text[:200]}"
                         await asyncio.sleep(3 * (attempt + 1))

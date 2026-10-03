@@ -1136,3 +1136,45 @@ def test_ungrounded_numbers():
     tr2 = [tr[0], {"role": "assistant", "content": "", "tool_calls": [{"id": "1", "type": "function", "function": {"name": "gmail_search", "arguments": "{}"}}]},
            {"role": "tool", "content": "x"}]
     assert u(tr2, "total 12,345.67") == []          # no calculation in this run -> not checked
+
+
+def test_reread_guard():
+    from app.runtime.agent import reread_guard as g
+    def call(i, name, args):
+        return {"role": "assistant", "content": "", "tool_calls": [{"id": i, "type": "function",
+                "function": {"name": name, "arguments": json.dumps(args)}}]}
+    tr = [call("a", "gmail_get_message", {"message_id": "1"}), {"role": "tool", "tool_call_id": "a", "content": "Uber receipt S$12.30 " * 50}]
+    assert "已读取过" in g(tr, {"id": "b", "name": "gmail_get_message", "args": {"message_id": "1"}})
+    assert g(tr, {"id": "b", "name": "gmail_get_message", "args": {"message_id": "2"}}) is None
+    assert g(tr, {"id": "b", "name": "gmail_search", "args": {"message_id": "1"}}) is None
+    tr[1]["content"] = "Uber…\n…[较早的工具结果已压缩 older result compressed]"
+    assert g(tr, {"id": "b", "name": "gmail_get_message", "args": {"message_id": "1"}}) is None
+    tr[1]["content"] = "ERROR: timeout"
+    assert g(tr, {"id": "b", "name": "gmail_get_message", "args": {"message_id": "1"}}) is None
+
+
+def test_repeat_guard_allows_reread_after_compression():
+    from app.runtime.agent import repeat_guard as g
+    def call(i, q):
+        return {"role": "assistant", "content": "", "tool_calls": [{"id": i, "type": "function",
+                "function": {"name": "gmail_search", "arguments": json.dumps({"query": q})}}]}
+    tr = []
+    for i in range(3):
+        tr += [call(f"c{i}", "from:openai.com"), {"role": "tool", "tool_call_id": f"c{i}", "content": "results " * 200}]
+    nxt = {"id": "n", "name": "gmail_search", "args": {"query": "from:openai.com"}}
+    assert g(tr, nxt) and "重复调用" in g(tr, nxt)
+    tr[-1]["content"] = "results…\n…[较早的工具结果已压缩 older result compressed]"
+    assert g(tr, nxt) is None
+
+
+def test_invented_id_guard_and_money_lines():
+    from app.runtime.agent import invented_id_guard as g
+    from app.sentinel.actions import money_lines
+    tr = [{"role": "tool", "tool_call_id": "a", "content": '{"messages": [{"id": "g2:1878038399524851319"}]}'}]
+    assert g(tr, {"id": "x", "name": "gmail_get_message", "args": {"message_id": "g2:1878038399524851319"}}) is None
+    assert "Never invent" in g(tr, {"id": "x", "name": "gmail_get_message", "args": {"message_id": "1878038389737846821"}})
+    assert g(tr, {"id": "x", "name": "gmail_get_message", "args": {"message_id": "1878038389737846821"}},
+             known={"1878038389737846821"}) is None
+    assert g(tr, {"id": "x", "name": "gmail_read_amounts", "args": {"message_ids": ["g2:1878038399524851319", "999999999999"]}}) is None
+    assert g(tr, {"id": "x", "name": "gmail_search", "args": {"query": "x"}}) is None
+    assert money_lines("Thanks\nTotal\nHK$101.31\nTrip fare HK$95.00\nDue date: 10 October 2026") == ["Total HK$101.31", "Trip fare HK$95.00"]

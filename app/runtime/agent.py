@@ -22,7 +22,7 @@ import httpx
 from app.common.util import dumps, new_id, now_ts, truncate
 from app.runtime import attachments as AT
 from app.runtime import prompts
-from app.runtime.llm import LLM, LLMError, extract_json
+from app.runtime.llm import LLM, LLMContextError, LLMError, extract_json
 from app.runtime.store import RStore
 
 SENTINEL_URL = os.environ.get("SENTINEL_URL", "http://127.0.0.1:8080")
@@ -36,7 +36,7 @@ WAITING = {"WAITING_APPROVAL", "WAITING_EXTERNAL", "PAUSED"}
 RESULT_LIMIT = 9000
 SEARCH_RESULT_LIMIT = 30000   # gmail_search hits are compact (~250 chars); 100+ of them must fit for counts and totals
 SEND_FILE_MAX = 200 * 1024 * 1024    # chat download; Telegram's own bot limit (50 MB) is checked by Sentinel
-SUBAGENT_TOOLS = {"gmail_search", "gmail_get_message", "gmail_get_thread", "browser_navigate", "browser_snapshot",
+SUBAGENT_TOOLS = {"gmail_search", "gmail_get_message", "gmail_get_thread", "gmail_read_amounts", "browser_navigate", "browser_snapshot",
                   "browser_search", "browser_read",
                   "browser_click", "browser_type", "browser_press", "browser_scroll", "browser_back", "browser_wait",
                   "browser_select", "browser_find", "browser_look", "browser_locate", "browser_click_at", "files_read", "file_look", "files_list", "files_search", "memory_search", "market_data", "stock_fundamentals", "calculate", "data_query"}
@@ -123,12 +123,90 @@ def repeat_guard(transcript: list[dict], call: dict) -> str | None:
             break
         streak += 1
     total = sigs.count(me)
+    if total and total < REPEAT_TOTAL + 2 and _last_result_compressed(transcript, call, me):
+        # 2026-10-04 M2-06: the earlier result was compressed out of the context, so the model cannot see it any more —
+        # blocking the re-read left it asking for the same two searches until it gave up
+        return None
     if (name not in REPEAT_STREAK_OK and streak >= REPEAT_STREAK) or (REPEAT_READ.search(name) and total >= REPEAT_TOTAL):
         n = total + 1
         return (f"ERROR: 重复调用已拦截 — 这是第 {n} 次用完全相同的参数调用 {name}，结果不会改变，本次没有执行。"
                 "请直接使用前面已经拿到的结果继续下一步；如果这个来源读不到需要的内容，就跳过它，换别的来源，或者用已有的内容完成任务。"
                 f" Repeated identical call blocked ({name}, {n}x): the result will not change. Use what you already have, "
                 "skip this source, and move on to the next step.")
+    return None
+
+
+def _last_result_compressed(transcript: list[dict], call: dict, me: str) -> bool:
+    last_id = None
+    for m in transcript:
+        for tc in m.get("tool_calls") or []:
+            fn = tc.get("function") or {}
+            if tc.get("id") != call["id"] and _call_sig(fn.get("name", ""), fn.get("arguments")) == me:
+                last_id = tc.get("id")
+    if not last_id:
+        return False
+    return any(m.get("role") == "tool" and m.get("tool_call_id") == last_id and COMPRESSED_MARK in str(m.get("content") or "")
+               for m in transcript)
+
+
+# Mail ids must come from a tool result: 2026-10-04 M2-10 the model "continued" a list of ids by arithmetic
+# (1878038389737846821, …86788965087, …83840083353 …) and burned 20 minutes on "message not found".
+ID_ARGS = {"gmail_get_message": "message_id", "gmail_get_thread": "thread_id", "gmail_save_attachment": "message_id"}
+
+
+def invented_id_guard(transcript: list[dict], call: dict, known: set | None = None) -> str | None:
+    key = ID_ARGS.get(call["name"])
+    ids = []
+    if key:
+        ids = [str((call.get("args") or {}).get(key) or "")]
+    elif call["name"] == "gmail_read_amounts":
+        v = (call.get("args") or {}).get("message_ids") or []
+        ids = [str(x) for x in (v if isinstance(v, list) else re.split(r"[,\s]+", str(v)))]
+    ids = [i.strip() for i in ids if i and i.strip()]
+    if not ids:
+        return None
+    seen = "\n".join(str(m.get("content") or "") for m in transcript if m.get("role") in ("tool", "user", "system"))
+    known = known or set()
+    bad = [i for i in ids if i not in known and i.split(":", 1)[-1] not in known and i.split(":", 1)[-1] not in seen]
+    if not bad:
+        return None
+    if len(bad) < len(ids):   # drop the made-up ones, keep the real ones
+        return None
+    return (f"ERROR: 这些 id 没有出现在任何搜索结果里（{', '.join(bad[:3])}…），不要自己编 id 或按规律推算 id。"
+            "先用 gmail_search 找到邮件，再原样复制它返回的 id（包括 g2: 这样的前缀）。"
+            f" These ids do not appear in any search result ({', '.join(bad[:3])}…). Never invent or extrapolate ids: "
+            "run gmail_search and copy the ids it returns exactly (including prefixes like g2:).")
+
+
+# Reading the same mail / page / file again while its full result is still in the context only makes the context (and
+# every following model call) bigger: answer with a pointer instead. A compressed or failed earlier result is re-read.
+REREAD_TOOLS = re.compile(r"^(gmail_get_message|gmail_get_thread|notion_get_page|notion_read|files_read|web_read|browser_read)")
+COMPRESSED_MARK = "older result compressed"
+
+
+def reread_guard(transcript: list[dict], call: dict) -> str | None:
+    name = call["name"]
+    if not REREAD_TOOLS.search(name):
+        return None
+    me = _call_sig(name, call.get("args") or {})
+    earlier = {}
+    for m in transcript:
+        for tc in m.get("tool_calls") or []:
+            if tc.get("id") == call["id"]:
+                continue
+            fn = tc.get("function") or {}
+            if _call_sig(fn.get("name", ""), fn.get("arguments")) == me:
+                earlier[tc.get("id")] = True
+    if not earlier:
+        return None
+    for m in transcript:
+        if m.get("role") == "tool" and m.get("tool_call_id") in earlier:
+            c = str(m.get("content") or "")
+            if c and not c.startswith("ERROR") and COMPRESSED_MARK not in c and "已跳过" not in c[:10] and "已读取过" not in c[:10]:
+                return (f"已读取过 — 这个内容在上文调用 {m['tool_call_id']} 的结果里，完整保留着，没有再读一次。请直接使用它；"
+                        "如果需要的东西都已经有了，就继续下一步或写最终回答。"
+                        f" Already read: the full result is above (call {m['tool_call_id']}); use it instead of reading again. "
+                        "If you have what you need, move on or write the final answer.")
     return None
 
 
@@ -517,6 +595,8 @@ class Runtime:
         self.llm = LLM(self.store.settings, on_call=self._on_llm_call)
         self.running: dict[str, asyncio.Task] = {}
         self._remakes: dict[tuple, int] = {}   # (task, tool, output) -> files made, see REMAKE_MAX
+        self._seen_ids: dict[str, set] = {}   # task -> id-like tokens seen in its tool results (survives compression)
+        self._ctx_chars = 0   # learned from a "context exceeded" error: keep requests below this many chars
         self._confidential: set[str] = set()   # tasks that read the user's files (Sentinel was told)
         self._sent_files: set[tuple] = set()    # (task, file, size, mtime) already posted to the chat
         self.cancel_flags: set[str] = set()
@@ -830,22 +910,35 @@ class Runtime:
             tools = [x for x in tools if x["function"]["name"] in FINISH_TOOLS] or tools
         return tools
 
-    def _compress(self, transcript: list[dict]) -> list[dict]:
+    def _compress(self, transcript: list[dict], high: int | None = None) -> list[dict]:
         """Keep the context small: shrink old tool results, keep the last few intact.
 
-        Compresses in batches (above COMPRESS_HIGH chars, oldest first, down to COMPRESS_LOW) rather than a little
-        every step: between batches the conversation only grows at the end, so the model server reuses its cache."""
+        Compresses in batches (above `high` chars, oldest first, down to ~57% of it) rather than a little every step:
+        between batches the conversation only grows at the end, so the model server reuses its cache. When one turn
+        brings back several big results (three 30k-char mail searches), the recent ones are shrunk too — all but the
+        newest first, then the newest — so the request always fits the model's context window."""
+        high = min(high or COMPRESS_HIGH, self._ctx_chars or COMPRESS_HIGH)
+        low = int(high * COMPRESS_LOW / COMPRESS_HIGH)
         total = sum(len(str(m.get("content") or "")) for m in transcript)
-        if total < COMPRESS_HIGH:
+        if total < high:
             return transcript
         tool_idx = [i for i, m in enumerate(transcript) if m.get("role") == "tool"]
-        for i in tool_idx[:-3]:
-            if total <= COMPRESS_LOW:
-                break
-            c = str(transcript[i].get("content") or "")
-            if len(c) > 600:
-                transcript[i]["content"] = c[:500] + "\n…[较早的工具结果已压缩 older result compressed]"
-                total -= len(c) - len(transcript[i]["content"])
+
+        def shrink(idxs, keep, goal):
+            nonlocal total
+            for i in idxs:
+                if total <= goal:
+                    break
+                c = str(transcript[i].get("content") or "")
+                if len(c) > keep + 100:
+                    transcript[i]["content"] = c[:keep] + "\n…[较早的工具结果已压缩 older result compressed]"
+                    total -= len(c) - len(transcript[i]["content"])
+
+        shrink(tool_idx[:-3], 500, low)
+        if total > high:
+            shrink(tool_idx[-3:-1], max(2000, high // 12), high)
+        if total > high and tool_idx:
+            shrink(tool_idx[-1:], max(4000, high // 3), high)
         return transcript
 
     async def run(self, task_id: str):
@@ -939,6 +1032,7 @@ class Runtime:
         gave_up = False    # set when the agent keeps going round in circles: it must answer now, without tools
         nudged = False
         numbers_checked = False
+        ctx_retries = 0
         while True:
             if task_id in self.cancel_flags:
                 return
@@ -1007,6 +1101,18 @@ class Runtime:
                     dead_ends_text(source_failures(self.store.events(task_id)), agent_lang(s)))}]
             try:
                 resp = await self.llm.chat(msgs, tools, purpose="executor", task_id=task_id)
+            except LLMContextError as e:
+                # too big for the model server (several large results in one turn): learn the limit, shrink, try again
+                ctx_retries += 1
+                sent = e.chars or sum(len(str(m.get("content") or "")) for m in msgs)
+                self._ctx_chars = max(8000, int(min(sent, self._ctx_chars or sent) * 0.7))
+                await self.event(task_id, "context_shrunk", {"chars": sent, "limit": self._ctx_chars, "try": ctx_retries})
+                if ctx_retries > 3:
+                    self.store.update_task(task_id, transcript=transcript)
+                    raise
+                transcript = self._compress(transcript)
+                self.store.update_task(task_id, transcript=transcript)
+                continue
             except LLMError as e:
                 self.store.update_task(task_id, transcript=transcript)
                 raise
@@ -1533,9 +1639,15 @@ class Runtime:
         await self.event(task_id, "tool_call", {"call_id": call["id"], "name": name, "args": _preview_args(args), "sub": sub})
         ext_names = {x["function"]["name"] for x in catalog.get("tools", [])}
         ok = True
-        repeated = (repeat_guard(transcript, call) or retype_guard(transcript, call)
+        repeated = (invented_id_guard(transcript, call, self._seen_ids.get(task_id)) or repeat_guard(transcript, call) or retype_guard(transcript, call)
                     or host_guard(lambda: self.store.events(task_id), call))
-        if repeated:
+        reread = None if repeated else reread_guard(transcript, call)
+        if reread:
+            content = reread
+            call["_refused"] = True   # no progress, but not a failure either (no re-plan on its own)
+            await self.audit("executor", name, task_id, resource="loop_guard", risk="low", decision="DENY",
+                             result="reread_pointer", detail={"args": _preview_args(args)})
+        elif repeated:
             content = repeated
             ok = False
             call["_refused"] = True
@@ -1631,6 +1743,10 @@ class Runtime:
             ok = False
         if not ok and agent_lang(self.store.settings()) == "en":
             content = prompts.system_text_en(content)
+        if ok and name.startswith("gmail_"):
+            ids = self._seen_ids.setdefault(task_id, set())
+            if len(ids) < 50000:
+                ids.update(re.findall(r"(?:[a-z]\d+:)?[A-Za-z0-9_\-]{8,}", str(content)))
         transcript.append({"role": "tool", "tool_call_id": call["id"], "content": content})
         await self.event(task_id, "tool_result", {"call_id": call["id"], "name": name, "ok": ok, "sub": sub,
                                                   "preview": truncate(content, 800)})
