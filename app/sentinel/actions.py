@@ -128,6 +128,17 @@ def normalize_query(q: str) -> tuple[str, bool]:
     return q, q != orig
 
 
+def relax_query(q: str) -> str:
+    """Keep only the sender and date/folder operators of a query (used when the full query finds nothing)."""
+    keep = [k.strip("(){}") for k in re.findall(r"\b(?:from|after|before|newer_than|older_than|in):[^\s(){}]+", q)]
+    froms = list(dict.fromkeys(k for k in keep if k.startswith("from:")))
+    if not froms:
+        return ""
+    rest = [k for k in keep if not k.startswith("from:")]
+    sender = froms[0] if len(froms) == 1 else "{" + " ".join(froms) + "}"
+    return " ".join([sender] + rest)
+
+
 MAX_AMOUNT_READS = 40
 _MONEY = re.compile(r"(?:S\$|SGD|US\$|USD|HK\$|HKD|A\$|AUD|NT\$|RM|MYR|CHF|EUR|GBP|JPY|CNY|RMB|THB|IDR|INR|KRW|"
                     r"[$€£¥₩฿₹]|元|円)\s?-?\d[\d,]*(?:\.\d{1,2})?|\d[\d,]*(?:\.\d{1,2})?\s?(?:SGD|USD|HKD|CHF|EUR|GBP|JPY|CNY|"
@@ -309,12 +320,25 @@ def _gmail_sync(store, tool: str, args: dict, task_id: str) -> dict:
                 raise ActionError("邮箱尚未连接 (no mailbox connected)")
             n = max(1, min(int(args.get("max_results") or 10), MAX_SEARCH))
             query, fixed = normalize_query(str(args.get("query", "")))
-            items, more = [], []
-            for g in clients:
-                found = g.search(query, n)
-                if len(found) >= n:
-                    more.append(g.email)
-                items += [_tag(m, g) for m in found]
+            relaxed = ""
+
+            def run(q):
+                got, full = [], []
+                for g in clients:
+                    found = g.search(q, n)
+                    if len(found) >= n:
+                        full.append(g.email)
+                    got += [_tag(m, g) for m in found]
+                return got, full
+
+            items, more = run(query)
+            if not items:
+                # 2026-10-04 M3-08: "from:openai.com subject:invoice OR subject:receipt …" found nothing and the model
+                # repeated it until it gave up — fall back to the sender (and dates) alone
+                r = relax_query(query)
+                if r and r != query:
+                    items, more = run(r)
+                    relaxed = r
             from app.sentinel.gmail import _date_key
             items.sort(key=lambda x: _date_key(x.get("date", "")), reverse=True)
             items = items[:MAX_SEARCH_TOTAL]
@@ -330,6 +354,10 @@ def _gmail_sync(store, tool: str, args: dict, task_id: str) -> dict:
                                        "period with after:/before: dates.")
             if fixed:
                 out["query_used"] = query
+            if relaxed:
+                out["query_used"] = relaxed
+                out["relaxed"] = ("No results for the full query, so these are the results for the sender / date part only: "
+                                  f"{relaxed}. Pick the relevant ones from the subjects.")
             if not items:
                 out["hint"] = ("0 results. Check the query syntax: dates are after:YYYY/MM/DD before:YYYY/MM/DD or newer_than:30d; "
                                "try fewer terms, or drop in:inbox to search all mail.")

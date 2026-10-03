@@ -239,8 +239,16 @@ _COOKIE_DECLINE = re.compile(r"^\s*(reject( all)?( cookies)?|decline( all)?( coo
                              r"すべて拒否|拒否する|必要なもののみ)\s*$", re.I)
 
 
+# Marketplace badges that contain a risky word but are not actions (2026-10-04 M3-21: a Carousell listing card
+# "Buyer Protection · MacBook Air M5 · S$2,450" asked for approval)
+_BADGES = re.compile(r"(buyer|purchase|payment) protection|free (returns|delivery)|apply (coupon|voucher)s? at checkout", re.I)
+
+
 def click_is_risky(role: str, name: str, input_type: str = "") -> bool:
-    label = f"{name or ''}"
+    label = _BADGES.sub(" ", f"{name or ''}")
+    if (role or "").lower() == "link" and ("\n" in label.strip() or len(label) > 80):
+        # a whole product / listing card is one link: judge it by its first line, like a person reading the title
+        label = label.strip().split("\n")[0][:80]
     if _CART_ADD.search(label) or _COOKIE_DECLINE.search(label):
         return False
     if (input_type or "").lower() == "submit":

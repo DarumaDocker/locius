@@ -45,6 +45,7 @@ SUBAGENT_TOOLS = {"gmail_search", "gmail_get_message", "gmail_get_thread", "gmai
 # and read-type calls after REPEAT_TOTAL anywhere in the task. Tools where repeating is normal are exempt from the streak rule.
 REPEAT_STREAK = 2
 REPEAT_TOTAL = 3
+PLAN_STREAK = 3   # update_plan calls in a row (with nothing else between) before the next one is refused
 REPEAT_STREAK_OK = {"browser_scroll", "browser_press", "browser_wait", "browser_click", "browser_back", "update_plan"}
 REPEAT_READ = re.compile(r"navigate|search|read|list|_get|fetch|query")
 
@@ -105,6 +106,14 @@ def repeat_guard(transcript: list[dict], call: dict) -> str | None:
     """Refusal text if `call` repeats an identical earlier call too often, else None."""
     name = call["name"]
     if name == "update_plan":
+        # 2026-10-04 TC17: 58 update_plan calls in a row (no real work between them) used up all 80 steps
+        names = [((tc.get("function") or {}).get("name")) for m in transcript for tc in (m.get("tool_calls") or [])
+                 if tc.get("id") != call["id"]]
+        if len(names) >= PLAN_STREAK and all(n == "update_plan" for n in names[-PLAN_STREAK:]):
+            return ("ERROR: 计划已经更新过好几次了，这次没有执行。不要再调用 update_plan：现在就执行下一步（调用真正干活的工具），"
+                    "或者信息已经够了就直接写最终回答。"
+                    " The plan was already updated several times in a row; this call was not run. Stop calling update_plan: "
+                    "do the next step with a real tool now, or write the final answer if you have enough.")
         return None
     sigs = []
     for m in transcript:
@@ -129,6 +138,15 @@ def repeat_guard(transcript: list[dict], call: dict) -> str | None:
         return None
     if (name not in REPEAT_STREAK_OK and streak >= REPEAT_STREAK) or (REPEAT_READ.search(name) and total >= REPEAT_TOTAL):
         n = total + 1
+        if name == "gmail_search":
+            # 2026-10-04 M2-06 / M3-08: the model re-ran the same mail search 5-11 times instead of moving on
+            return (f"ERROR: 这个搜索已经做过 {total} 次了，结果就在上文，这次没有执行。下一步：从上文结果里挑出相关邮件的 id，"
+                    "统计金额就调用 gmail_read_amounts(message_ids=[…])，要看全文就调用 gmail_get_message；"
+                    "如果上文结果里没有需要的邮件，就换一个不同的查询（例如只用 from:发件人域名）。"
+                    f" This exact search already ran {total}x and its result is above; it was not run again. Next step: take "
+                    "the ids of the relevant emails from that result and call gmail_read_amounts(message_ids=[…]) for amounts, "
+                    "or gmail_get_message for full text. If the result has nothing useful, run a DIFFERENT query "
+                    "(e.g. only from:<sender domain>).")
         return (f"ERROR: 重复调用已拦截 — 这是第 {n} 次用完全相同的参数调用 {name}，结果不会改变，本次没有执行。"
                 "请直接使用前面已经拿到的结果继续下一步；如果这个来源读不到需要的内容，就跳过它，换别的来源，或者用已有的内容完成任务。"
                 f" Repeated identical call blocked ({name}, {n}x): the result will not change. Use what you already have, "

@@ -1162,7 +1162,7 @@ def test_repeat_guard_allows_reread_after_compression():
     for i in range(3):
         tr += [call(f"c{i}", "from:openai.com"), {"role": "tool", "tool_call_id": f"c{i}", "content": "results " * 200}]
     nxt = {"id": "n", "name": "gmail_search", "args": {"query": "from:openai.com"}}
-    assert g(tr, nxt) and "重复调用" in g(tr, nxt)
+    assert g(tr, nxt) and "gmail_read_amounts" in g(tr, nxt)
     tr[-1]["content"] = "results…\n…[较早的工具结果已压缩 older result compressed]"
     assert g(tr, nxt) is None
 
@@ -1185,3 +1185,27 @@ def test_normalize_query():
     assert n("x newer_than:2026-08-03") == ("x after:2026/08/03", True)
     assert n("after:2026-9-1 before:2026.10.01") == ("after:2026/9/1 before:2026/10/01", True)
     assert n("newer_than:30d from:grab.com") == ("newer_than:30d from:grab.com", False)
+
+
+def test_update_plan_streak_refused():
+    from app.runtime.agent import repeat_guard as g
+    def call(i, name):
+        return {"role": "assistant", "content": "", "tool_calls": [{"id": i, "type": "function",
+                "function": {"name": name, "arguments": "{}"}}]}
+    tr = [call("a", "browser_navigate"), call("b", "update_plan"), call("c", "update_plan")]
+    assert g(tr, {"id": "x", "name": "update_plan", "args": {}}) is None
+    tr.append(call("d", "update_plan"))
+    assert "update_plan" in g(tr, {"id": "x", "name": "update_plan", "args": {}})
+
+
+def test_relax_query():
+    from app.sentinel.actions import relax_query as r
+    assert r("from:openai.com subject:invoice OR subject:receipt after:2026/08/01") == "from:openai.com after:2026/08/01"
+    assert r("(from:anthropic OR from:openai) invoice newer_than:60d") == "{from:anthropic from:openai} newer_than:60d"
+    assert r("invoice receipt") == ""
+
+
+def test_listing_card_link_not_risky():
+    from app.sentinel.guard import click_is_risky as c
+    assert not c("link", "Buyer Protection\n\n13-inch MacBook Air M5 -32GB RAM\n\nS$2,450\n\nLike new")
+    assert c("link", "Unsubscribe") and c("button", "Buy now") and c("link", "Delete account")

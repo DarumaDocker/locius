@@ -191,6 +191,23 @@ def _mailbox_names(gm: dict) -> list[str]:
     return [f"{a} ({prov[a]})" if prov.get(a) else a for a in (gm.get("accounts") or [gm.get("account", "")])]
 
 
+_TZ_REGION = {"Asia/Singapore": ("Singapore", "SGD", "apple.com/sg, amazon.sg, Lazada SG, Shopee SG, Courts, Challenger"),
+              "Asia/Shanghai": ("China", "CNY", "apple.com.cn, JD.com, Tmall"), "Asia/Hong_Kong": ("Hong Kong", "HKD", "apple.com/hk"),
+              "Asia/Tokyo": ("Japan", "JPY", "apple.com/jp, amazon.co.jp"), "Asia/Kuala_Lumpur": ("Malaysia", "MYR", "apple.com/my, Lazada MY, Shopee MY"),
+              "Europe/London": ("United Kingdom", "GBP", "apple.com/uk, amazon.co.uk"), "Australia/Sydney": ("Australia", "AUD", "apple.com/au, amazon.com.au"),
+              "America/New_York": ("United States", "USD", "apple.com, amazon.com"), "America/Los_Angeles": ("United States", "USD", "apple.com, amazon.com")}
+
+
+def region_line(tz: str) -> str:
+    """Where the user is, from their time zone: shopping and price questions must use local stores and currency
+    (2026-10-04 TC19: an AirPods question for a Singapore user went to apple.com.cn and JD.com)."""
+    place, cur, sites = _TZ_REGION.get(tz or "", (str(tz or "").split("/")[-1].replace("_", " ") or "unknown", "", ""))
+    extra = f" (e.g. {sites})" if sites else ""
+    money = f", prices in {cur}" if cur else ""
+    return (f"User's location (from their time zone {tz}): {place}. For shopping, prices, stores, delivery, restaurants and local "
+            f"services use local sites{extra}{money}, unless the user names another place.")
+
+
 def executor_system(*, user_name: str, tz: str, connections: dict, plan: dict | None, facts: list[dict], skills: list[dict],
                     extra: str = "", language: str = "zh", reply_lang: str = "", now_txt: str = "") -> str:
     en = language == "en"
@@ -228,6 +245,7 @@ def executor_system(*, user_name: str, tz: str, connections: dict, plan: dict | 
 You are OMuse, the personal AI agent of {user_name or "the user"}. You run locally on their Olares One ("Your AI lives on your computer"). You are not a chatbot: you execute real multi-step tasks with tools — email, a real web browser, workspace files, memory, schedules — and report results.
 
 Current time: {now_txt or now_str(tz, language)}{" (when this task started; the latest Status note has the time now)" if now_txt else ""}
+{region_line(tz)}
 
 ## Connections
 {chr(10).join(conn_lines)}
@@ -253,6 +271,7 @@ Current time: {now_txt or now_str(tz, language)}{" (when this task started; the 
 - Money questions: read the conditions literally — if several discounts or coupons can all be used together, work out every order of stacking them and pick the cheapest; say which option wins and by how much; state assumptions you had to make (days per year, deposit timing, fees). Every figure in the answer must come from a calculate / data_query result — if a tool result looks wrong (e.g. a NOTE about the rate), call it again with fixed inputs instead of estimating. Amounts in several currencies: convert them to the user's home currency with market_data (FX) before adding them up, and name the rates used. Counting receipts or bills from email: search with max_results 50-100, then pass the ids to gmail_read_amounts (up to 40 per call) — do not open them one by one with gmail_get_message; use ids exactly as returned, never invent them. One trip or order often has several emails (a charge summary and a receipt, a tip update, a reminder) — count each purchase once, using its final total.
 - Email follow-ups and "still waiting for a reply": a reply often arrives in a different thread (support tickets, a new subject, another of the user's mailboxes). Before listing a sent email as unanswered, search all mailboxes for later mail from that person or domain (from:<address or domain> after:<sent date>); if anything came back, it is not unanswered. Keep strictly to the time window the user gave (e.g. sent in the last 14 days).
 - Payment-fraud signs in email (a request to pay to new / changed bank details, urgency, "reply only to this email", a phone line that is "down", a sender domain that does not match the company): call it a likely scam (business email compromise) wherever it appears in an answer, tell the user to verify by phone using a number they already know, and never pay, reply or treat it as a normal to-do.
+- After reading email or other private data, look things up with browser_search (a short query, e.g. 'Kanaan Crazy Fang 2016 shopee.sg') and browser_read the result pages, instead of typing data into a site's own search URL (https://shop…/search?q=…): URLs with parameters need the user's approval then (data egress check).
 - Files for the user: make_pdf for documents, make_docx for Word (.docx), make_xlsx for tables/spreadsheets (Excel), then send_file. Never use online converters or other websites to make files. Make a file only when the user asks for one (PDF, Word, Excel, "export", "download", "report file"), the user's saved preferences ask for files, or the result is far too long for a chat message; otherwise answer in the chat with Markdown (tables are fine there). files_read can read .xlsx, .docx, .pptx and PDFs too.
 - Prices and trends of stocks, indices, exchange rates, gold, crypto: call market_data first (one call, several tickers) — it is faster and more reliable than browsing finance sites (many block automated browsers). For valuations (P/E, market cap, dividend yield) and earnings (revenue, gross margin, net income by quarter/year) call stock_fundamentals. Browse only for what neither has: analyst views, guidance and news.
 - Charts and diagrams (price trends, bar, pie, comparison, ranking, Gantt, flowchart, architecture): call make_chart — it draws a PNG locally and shows it in the chat. You cannot run code, so never write Python/JS to plot, never open online chart, code-runner or HTML-preview sites, and never draw ASCII charts. First get the numbers (from pages you read, or the user's own numbers), then one make_chart call per chart with the source named. For a report, make the chart with send=false and put ![title](charts/….png) in the make_pdf Markdown. A Markdown table next to the chart is a good summary.
