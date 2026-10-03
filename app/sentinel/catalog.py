@@ -42,6 +42,19 @@ TOOLS: dict[str, dict] = {
         "parameters": _obj({"message_ids": {"type": "array", "items": {"type": S}, "description": "1-40 ids exactly as returned by gmail_search"}},
                            ["message_ids"]),
     },
+    "gmail_find_receipts": {
+        "connector": "gmail", "capability": "read", "operation": "read", "risk": "low", "data_class": "CONFIDENTIAL",
+        "description": "一步找出收据/账单/发票并读出金额。Find receipts, bills, invoices and order confirmations in ALL mailboxes for a "
+                       "period (searching archived mail too) and return, per email, date, sender, subject and the money lines — in "
+                       "one call. Give `senders` (domains or names, e.g. ['anthropic.com','openai.com','grab.com']) to search each "
+                       "one separately; without senders it searches receipt/invoice/order keywords. Use this FIRST for spending, "
+                       "subscriptions, trips or bills; then add up with calculate (count each purchase once).",
+        "parameters": _obj({"senders": {"type": "array", "items": {"type": S}, "description": "optional sender domains/names, up to 12"},
+                            "days": {"type": "integer", "description": "look back this many days (default 30, max 400)"},
+                            "after": {"type": S, "description": "optional start date YYYY/MM/DD (instead of days)"},
+                            "before": {"type": S, "description": "optional end date YYYY/MM/DD"},
+                            "keywords": {"type": S, "description": "optional extra words, e.g. 'trip OR ride'"}}),
+    },
     "gmail_get_thread": {
         "connector": "gmail", "capability": "read", "operation": "read", "risk": "low", "data_class": "CONFIDENTIAL",
         "description": "读取整个邮件会话。Read a whole email thread by thread_id.",

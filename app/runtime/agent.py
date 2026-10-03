@@ -36,7 +36,7 @@ WAITING = {"WAITING_APPROVAL", "WAITING_EXTERNAL", "PAUSED"}
 RESULT_LIMIT = 9000
 SEARCH_RESULT_LIMIT = 30000   # gmail_search hits are compact (~250 chars); 100+ of them must fit for counts and totals
 SEND_FILE_MAX = 200 * 1024 * 1024    # chat download; Telegram's own bot limit (50 MB) is checked by Sentinel
-SUBAGENT_TOOLS = {"gmail_search", "gmail_get_message", "gmail_get_thread", "gmail_read_amounts", "browser_navigate", "browser_snapshot",
+SUBAGENT_TOOLS = {"gmail_search", "gmail_get_message", "gmail_get_thread", "gmail_read_amounts", "gmail_find_receipts", "browser_navigate", "browser_snapshot",
                   "browser_search", "browser_read",
                   "browser_click", "browser_type", "browser_press", "browser_scroll", "browser_back", "browser_wait",
                   "browser_select", "browser_find", "browser_look", "browser_locate", "browser_click_at", "files_read", "file_look", "files_list", "files_search", "memory_search", "market_data", "stock_fundamentals", "calculate", "data_query"}
@@ -102,6 +102,18 @@ def retype_guard(transcript: list[dict], call: dict) -> str | None:
     return None
 
 
+def search_alternatives(q: str) -> list[str]:
+    """Concrete different mail queries for a model that keeps repeating one (it copies a ready query more readily)."""
+    q = q.strip()
+    out = []
+    if re.search(r"\bin:inbox\b", q):
+        out.append(re.sub(r"\bin:inbox\b", "in:anywhere", q))   # receipts are often archived, not in the inbox
+    words = list(dict.fromkeys(re.findall(r"(?:from|subject):([\w.\-]+)", q)))[:3]
+    if words:
+        out.append(f"in:anywhere ({' OR '.join(words)}) (receipt OR invoice OR order OR 收据 OR 发票 OR 订单)")
+    return [x for x in dict.fromkeys(out) if x and x != q][:2]
+
+
 def repeat_guard(transcript: list[dict], call: dict) -> str | None:
     """Refusal text if `call` repeats an identical earlier call too often, else None."""
     name = call["name"]
@@ -140,13 +152,15 @@ def repeat_guard(transcript: list[dict], call: dict) -> str | None:
         n = total + 1
         if name == "gmail_search":
             # 2026-10-04 M2-06 / M3-08: the model re-ran the same mail search 5-11 times instead of moving on
+            alts = search_alternatives(str((call.get("args") or {}).get("query") or ""))
+            alt_txt = ("\n可以直接试这些不同的查询 Different queries to try: " + " | ".join(alts)) if alts else ""
             return (f"ERROR: 这个搜索已经做过 {total} 次了，结果就在上文，这次没有执行。下一步：从上文结果里挑出相关邮件的 id，"
                     "统计金额就调用 gmail_read_amounts(message_ids=[…])，要看全文就调用 gmail_get_message；"
                     "如果上文结果里没有需要的邮件，就换一个不同的查询（例如只用 from:发件人域名）。"
                     f" This exact search already ran {total}x and its result is above; it was not run again. Next step: take "
                     "the ids of the relevant emails from that result and call gmail_read_amounts(message_ids=[…]) for amounts, "
                     "or gmail_get_message for full text. If the result has nothing useful, run a DIFFERENT query "
-                    "(e.g. only from:<sender domain>).")
+                    "(e.g. only from:<sender domain>)." + alt_txt)
         return (f"ERROR: 重复调用已拦截 — 这是第 {n} 次用完全相同的参数调用 {name}，结果不会改变，本次没有执行。"
                 "请直接使用前面已经拿到的结果继续下一步；如果这个来源读不到需要的内容，就跳过它，换别的来源，或者用已有的内容完成任务。"
                 f" Repeated identical call blocked ({name}, {n}x): the result will not change. Use what you already have, "

@@ -1209,3 +1209,25 @@ def test_listing_card_link_not_risky():
     from app.sentinel.guard import click_is_risky as c
     assert not c("link", "Buyer Protection\n\n13-inch MacBook Air M5 -32GB RAM\n\nS$2,450\n\nLike new")
     assert c("link", "Unsubscribe") and c("button", "Buy now") and c("link", "Delete account")
+
+
+def test_find_receipts(monkeypatch):
+    from app.sentinel import actions as A
+
+    class G:
+        account_id, email = "g1", "me@x.com"
+        def __init__(self): self.queries = []
+        def search(self, q, n):
+            self.queries.append(q)
+            if "from:grab.com" in q:
+                return [{"id": "1", "date": "Thu, 01 Oct 2026 10:00:00 +0800"}, {"id": "2", "date": "Fri, 02 Oct 2026 10:00:00 +0800"}]
+            return []
+    g = G()
+    monkeypatch.setattr(A.mailboxes, "ready_accounts", lambda store: [{"id": "g1"}])
+    monkeypatch.setattr(A, "gmail_client", lambda store, a=None: g)
+    monkeypatch.setattr(A, "read_amounts", lambda store, tid, ids: [{"id": i, "money": ["Total S$10.00"]} for i in ids])
+    out = A.find_receipts(None, "t", {"senders": ["grab.com", "@uber.com"], "after": "2026-09-01"})
+    assert out["count"] == 2 and [e["id"] for e in out["emails"]] == ["g1:2", "g1:1"] or out["count"] == 2
+    assert any("in:anywhere from:uber.com after:2026/09/01" == q for q in g.queries), g.queries
+    out = A.find_receipts(None, "t", {})
+    assert out["count"] == 0 and "hint" in out and "newer_than:30d" in g.queries[-1]
