@@ -25,6 +25,7 @@ spec:
 
     Runs on the local models served by your Olares by default — any OpenAI-compatible endpoint works. English and 中文 interface.
   upgradeDescription: |
+    0.2.44: Trip and meeting prep plans start by checking existing bookings, cancellations and delays in your mail
     0.2.43: Forgetting a memory also removes past-task summaries that quote it; trip and meeting prep checks existing bookings and the timeline
     0.2.42: Bill payments check for unusual amounts and only use the merchant's own payment link; repeated searches are pointed at the next concrete step
     0.2.41: New gmail_find_receipts: finds receipts, bills and invoices across all mailboxes and reads the amounts in one step; better suggestions when a mail search keeps failing
@@ -32,4 +33,3 @@ spec:
     0.2.39: Mail search fixes wrong date formats and hints how to narrow broad or empty searches
     0.2.38: Batch amount reading from receipts (gmail_read_amounts), safer context handling (no more 'context exceeded' failures), no invented email ids, smarter re-reads, better follow-up and scam detection
     0.2.37: Answers with figures no tool computed are recomputed once; email search returns up to 100 compact results per mailbox (counts and totals no longer miss emails); amounts in several currencies are converted before adding up.
-    0.2.36: More accurate money math: NPV, IRR, true APR of instalment plans and payback periods; yearly deposits; warnings when a rate looks like a fraction; coupon stacking and stated assumptions.

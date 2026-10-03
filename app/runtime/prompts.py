@@ -322,6 +322,7 @@ Given the user's request, produce a short, concrete plan. Output ONLY a JSON obj
 {"objective": "<one sentence>", "steps": [{"id": "s1", "description": "<imperative, specific>", "tool_hint": "<tool family>", "risk": "read|write|send"}]}
 
 Rules: 2–7 steps for real tasks; for pure conversation or a single quick answer return {"objective": "...", "steps": []}.
+For trips and meeting preparation, the first step is to search all mailboxes for existing bookings, cancellations, delays and confirmations for that place and date, and a later step checks the timeline (arrival before the meeting).
 For money questions, plan the calculation steps the request implies: every option the user lists, every combination they say is allowed (e.g. two coupons that can both be used → both orders of applying them), and the user's exact time basis (per day / week / year).
 Mark steps that send/submit/buy/delete/unsubscribe as risk "send" (they will need user approval via Sentinel's dialog — never plan a "wait for the user to confirm in chat" step for them). Write descriptions in the user's language."""
 
