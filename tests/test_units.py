@@ -1254,3 +1254,41 @@ def test_forget_removes_episodes_that_quote_the_fact():
     st.delete_fact(fid)
     left = [e["summary"] for e in st.episodes(10)]
     assert len(left) == 1 and "徒步鞋" in left[0]
+
+
+def test_llm_auth_header_from_env(monkeypatch):
+    from app.runtime.llm import auth_headers
+    monkeypatch.delenv("OMUSE_MODEL_API_KEY", raising=False)
+    monkeypatch.delenv("PERSONA_MODEL_API_KEY", raising=False)
+    assert auth_headers() == {}                                       # Olares router: no key, no header
+    monkeypatch.setenv("OMUSE_MODEL_API_KEY", " sk-test ")
+    assert auth_headers() == {"Authorization": "Bearer sk-test"}
+
+
+def test_docker_gate_basic_auth():
+    import asyncio, base64
+    from deploy.docker.gate import BasicAuthGate
+
+    async def inner(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+
+    gate = BasicAuthGate(inner, "omuse", "pä55", fail_delay=0)
+
+    def status(path, cred=None, scheme="Basic"):
+        sent = []
+
+        async def send(m):
+            sent.append(m)
+        headers = [(b"authorization", f"{scheme} {base64.b64encode(cred.encode()).decode()}".encode())] if cred else []
+        asyncio.run(gate({"type": "http", "path": path, "headers": headers}, None, send))
+        return sent[0]["status"], dict(sent[0]["headers"])
+
+    assert status("/")[0] == 401 and b"Basic" in status("/")[1][b"www-authenticate"]
+    assert status("/api/stream", "omuse:wrong")[0] == 401
+    assert status("/", "omuse:pä55", scheme="Bearer")[0] == 401
+    assert status("/api/stream", "omuse:pä55")[0] == 200
+    assert status("/sentinel/api/health")[0] == 200                   # container health check
+    assert status("/internal/act")[0] == 200                          # runtime calls: Sentinel checks RUNTIME_TOKEN itself
+    assert status("/internalx")[0] == 401
+    with pytest.raises(ValueError):
+        BasicAuthGate(inner, "omuse", "")

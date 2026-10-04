@@ -51,6 +51,24 @@ OMuse is a local-first AI agent for [Olares](https://www.olares.com). It doesn't
 
 The model endpoint defaults to `https://router.<your-olares-name>.olares.com/v1`; change it in the app's settings or the `PERSONA_MODEL_URL` / `PERSONA_MODEL` environment values. If the configured model isn't served, OMuse picks an available one.
 
+### Run with Docker (no Olares)
+
+One container holds all three services; state lives in the `omuse-data` volume.
+
+```bash
+docker build -t omuse .
+docker run -d --name omuse --restart unless-stopped \
+  -p 8080:8080 -v omuse-data:/omuse \
+  -e OMUSE_PASSWORD='choose-a-long-password' \
+  -e OMUSE_MODEL_URL=https://api.openai.com/v1 \
+  -e OMUSE_MODEL=gpt-4.1 \
+  -e OMUSE_MODEL_API_KEY=sk-... \
+  -e TZ=America/Los_Angeles \
+  omuse
+```
+
+Open `http://localhost:8080` and sign in as `omuse` (change with `OMUSE_USER`) with your password. Olares normally does the login; here the container asks for HTTP Basic auth and refuses to start without `OMUSE_PASSWORD`. Before opening the port to the internet, put HTTPS in front (Cloudflare Tunnel, Tailscale Funnel, Caddy, …) — Basic auth over plain HTTP sends the password in the clear. `OMUSE_MODEL_API_KEY` is sent as a Bearer token to the model endpoint and is never stored in Settings. Add `-p 8083:8083` only if you use the Telnyx phone line.
+
 ### Development
 
 ```bash
