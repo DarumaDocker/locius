@@ -1432,17 +1432,45 @@ function emailCard(gm, permRow) {
 function calendarCard(c, permRow) {
   c = c || { name: 'calendar', config: {}, permissions: {}, enabled: false, has_credential: false };
   const connected = c.has_credential && c.enabled;
+  const mode = c.mode || '';
   const redirect = location.origin + '/sentinel/api/connections/calendar/callback';
   const cid = h('input', { type: 'text', placeholder: '1234567890-abc….apps.googleusercontent.com', autocomplete: 'off' });
-  const csec = h('input', { type: 'password', placeholder: c.has_credential ? T('已保存 saved（同一个客户端可留空）') : 'GOCSPX-…', autocomplete: 'new-password' });
+  const csec = h('input', { type: 'password', placeholder: mode === 'google_own' ? T('已保存 saved（同一个客户端可留空）') : 'GOCSPX-…', autocomplete: 'new-password' });
+  const icalUrl = h('input', { type: 'password', placeholder: 'https://calendar.google.com/calendar/ical/…/private-…/basic.ics', autocomplete: 'off' });
   const copyBtn = h('button', { class: 'btn small', onclick: safe(async () => { await navigator.clipboard.writeText(redirect); toast(T('已复制 Copied')); }) }, T('复制 Copy'));
+  const modeLabel = { google: T('Google 登录'), google_own: T('自己的 Google Cloud 客户端'), ical: T('iCal 只读 read-only') }[mode] || '';
+  const googleBtn = h('button', { class: 'btn primary', onclick: safe(async e => {
+    e.target.disabled = true;
+    try { const r = await sapi('connections/calendar/google/start', { method: 'POST', body: { origin: location.origin } }); location.href = r.auth_url; }
+    finally { e.target.disabled = false; }
+  }) }, connected && mode === 'google' ? T('重新用 Google 登录 Sign in again') : T('用 Google 登录 Sign in with Google'));
+  const icalBtn = h('button', { class: c.managed_available ? 'btn' : 'btn primary', onclick: safe(async e => {
+    e.target.disabled = true;
+    try {
+      const r = await sapi('connections/calendar/ical', { method: 'POST', body: { url: icalUrl.value.trim(), time_zone: Intl.DateTimeFormat().resolvedOptions().timeZone || '' } });
+      toast(Tf("已连接 {0}（{1} 个日程）", (r.name || 'iCal'), (r.events)));
+      route();
+    } finally { e.target.disabled = false; }
+  }) }, T('连接 iCal Connect'));
   return h('div', { class: 'card stack' },
     h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, T('📅 Google 日历 Google Calendar')),
       h('span', { class: 'chip ' + (connected ? 'ok' : '') }, connected ? Tf("已连接 {0}", (c.config.email || '')) : T('未连接 Not connected'))),
-    h('p', { class: 'sub' }, T('查看日程、找空闲时间、帮你建日程和改期（有参会人、修改或删除时每次需审批）。用你自己的 Google Cloud 授权，令牌加密保存在本机 Sentinel 保险箱里，Agent 和模型看不到。')),
-    connected ? h('div', { class: 'small muted' }, Tf("时区 {0}", (c.config.time_zone || '—'))) : null,
-    h('details', { open: !c.has_credential },
-      h('summary', null, h('b', null, c.has_credential ? T('重新连接 Reconnect') : T('连接 Connect'))),
+    h('p', { class: 'sub' }, T('查看日程、找空闲时间、帮你建日程和改期（有参会人、修改或删除时每次需审批）。授权信息加密保存在本机 Sentinel 保险箱里，Agent 和模型看不到。')),
+    connected ? h('div', { class: 'small muted' }, Tf("方式 {0} · 时区 {1}", modeLabel, (c.config.time_zone || '—'))) : null,
+    c.managed_available ? h('div', { class: 'stack' },
+      h('div', null, googleBtn),
+      h('div', { class: 'small muted' }, T('一键授权：在弹出的 Google 页面登录并点「允许」即可，可读写日程。'))) : null,
+    h('details', { open: !c.has_credential && !c.managed_available },
+      h('summary', null, h('b', null, T('最快：粘贴日历的 iCal 私密地址（只读，30 秒）'))),
+      h('div', { class: 'stack', style: 'margin-top:10px' },
+        h('ol', { class: 'steps-help' },
+          h('li', null, T('电脑上打开 '), h('a', { href: 'https://calendar.google.com/calendar/r/settings', target: '_blank', rel: 'noopener' }, T('Google 日历设置')), T('，左侧「我的日历的设置」里点你的日历')),
+          h('li', null, T('往下找到「集成日历 Integrate calendar」，复制「iCal 格式的私密地址 Secret address in iCal format」')),
+          h('li', null, T('粘贴到下面点「连接」。只能查看日程和空闲时间，不能新建或修改；iCloud、Outlook 的日历发布链接也可以用'))),
+        h('label', { class: 'field' }, h('span', null, T('iCal 地址 iCal address')), icalUrl),
+        h('div', null, icalBtn))),
+    h('details', { open: mode === 'google_own' && !connected },
+      h('summary', null, h('b', null, T('高级：用自己的 Google Cloud 客户端'))),
       h('div', { class: 'stack', style: 'margin-top:10px' },
         h('ol', { class: 'steps-help' },
           h('li', null, T('打开 '), h('a', { href: 'https://console.cloud.google.com/projectcreate', target: '_blank', rel: 'noopener' }, 'Google Cloud Console'), T('，新建一个项目（名字随意，如 OMuse）')),
@@ -1453,14 +1481,15 @@ function calendarCard(c, permRow) {
           h('li', null, T('把生成的「客户端 ID」和「客户端密钥」粘贴到下面，点「连接 Google 日历」，在 Google 页面里同意授权'))),
         h('label', { class: 'field' }, h('span', null, T('客户端 ID Client ID')), cid),
         h('label', { class: 'field' }, h('span', null, T('客户端密钥 Client secret')), csec),
-        h('div', null, h('button', { class: 'btn primary', onclick: safe(async e => {
+        h('div', null, h('button', { class: 'btn', onclick: safe(async e => {
           e.target.disabled = true;
           try { const r = await sapi('connections/calendar/start', { method: 'POST', body: { client_id: cid.value.trim(), client_secret: csec.value.trim(), origin: location.origin } }); location.href = r.auth_url; }
           finally { e.target.disabled = false; }
         }) }, T('连接 Google 日历 Connect with Google'))))),
     h('div', null, h('b', null, T('权限 Permissions')),
       permRow(c, 'read', T('查看日程与空闲时间'), 'read', 'low'),
-      permRow(c, 'write', T('新建 / 修改 / 删除日程（邀请他人、修改、删除需审批）'), 'write', 'medium')),
+      mode === 'ical' ? h('div', { class: 'small muted' }, T('iCal 只读连接不能写入日程；要让 OMuse 帮你建日程，请用 Google 登录。'))
+        : permRow(c, 'write', T('新建 / 修改 / 删除日程（邀请他人、修改、删除需审批）'), 'write', 'medium')),
     c.has_credential ? h('div', { class: 'row' },
       h('button', { class: 'btn small', onclick: safe(async () => { const t = await sapi('connections/calendar/test', { method: 'POST', body: {} }); toast(t.ok ? Tf("正常 ✓ 未来 7 天有 {0} 个日程", (t.upcoming)) : t.error, !t.ok); }) }, T('测试')),
       h('label', { class: 'toggle' }, h('input', { type: 'checkbox', checked: c.enabled, onchange: safe(async e => { await sapi('connections/calendar', { method: 'PUT', body: { enabled: e.target.checked } }); }) }), T('启用')),

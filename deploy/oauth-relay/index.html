@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>OMuse sign-in</title>
+<style>
+  :root { color-scheme: light dark; --bg:#fafaf7; --fg:#1d1d1b; --muted:#6b6b66; --ok:#1F6F5C; --bad:#B42318; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#161615; --fg:#ecece8; --muted:#a3a39c; } }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif; }
+  main { max-width:520px; margin:12vh auto; padding:0 16px; }
+  h1 { font-size:20px; margin:0 0 8px; }
+  p { color:var(--muted); margin:6px 0; }
+  .bad { color:var(--bad); }
+</style>
+</head>
+<body>
+<main>
+  <h1 id="t">Returning to OMuse… 正在返回 OMuse…</h1>
+  <p id="m">This page only passes Google's one-time sign-in code back to your own OMuse. Nothing is stored here.<br>
+  本页只把 Google 的一次性授权码转回你自己的 OMuse，不保存任何信息。</p>
+</main>
+<script>
+/* OMuse OAuth relay. Google redirects here (one fixed redirect URI for every OMuse install); `state` was created by
+   the user's own OMuse and names its callback ({"r": "https://<box>/sentinel/api/connections/calendar/callback", "n": nonce}).
+   We forward code/state/error there. The box only accepts a state it issued itself and exchanges the code with PKCE. */
+(function () {
+  var q = new URLSearchParams(location.search);
+  var st = q.get('state') || '', r = '';
+  try {
+    var b = st.replace(/-/g, '+').replace(/_/g, '/');
+    b += '='.repeat((4 - b.length % 4) % 4);
+    r = JSON.parse(atob(b)).r || '';
+  } catch (e) { r = ''; }
+  var path = '/sentinel/api/connections/calendar/callback';
+  var ok = typeof r === 'string' && r.slice(-path.length) === path &&
+    (/^https:\/\/[A-Za-z0-9.-]+(:\d+)?\/[^?#\s]*$/.test(r) || /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?\/[^?#\s]*$/.test(r));
+  if (!ok) {
+    document.getElementById('t').textContent = 'Sign-in link is invalid 授权链接无效';
+    document.getElementById('t').className = 'bad';
+    document.getElementById('m').textContent = 'Go back to OMuse → Connections and start the sign-in again. 请回到 OMuse「连接」页重新开始。';
+    return;
+  }
+  var out = new URLSearchParams();
+  ['code', 'state', 'error'].forEach(function (k) { if (q.has(k)) out.set(k, q.get(k)); });
+  history.replaceState(null, '', location.pathname);   // drop the code from this page's history entry
+  location.replace(r + '?' + out.toString());
+})();
+</script>
+</body>
+</html>

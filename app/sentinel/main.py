@@ -179,6 +179,7 @@ async def catalog():
                         "workspace": c["config"].get("workspace") or c["config"].get("team") or "" if name in ("notion", "slack") else "",
                         "account": c["config"].get("email", "") if name in ("gmail", "calendar") else "",
                         "time_zone": c["config"].get("time_zone", "") if name == "calendar" else "",
+                        "read_only": actions.calendar_read_only(store) if name == "calendar" else False,
                         "lines": phone.lines_summary(store) if name == "phone" and ready else "",
                         "accounts": [a["email"] for a in sorted(mailboxes.ready_accounts(store), key=lambda a: a["id"] != mailboxes.default_id(store))] if name == "gmail" else [],
                         "providers": {a["email"]: mailproviders.label(a["provider"]) for a in mailboxes.ready_accounts(store)} if name == "gmail" else {}}
@@ -189,6 +190,8 @@ async def catalog():
         t = TOOLS[name]
         if str(t["connector"]).startswith("mcp:"):
             return True  # sync_catalog only publishes enabled, reviewed, non-"off" tools
+        if t["connector"] == "calendar" and t["capability"] == "write" and actions.calendar_read_only(store):
+            return False   # read-only iCal feed: don't offer writes the agent can't do
         return bool(store.connection(t["connector"])["permissions"].get(t["capability"]))
     schemas = [s for s in llm_schemas(enabled) if allowed(s["function"]["name"])]
     if not vault.list_items(store):
@@ -771,6 +774,11 @@ def _conn_view(name: str) -> dict:
         c["providers"] = mailproviders.public_presets()
         c["default"] = mailboxes.default_id(store)
         c["has_credential"] = bool(mailboxes.ready_accounts(store))
+    if name == "calendar":
+        from app.sentinel import gcal
+        sec = store.get_secret("cred_calendar_1") or {}
+        c["mode"] = "ical" if sec.get("ical_url") else ("google" if sec.get("managed") else ("google_own" if sec else ""))
+        c["managed_available"] = gcal.managed() is not None
     if name == "phone":
         c["dialmcp"] = {"connected": dialmcp.ready(store), "account": dialmcp.account(store), "url": dialmcp.url(store)}
         c["telnyx_ready"] = phone.telnyx_ready(store)
@@ -1238,6 +1246,54 @@ async def calendar_start(req: Request):
     return {"auth_url": gcal.auth_url(cid, redirect, state), "redirect_uri": redirect}
 
 
+@app.post("/sentinel/api/connections/calendar/google/start", dependencies=[Depends(ui_auth)])
+async def calendar_google_start(req: Request):
+    """One-click: OMuse's own Google client. Google -> fixed relay page -> this box's callback (state names it)."""
+    import base64
+    import hashlib
+    import json as _json
+    from app.sentinel import gcal
+    m = gcal.managed()
+    if not m:
+        raise HTTPException(400, "这个版本还没有内置 OMuse 的 Google 登录，请用下面的「自己的 Google Cloud 客户端」或 iCal 地址 (not available in this build)")
+    b = await req.json()
+    origin = _req_origin(req)
+    given = str(b.get("origin", "")).strip().rstrip("/")
+    if re.fullmatch(r"https?://[^/\s]+", given) and given.split("://", 1)[1] == origin.split("://", 1)[1]:
+        origin = given
+    back = origin + CAL_CALLBACK
+    verifier = secrets.token_urlsafe(48)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    state = base64.urlsafe_b64encode(_json.dumps({"r": back, "n": secrets.token_urlsafe(18)}, separators=(",", ":")).encode()).rstrip(b"=").decode()
+    store.kv_set("calendar_oauth", {"state": state, "ts": time.time(), "redirect": m["relay"], "mode": "managed", "verifier": verifier})
+    store.audit("user", "credential.calendar.start", resource="calendar", result="success", detail={"mode": "managed"})
+    return {"auth_url": gcal.auth_url(m["client_id"], m["relay"], state, challenge)}
+
+
+@app.post("/sentinel/api/connections/calendar/ical", dependencies=[Depends(ui_auth)])
+async def calendar_ical(req: Request):
+    """30-second read-only connection: the calendar's private iCal (ICS) address. The URL is the secret -> vault."""
+    from app.sentinel import ical
+    from app.sentinel.gcal import GCalError
+    b = await req.json()
+    try:
+        url = ical.normalize_url(str(b.get("url", "")))
+        tz_hint = str(b.get("time_zone") or "").strip()
+        feed = ical.ICalFeed(url, tz_hint or "UTC")
+        info = await asyncio.to_thread(lambda: (ical.fetch(url, force=True), feed.info())[1])
+    except GCalError as e:
+        raise HTTPException(400, str(e))
+    tz = info["time_zone"] or tz_hint or "UTC"
+    store.delete_secret("cred_calendar_access")
+    store.delete_secret("cred_calendar_client")
+    store.put_secret("calendar", {"ical_url": url})
+    store.save_connection("calendar", {"email": ical.label(url), "time_zone": tz, "client_id": "", "mode": "ical",
+                                       "calendar_name": info["name"]}, enabled=True)
+    store.audit("user", "credential.calendar.set", resource="calendar", result="success",
+                detail={"mode": "ical", "host": url.split("/")[2], "events": info["events"]})
+    return {"ok": True, "name": info["name"], "time_zone": tz, "events": info["events"], "connection": _conn_view("calendar")}
+
+
 def _cal_page(ok: bool, msg: str) -> Response:
     from html import escape
     color = "#1F6F5C" if ok else "#B42318"
@@ -1259,11 +1315,21 @@ async def calendar_callback(req: Request, code: str = "", state: str = "", error
     if not state or not pend.get("state") or not secrets.compare_digest(state, pend["state"]) or time.time() - pend.get("ts", 0) > 900:
         return _cal_page(False, "授权链接已失效或不匹配，请回到连接页重新点「连接 Google 日历」(state mismatch / expired)")
     store.kv_set("calendar_oauth", {})
-    cl = store.get_secret("cred_calendar_client") or {}
+    managed = pend.get("mode") == "managed"
+    if managed:
+        m = gcal.managed()
+        if not m:
+            return _cal_page(False, "这个版本没有内置 OMuse 的 Google 登录 (managed client missing)")
+        cl = {"client_id": m["client_id"], "client_secret": "" if m["broker"] else m["client_secret"]}
+        turl = gcal.token_url(m)
+    else:
+        cl = store.get_secret("cred_calendar_client") or {}
+        turl = ""
     try:
-        tok = await asyncio.to_thread(gcal.exchange_code, cl.get("client_id", ""), cl.get("client_secret", ""), code, pend["redirect"])
+        tok = await asyncio.to_thread(gcal.exchange_code, cl.get("client_id", ""), cl.get("client_secret", ""), code, pend["redirect"],
+                                      pend.get("verifier", ""), turl)
         g = gcal.GCal(cl["client_id"], cl["client_secret"], tok["refresh_token"], access_token=tok["access_token"],
-                      expires_at=time.time() + int(tok.get("expires_in") or 3600))
+                      expires_at=time.time() + int(tok.get("expires_in") or 3600), token_url=turl)
         try:
             who = await asyncio.to_thread(g.userinfo)
             tz = await asyncio.to_thread(g.settings_tz)
@@ -1273,9 +1339,15 @@ async def calendar_callback(req: Request, code: str = "", state: str = "", error
     except gcal.GCalError as e:
         store.audit("user", "credential.calendar.set", resource="calendar", result="failed", detail={"error": str(e)[:300]})
         return _cal_page(False, str(e))
-    store.put_secret("calendar", {"client_id": cl["client_id"], "client_secret": cl["client_secret"],
-                                  "refresh_token": tok["refresh_token"]})
-    store.save_connection("calendar", {"email": who.get("email", ""), "time_zone": tz, "client_id": cl["client_id"]}, enabled=True)
+    if managed:   # the secret is OMuse's (built in or kept by the broker): store only what is ours
+        store.put_secret("calendar", {"client_id": cl["client_id"], "managed": True, "refresh_token": tok["refresh_token"]})
+        store.delete_secret("cred_calendar_client")
+    else:
+        store.put_secret("calendar", {"client_id": cl["client_id"], "client_secret": cl["client_secret"],
+                                      "refresh_token": tok["refresh_token"]})
+    store.delete_secret("cred_calendar_access")
+    store.save_connection("calendar", {"email": who.get("email", ""), "time_zone": tz, "client_id": cl["client_id"],
+                                       "mode": "google" if managed else "google_own", "calendar_name": ""}, enabled=True)
     store.audit("user", "credential.calendar.set", resource="calendar", result="success", detail={"email": who.get("email", ""), "tz": tz})
     return _cal_page(True, f"已连接 {who.get('email', '')}（时区 {tz}）。Connected.")
 

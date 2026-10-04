@@ -206,6 +206,9 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
     if t["connector"] == "calendar":
         if not store.has_secret("cred_calendar_1"):
             return Decision(DENY, t["risk"], "Google 日历尚未连接：请在「连接 Connections」页设置 (not connected)")
+        if t["capability"] == "write" and (store.get_secret("cred_calendar_1") or {}).get("ical_url"):
+            from app.sentinel.ical import READ_ONLY
+            return Decision(DENY, t["risk"], READ_ONLY)
         if tool == "calendar_create_event" and args.get("attendees"):
             risk = _bump(risk, "high")
             reasons.append("会给参会人发送日历邀请邮件 (sends calendar invitations)")

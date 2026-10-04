@@ -28,15 +28,57 @@ class GCalError(Exception):
     pass
 
 
-def auth_url(client_id: str, redirect_uri: str, state: str) -> str:
-    return GOOGLE_AUTH + "?" + urlencode({
-        "client_id": client_id, "redirect_uri": redirect_uri, "response_type": "code", "scope": SCOPES,
-        "access_type": "offline", "prompt": "consent", "include_granted_scopes": "true", "state": state})
+# ------------------------------------------------------------------ OMuse's own ("managed") Google client
+# One OAuth client registered by the OMuse publisher, so users just "Sign in with Google" — no Google Cloud project.
+# Every Olares box has its own domain and Google only accepts pre-registered redirect URIs, so Google redirects to one
+# fixed relay page (RELAY) that forwards the code to the box named in `state`; the box checks the state it issued and
+# exchanges the code (PKCE). The client secret is either built in, or kept by a tiny token broker (BROKER) that adds
+# it to token requests, so it never ships in the app. Tokens are stored only in the box's vault.
+_MANAGED_FILE = os.environ.get("GOOGLE_MANAGED_FILE") or os.path.join(os.path.dirname(__file__), "google_managed.json")
 
 
-def exchange_code(client_id: str, client_secret: str, code: str, redirect_uri: str) -> dict:
-    r = httpx.post(GOOGLE_TOKEN, data={"code": code, "client_id": client_id, "client_secret": client_secret,
-                                       "redirect_uri": redirect_uri, "grant_type": "authorization_code"}, timeout=TIMEOUT)
+def managed() -> dict | None:
+    """{client_id, client_secret, relay, broker} or None when this build has no OMuse Google client."""
+    cfg = {}
+    try:
+        import json
+        with open(_MANAGED_FILE) as f:
+            cfg = json.load(f) or {}
+    except (OSError, ValueError):
+        cfg = {}
+    for k, env in (("client_id", "GOOGLE_MANAGED_CLIENT_ID"), ("client_secret", "GOOGLE_MANAGED_CLIENT_SECRET"),
+                   ("relay", "GOOGLE_RELAY_URL"), ("broker", "GOOGLE_BROKER_URL")):
+        if os.environ.get(env):
+            cfg[k] = os.environ[env]
+    cfg = {k: str(cfg.get(k) or "").strip() for k in ("client_id", "client_secret", "relay", "broker")}
+    if not cfg["client_id"] or not cfg["relay"] or not (cfg["client_secret"] or cfg["broker"]):
+        return None
+    return cfg
+
+
+def token_url(m: dict | None) -> str:
+    return (m["broker"].rstrip("/") + "/token") if m and m.get("broker") else GOOGLE_TOKEN
+
+
+def auth_url(client_id: str, redirect_uri: str, state: str, code_challenge: str = "") -> str:
+    q = {"client_id": client_id, "redirect_uri": redirect_uri, "response_type": "code", "scope": SCOPES,
+         "access_type": "offline", "prompt": "consent", "include_granted_scopes": "true", "state": state}
+    if code_challenge:
+        q.update(code_challenge=code_challenge, code_challenge_method="S256")
+    return GOOGLE_AUTH + "?" + urlencode(q)
+
+
+def exchange_code(client_id: str, client_secret: str, code: str, redirect_uri: str, code_verifier: str = "",
+                  url: str = "") -> dict:
+    data = {"code": code, "client_id": client_id, "redirect_uri": redirect_uri, "grant_type": "authorization_code"}
+    if client_secret:
+        data["client_secret"] = client_secret
+    if code_verifier:
+        data["code_verifier"] = code_verifier
+    try:
+        r = httpx.post(url or GOOGLE_TOKEN, data=data, timeout=TIMEOUT)
+    except httpx.HTTPError as e:
+        raise GCalError(f"连不上 Google 授权服务器 (cannot reach token endpoint): {type(e).__name__}")
     d = r.json() if r.content else {}
     if r.status_code != 200 or not d.get("access_token"):
         raise GCalError(f"Google 授权失败 (token exchange failed): {d.get('error_description') or d.get('error') or r.status_code}")
@@ -59,8 +101,9 @@ def _fmt_err(r: httpx.Response) -> str:
 
 class GCal:
     def __init__(self, client_id: str, client_secret: str, refresh_token: str, tz: str = "UTC", on_token=None,
-                 access_token: str = "", expires_at: float = 0):
+                 access_token: str = "", expires_at: float = 0, token_url: str = ""):
         self.client_id, self.client_secret, self.refresh_token = client_id, client_secret, refresh_token
+        self.token_url = token_url or GOOGLE_TOKEN
         self.tz = tz or "UTC"
         self.on_token = on_token
         self.access_token, self.expires_at = access_token, expires_at
@@ -73,8 +116,10 @@ class GCal:
     def _token(self) -> str:
         if self.access_token and time.time() < self.expires_at - 60:
             return self.access_token
-        r = self.c.post(GOOGLE_TOKEN, data={"client_id": self.client_id, "client_secret": self.client_secret,
-                                            "refresh_token": self.refresh_token, "grant_type": "refresh_token"})
+        data = {"client_id": self.client_id, "refresh_token": self.refresh_token, "grant_type": "refresh_token"}
+        if self.client_secret:
+            data["client_secret"] = self.client_secret
+        r = self.c.post(self.token_url, data=data)
         d = r.json() if r.content else {}
         if r.status_code != 200 or not d.get("access_token"):
             err = d.get("error", "")

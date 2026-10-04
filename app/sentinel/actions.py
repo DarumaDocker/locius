@@ -739,17 +739,30 @@ def _slack_sync(store, tool: str, args: dict, task_id: str) -> dict:
 
 # ------------------------------------------------------------------ Google Calendar
 def calendar_client(store):
-    from app.sentinel.gcal import GCal
+    from app.sentinel import gcal
     sec = store.get_secret("cred_calendar_1") or {}
+    conf = store.connection("calendar")["config"]
+    if sec.get("ical_url"):
+        from app.sentinel.ical import ICalFeed
+        return ICalFeed(sec["ical_url"], conf.get("time_zone") or "UTC")
     if not sec.get("refresh_token"):
         raise ActionError("Google 日历尚未连接：请在「连接 Connections」页连接 Google Calendar (not connected)")
-    conf = store.connection("calendar")["config"]
     cache = store.get_secret("cred_calendar_access") or {}
+    secret, url = sec.get("client_secret", ""), ""
+    if sec.get("managed"):
+        m = gcal.managed()
+        if not m:
+            raise ActionError("这个版本没有内置 OMuse 的 Google 登录，请在「连接」页重新连接 Google 日历 (managed client missing)")
+        secret, url = ("" if m["broker"] else m["client_secret"]), gcal.token_url(m)
 
     def keep(tok: str, exp: float):
         store.put_secret("calendar", {"access_token": tok, "expires_at": exp}, handle="cred_calendar_access")
-    return GCal(sec["client_id"], sec["client_secret"], sec["refresh_token"], conf.get("time_zone") or "UTC", on_token=keep,
-                access_token=cache.get("access_token", ""), expires_at=float(cache.get("expires_at") or 0))
+    return gcal.GCal(sec["client_id"], secret, sec["refresh_token"], conf.get("time_zone") or "UTC", on_token=keep,
+                     access_token=cache.get("access_token", ""), expires_at=float(cache.get("expires_at") or 0), token_url=url)
+
+
+def calendar_read_only(store) -> bool:
+    return bool((store.get_secret("cred_calendar_1") or {}).get("ical_url"))
 
 
 def calendar_event(store, event_id: str, calendar_id=None) -> dict:
