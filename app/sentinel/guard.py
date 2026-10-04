@@ -247,6 +247,25 @@ _BADGES = re.compile(r"(buyer|purchase|payment) protection|free (returns|deliver
 _AGREE = re.compile(r"agree|accept|consent|terms|authori[sz]e|同意|接受|授权|条款", re.I)
 
 
+# Buttons that spend money (or commit to paying). These are approved ONE BY ONE: no standing grant covers them
+# (2026-10-04: a permanent "clicks on amazon.sg" grant let "Place your order" through and a real order was placed).
+_MONEY_CLICK = re.compile(
+    r"place (your )?order|order now|buy now|pay( now|ment)?\b|purchase|checkout|check out|proceed to (checkout|payment|pay)|"
+    r"complete (order|purchase|booking|payment)|confirm (order|purchase|payment|booking)|subscribe|start (my )?(subscription|trial)|"
+    r"upgrade|donate|transfer|top ?up|book now|reserve now|"
+    r"付款|支付|购买|立即购买|下单|提交订单|结账|结算|确认支付|确认订单|订阅|升级|捐|转账|充值|预订|"
+    r"購入|注文|支払|決済", re.I)
+_MONEY_URL = re.compile(r"/(checkout|buy|payment|pay|billing|cart/checkout|order/confirm|subscribe|upgrade)\b", re.I)
+
+
+def money_click(name: str, input_type: str = "", page_url: str = "") -> bool:
+    label = str(name or "")
+    if _MONEY_CLICK.search(label):
+        return True
+    # any submit button on a checkout / payment page
+    return (input_type or "").lower() == "submit" and bool(_MONEY_URL.search(str(page_url or "")))
+
+
 def click_is_risky(role: str, name: str, input_type: str = "") -> bool:
     label = _BADGES.sub(" ", f"{name or ''}")
     r = (role or "").lower()

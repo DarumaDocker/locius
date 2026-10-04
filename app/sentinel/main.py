@@ -647,8 +647,8 @@ async def _resolve(aid: str, b: dict, via: str) -> dict:
     if scope not in ("ONCE", "TASK", "SESSION", "TIME_BOUND", "PERMANENT"):
         scope = "ONCE"
     tool, args, task_id = ap["tool"], dict(ap["args"]), ap["task_id"]
-    if tool in PER_USE_TOOLS:
-        scope = "ONCE"
+    if tool in PER_USE_TOOLS or "spends money" in str(ap.get("reason") or ""):
+        scope = "ONCE"     # payments are approved one by one: no 'always allow' for them
     if decision != "approve":
         store.resolve_approval(aid, "denied", scope, {"status": "denied"})
         store.audit("user", "approval.deny", task_id=task_id, resource=tool, risk=ap["risk"], decision=DENY,

@@ -124,7 +124,14 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
     if tool == "browser_click_at" and not (elem and elem.get("tag")):
         risk = _bump(risk, "high")
         reasons.append("无法确认这个位置上是什么元素 (can't tell what is at this position)")
-    if tool in ("browser_click", "browser_click_at") and elem:
+    per_use = False
+    if tool in ("browser_click", "browser_click_at") and elem and guard.money_click(
+            elem.get("name", ""), elem.get("input_type", ""), (page or {}).get("url", "")):
+        risk = _bump(risk, "high")
+        per_use = True
+        reasons.append(f"「{elem.get('name', '')}」会花钱或确认付款：每次都要你单独批准，任何长期授权都不覆盖 "
+                       "(spends money — approved one by one, never by a standing grant)")
+    if tool in ("browser_click", "browser_click_at") and elem and not per_use:
         # a <button> reports type "submit" by default; outside a <form> it submits nothing (chat launchers, menus)
         itype = elem.get("input_type", "") if elem.get("in_form", True) else ""
         if guard.click_is_risky(elem.get("role", ""), elem.get("name", ""), itype) and \
@@ -248,17 +255,17 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
         reasons.append("本任务读到的外部内容疑似包含提示注入，所有写操作需要人工确认 "
                        f"(prompt-injection suspected: {', '.join(ctx['injection'])})")
 
-    return _finish(store, tool, task_id, risk, reasons, dest, ctx)
+    return _finish(store, tool, task_id, risk, reasons, dest, ctx, per_use=per_use)
 
 
-def _finish(store, tool: str, task_id: str, risk: str, reasons: list[str], dest: str, ctx: dict) -> Decision:
+def _finish(store, tool: str, task_id: str, risk: str, reasons: list[str], dest: str, ctx: dict, per_use: bool = False) -> Decision:
     reason = "；".join(reasons)
     if RISK_ORDER[risk] < RISK_ORDER["high"]:
         return Decision(ALLOW, risk, reason, dest)
 
     # ---------------------------------------------------------------- grants for high-risk actions
     # vault fills are approved one by one, never by a standing grant
-    if not ctx["injection"] and tool not in PER_USE_TOOLS:
+    if not ctx["injection"] and tool not in PER_USE_TOOLS and not per_use:
         for g in store.active_grants():
             if g["tool"] != tool:
                 continue

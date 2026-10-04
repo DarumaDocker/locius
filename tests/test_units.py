@@ -1272,3 +1272,25 @@ def test_user_named_click_and_upload():
     assert up("打开 https://demoqa.com/automation-practice-form ，上传我附件里的图片作为照片。全部填好后截图，**不要点 Submit**。",
               "https://demoqa.com/automation-practice-form", "uploads/2026-10/receipt (8).png")
     assert not up("上传 demoqa.com", "https://demoqa.com/x", "reports/secret.pdf")
+
+
+def test_money_clicks_are_per_use():
+    # 2026-10-04: a permanent click grant on amazon.sg let "Place your order" through
+    from app.sentinel.guard import money_click as m
+    assert m("Place your order", "submit", "https://www.amazon.sg/checkout/p/p-251")
+    assert m("Proceed to checkout", "submit", "https://www.amazon.sg/cart")
+    assert m("Buy Now") and m("立即购买") and m("确认支付") and m("Subscribe")
+    assert m("Continue", "submit", "https://shop.example/checkout/payment")
+    assert not m("Add to Cart", "submit", "https://www.amazon.sg/dp/B0X")
+    assert not m("Search", "submit", "https://www.amazon.sg/")
+
+
+def test_standing_click_grant_never_covers_payment(store):
+    # 2026-10-04: PERMANENT browser_click grant on amazon.sg + "Place your order" -> must still ask, every time
+    store.add_grant("browser_click", "PERMANENT", None, {"destination": "amazon.sg"}, None)
+    page = {"url": "https://www.amazon.sg/checkout/p/p-251-123/spc", "title": "Checkout"}
+    pay = {"tag": "input", "role": "", "name": "Place your order", "input_type": "submit", "in_form": True}
+    d = decide(store, "browser_click", {"ref": "e22"}, "t1", elem=pay, page=page)
+    assert d.decision == ASK and not d.grant_id, d
+    ok = {"tag": "a", "role": "link", "name": "Your Orders", "input_type": "", "in_form": False}
+    assert decide(store, "browser_click", {"ref": "e5"}, "t1", elem=ok, page={"url": "https://www.amazon.sg/"}).decision == ALLOW
