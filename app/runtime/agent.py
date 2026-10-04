@@ -549,6 +549,8 @@ LOCAL_TOOLS = [
         {"status": {"type": "string", "enum": ["active", "blocked", "achieved", "failed"]}, "progress": S}, ["status", "progress"]),
     _fn("schedule_list", "列出定时任务 List schedules.", {}),
     _fn("schedule_delete", "删除定时任务 Delete a schedule by id.", {"id": S}, ["id"]),
+    _fn("goal_delete", "删除长期目标（连同它的定期检查）Delete a long-running goal by id (goal_list shows ids), together with "
+        "its check schedule. Only when the user asks to remove that goal.", {"id": S}, ["id"]),
     _fn("schedule_state_get", "读取本定时任务上次保存的状态 Read state saved by previous runs of this schedule.", {}),
     _fn("schedule_state_set", "保存本定时任务的状态（用于下次对比变化）Save state for the next run of this schedule.",
         {"key": S, "value": S}, ["key", "value"]),
@@ -1220,6 +1222,7 @@ class Runtime:
                     await self.event(task_id, "message", {"text": truncate(resp["content"], 2000)})
                 self.store.update_task(task_id, transcript=transcript)
                 seen_sigs, progress = {}, False
+                typed_this_turn = ""
                 try:
                     for i, call in enumerate(calls):
                         sig = _call_sig(call["name"], call.get("args") or {})
@@ -1229,6 +1232,14 @@ class Runtime:
                             await self._skip_duplicate(task_id, call, seen_sigs[sig], transcript)
                             continue
                         seen_sigs[sig] = call["id"]
+                        cargs = call.get("args") or {}
+                        if call["name"] == "browser_type" and cargs.get("submit"):
+                            if typed_this_turn:
+                                # 2026-10-04 V3-03: 12 searches typed into one shop's search box in a single turn — only the
+                                # last results page existed, the rest were never read, and the list was searched 3x over
+                                await self._skip_duplicate(task_id, call, typed_this_turn, transcript, one_page=True)
+                                continue
+                            typed_this_turn = call["id"]
                         if call["name"] == "browser_search":
                             qk = _search_key((call.get("args") or {}).get("query", ""))
                             if qk and qk in searched:
@@ -1609,10 +1620,18 @@ class Runtime:
                                                                 "and do not repeat the calls that failed.")
                                                     + ("\n" + dead_ends if dead_ends else "")})
 
-    async def _skip_duplicate(self, task_id: str, call: dict, first_id: str, transcript: list[dict], whole_task: bool = False):
+    async def _skip_duplicate(self, task_id: str, call: dict, first_id: str, transcript: list[dict], whole_task: bool = False,
+                              one_page: bool = False):
         """A call identical to one earlier in the same turn (or, for searches, earlier in the task): answer its tool_call
         id without running it again."""
-        if whole_task:
+        if one_page:
+            msg = (f"已跳过 — 这一轮已经在网页搜索框里搜过一次（调用 {first_id}），同一个浏览器页面一次只能显示一个结果页，"
+                   "后面的搜索会把前面的结果冲掉。先读完这次的结果并记下（update_plan 的 note），下一轮再搜下一个；"
+                   "要一次查多个，用 browser_read 读多个搜索网址（每次最多 4 个）。"
+                   f" Skipped: this turn already searched the site (call {first_id}); one page shows one result page, so later "
+                   "searches would replace it unread. Read and note these results, then search the next item in the next turn — "
+                   "or browser_read several search URLs (up to 4) at once.")
+        elif whole_task:
             msg = (f"已跳过 — 这个任务里已经搜索过几乎相同的内容（调用 {first_id}）。请使用那次的结果：读其中的网址，"
                    f"或换一个明显不同的关键词 / 来源；如果确实找不到，就在回答里说明“未找到”。"
                    f" Skipped: you already ran this search in this task (call {first_id}). Use those results (read their URLs), "
@@ -2531,8 +2550,20 @@ class Runtime:
                              for x in self.store.schedules()) or "(无 none)"
         if name == "schedule_delete":
             self.store.db.execute("DELETE FROM schedules WHERE id=?", (str(a["id"]),))
+            # a goal whose check schedule is gone would stay "active" forever (2026-10-04 V7-10)
+            self.store.db.execute("DELETE FROM goals WHERE schedule_id=?", (str(a["id"]),))
             await self.publish({"kind": "schedule_update"})
+            await self.publish({"kind": "goal_update"})
             return "已删除 deleted"
+        if name == "goal_delete":
+            g = self.store.goal(str(a.get("id", "")))
+            if not g:
+                return "ERROR: 没有这个目标，请先 goal_list (unknown goal id)"
+            self.store.db.execute("DELETE FROM schedules WHERE id=?", (g["schedule_id"],))
+            self.store.db.execute("DELETE FROM goals WHERE id=?", (g["id"],))
+            await self.audit("executor", "goal.delete", tid, resource=g["id"], detail={"title": g["title"]})
+            await self.publish({"kind": "goal_update", "goal_id": g["id"]})
+            return f"已删除目标 goal deleted:「{g['title']}」"
         if name in ("schedule_state_get", "schedule_state_set"):
             sid = t.get("schedule_id")
             if not sid:
