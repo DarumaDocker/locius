@@ -244,6 +244,10 @@ _COOKIE_DECLINE = re.compile(r"^\s*(reject( all)?( cookies)?|decline( all)?( coo
 _BADGES = re.compile(r"(buyer|purchase|payment) protection|free (returns|delivery)|apply (coupon|voucher)s? at checkout", re.I)
 
 
+_READONLY_SUBMIT = re.compile(
+    r"(display|show( results| rates| data)?|view( results)?|search|find|filter|apply filters?|get (rates|data|results|quote)|"
+    r"look ?up|refresh|reload|load( more)?|more|next|previous|prev|calculate|convert|check( availability)?|compare|sort|"
+    r"显示|查看|查询|搜索|筛选|计算|换算|刷新|下一页|上一页|更多|比较|检查)\s*[»›>→]*", re.I)
 _AGREE = re.compile(r"agree|accept|consent|terms|authori[sz]e|同意|接受|授权|条款", re.I)
 
 
@@ -279,7 +283,9 @@ def click_is_risky(role: str, name: str, input_type: str = "") -> bool:
     if _CART_ADD.search(label) or _COOKIE_DECLINE.search(label):
         return False
     if (input_type or "").lower() == "submit":
-        return True
+        # a form that only shows data ("Display", "Show rates", "Calculate") submits nothing of the user's
+        # (2026-10-04 V8-01: the MAS exchange-rate page's "Display" button needed approval)
+        return not _READONLY_SUBMIT.fullmatch(label.strip())
     if _SEARCH_WORDS.search(label):
         return False
     return bool(_RISKY_CLICK.search(label))
@@ -344,3 +350,9 @@ def user_named_click(request: str, label: str) -> bool:
 
 def looks_like_search(role: str, name: str) -> bool:
     return (role or "").lower() in ("searchbox", "combobox") or bool(_SEARCH_WORDS.search(name or ""))
+
+
+def named_in_request(request: str, dom: str) -> bool:
+    """The user's own request names this site ("在 FairPrice 网上超市（fairprice.com.sg）…")."""
+    d = (dom or "").lower().removeprefix("www.")
+    return bool(d) and len(d) > 4 and d in str(request or "").lower()

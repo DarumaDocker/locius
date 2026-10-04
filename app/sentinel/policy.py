@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from app.sentinel import guard
 from app.sentinel.catalog import TOOLS
@@ -79,11 +79,16 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
             return Decision(DENY, "high", f"域名 {dom} 在黑名单中 (blocked domain)")
         p = urlparse(url)
         carries_data = bool(p.query) or len(p.path or "") > 60
-        trusted = dom in set(cfg.get("allowed_domains") or [])
+        # a site the user named in their own request is where they want the data to go (2026-10-04 V3-03: searching
+        # fairprice.com.sg for the items of the attached shopping list needed an approval per item)
+        trusted = dom in set(cfg.get("allowed_domains") or []) or (
+            not ctx["injection"] and guard.named_in_request(store.user_request(task_id), dom))   # never after an injection
         if tainted and dom not in ctx["domains"] and not trusted and carries_data:
             risk = _bump(risk, "high")
             reasons.append("本任务已读取机密数据（邮件等），且此网址带有参数，可能造成数据外泄 (data egress check)")
-        elif ctx["injection"] and dom not in ctx["domains"] and not trusted and carries_data:
+        elif ctx["injection"] and carries_data and (dom not in ctx["domains"] or "@" in unquote(p.query) or len(p.query) > 60):
+            # after a suspected injection, a link that carries data needs the user's OK — also on the SAME site, since the
+            # injected page can name an address on its own domain (httpbin.org/anything?owner_email=…)
             risk = _bump(risk, "high")
             reasons.append("本任务读到疑似提示注入的内容后，要访问一个带参数的新网址 (possible exfiltration after injection)")
     if tool == "browser_read":
@@ -102,9 +107,14 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
                 return Decision(DENY, "high", f"域名 {dom} 在黑名单中 (blocked domain)")
             p = urlparse(u)
             carries_data = bool(p.query) or len(p.path or "") > 60
-            if tainted and dom not in ctx["domains"] and dom not in set(cfg.get("allowed_domains") or []) and carries_data:
+            if tainted and dom not in ctx["domains"] and dom not in set(cfg.get("allowed_domains") or []) and carries_data \
+                    and not (not ctx["injection"] and guard.named_in_request(store.user_request(task_id), dom)):
                 risk = _bump(risk, "high")
                 reasons.append("本任务已读取机密数据，且此网址带有参数，可能造成数据外泄 (data egress check)")
+                break
+            if ctx["injection"] and carries_data and (dom not in ctx["domains"] or "@" in unquote(p.query) or len(p.query) > 60):
+                risk = _bump(risk, "high")
+                reasons.append("本任务读到疑似提示注入的内容后，要读取一个带参数的网址 (possible exfiltration after injection)")
                 break
     if tool == "browser_save_media":
         if args.get("url") and not str(args["url"]).startswith("data:"):

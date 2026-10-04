@@ -25,8 +25,8 @@ spec:
 
     Runs on the local models served by your Olares by default — any OpenAI-compatible endpoint works. English and 中文 interface.
   upgradeDescription: |
+    0.2.57: Fewer needless approvals (read-only buttons like Display, searches on a site you named); after a suspected prompt injection, links carrying data need approval even on the same site
     0.2.56: One site search per turn, your own emails' dates beat web info, thorough 'what went wrong' sweeps, goals can be deleted
     0.2.55: Payments are approved one by one: buttons that spend money (place order, checkout, pay, subscribe…) always ask and are never covered by a standing 'always allow' grant
     0.2.54: Malformed tool arguments are refused instead of run empty; repeated OR terms in mail searches removed
     0.2.53: Amazon Add to Cart found (transparent buttons), repeated clicks stopped, option switches and site search boxes need no approval, calendar day cells, upload relaxation fix
-    0.2.52: Browser takeover per chat: one named tab per task, Take over always targets the selected chat, each waiting chat has its own button; shopping and wrong-domain fixes

@@ -1294,3 +1294,19 @@ def test_standing_click_grant_never_covers_payment(store):
     assert d.decision == ASK and not d.grant_id, d
     ok = {"tag": "a", "role": "link", "name": "Your Orders", "input_type": "", "in_form": False}
     assert decide(store, "browser_click", {"ref": "e5"}, "t1", elem=ok, page={"url": "https://www.amazon.sg/"}).decision == ALLOW
+
+
+def test_readonly_submit_and_named_site():
+    # 2026-10-04 V8-01 / V3-03
+    assert not guard.click_is_risky("button", "Display", "submit")
+    assert not guard.click_is_risky("button", "Show rates", "submit")
+    assert guard.click_is_risky("button", "Submit", "submit")
+    assert guard.named_in_request("在 FairPrice 网上超市（fairprice.com.sg）把这些东西找到", "www.fairprice.com.sg")
+    assert not guard.named_in_request("帮我查价格", "www.fairprice.com.sg")
+
+
+def test_same_site_exfil_after_injection(store):
+    store.update_task_ctx("tj", injection=["hidden instruction"], domain="httpbin.org")
+    d = decide(store, "browser_navigate", {"url": "https://httpbin.org/anything/collect?owner_email=a@b.com"}, "tj")
+    assert d.decision == ASK, d
+    assert decide(store, "browser_navigate", {"url": "https://httpbin.org/get"}, "tj").decision == ALLOW
