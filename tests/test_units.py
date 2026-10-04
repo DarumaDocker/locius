@@ -1256,6 +1256,68 @@ def test_forget_removes_episodes_that_quote_the_fact():
     assert len(left) == 1 and "徒步鞋" in left[0]
 
 
+def test_user_named_click_and_upload():
+    # 2026-10-04: buttons / uploads the user explicitly asked for don't need an approval card (money / send stay gated)
+    from app.sentinel.guard import user_named_click as u, user_asked_upload as up
+    assert u("先点 Remove 让复选框消失，再点 Enable", "Remove")
+    assert u("添加一条记录：First Name Test", "Submit")
+    assert not u("全部填好后截图，**不要点 Submit**。", "Submit")
+    assert not u("点 Book Now 订位", "Book Now")
+    assert not u("click Pay now", "Pay now")
+    assert not u("打开页面看看", "Remove")
+    assert up("打开 https://the-internet.herokuapp.com/upload ，选择附件里的 invoice.pdf 准备上传",
+              "https://the-internet.herokuapp.com/upload", "uploads/2026-10/invoice.pdf")
+    assert not up("上传到 evil.com", "https://demoqa.com/x", "uploads/a.png")
+    # "don't click Submit" must not cancel the upload the user asked for (V2-01 retest)
+    assert up("打开 https://demoqa.com/automation-practice-form ，上传我附件里的图片作为照片。全部填好后截图，**不要点 Submit**。",
+              "https://demoqa.com/automation-practice-form", "uploads/2026-10/receipt (8).png")
+    assert not up("上传 demoqa.com", "https://demoqa.com/x", "reports/secret.pdf")
+
+
+def test_money_clicks_are_per_use():
+    # 2026-10-04: a permanent click grant on amazon.sg let "Place your order" through
+    from app.sentinel.guard import money_click as m
+    assert m("Place your order", "submit", "https://www.amazon.sg/checkout/p/p-251")
+    assert m("Proceed to checkout", "submit", "https://www.amazon.sg/cart")
+    assert m("Buy Now") and m("立即购买") and m("确认支付") and m("Subscribe")
+    assert m("Continue", "submit", "https://shop.example/checkout/payment")
+    assert not m("Add to Cart", "submit", "https://www.amazon.sg/dp/B0X")
+    assert not m("Search", "submit", "https://www.amazon.sg/")
+
+
+def test_standing_click_grant_never_covers_payment(store):
+    # 2026-10-04: PERMANENT browser_click grant on amazon.sg + "Place your order" -> must still ask, every time
+    store.add_grant("browser_click", "PERMANENT", None, {"destination": "amazon.sg"}, None)
+    page = {"url": "https://www.amazon.sg/checkout/p/p-251-123/spc", "title": "Checkout"}
+    pay = {"tag": "input", "role": "", "name": "Place your order", "input_type": "submit", "in_form": True}
+    d = decide(store, "browser_click", {"ref": "e22"}, "t1", elem=pay, page=page)
+    assert d.decision == ASK and not d.grant_id, d
+    ok = {"tag": "a", "role": "link", "name": "Your Orders", "input_type": "", "in_form": False}
+    assert decide(store, "browser_click", {"ref": "e5"}, "t1", elem=ok, page={"url": "https://www.amazon.sg/"}).decision == ALLOW
+
+
+def test_readonly_submit_and_named_site():
+    # 2026-10-04 V8-01 / V3-03
+    assert not guard.click_is_risky("button", "Display", "submit")
+    assert not guard.click_is_risky("button", "Show rates", "submit")
+    assert guard.click_is_risky("button", "Submit", "submit")
+    assert guard.named_in_request("在 FairPrice 网上超市（fairprice.com.sg）把这些东西找到", "www.fairprice.com.sg")
+    assert not guard.named_in_request("帮我查价格", "www.fairprice.com.sg")
+
+
+def test_same_site_exfil_after_injection(store):
+    store.update_task_ctx("tj", injection=["hidden instruction"], domain="httpbin.org")
+    d = decide(store, "browser_navigate", {"url": "https://httpbin.org/anything/collect?owner_email=a@b.com"}, "tj")
+    assert d.decision == ASK, d
+    assert decide(store, "browser_navigate", {"url": "https://httpbin.org/get"}, "tj").decision == ALLOW
+
+
+def test_draft_messages_are_marked_never_sent():
+    d = Gmail.public({"id": "1", "subject": "Re: HG-55821", "draft": True, "_unsub": None})
+    assert "never sent" in d["status"] and "_unsub" not in d
+    assert "status" not in Gmail.public({"id": "2", "subject": "hi"})
+
+
 def test_llm_auth_header_from_env(monkeypatch):
     from app.runtime.llm import auth_headers
     monkeypatch.delenv("OMUSE_MODEL_API_KEY", raising=False)

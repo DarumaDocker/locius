@@ -10,7 +10,7 @@ async def main():
     async with async_playwright() as p:
         br = await p.chromium.launch(); pg = await br.new_page(viewport={"width": 1400, "height": 900}, locale="zh-CN")
         await pg.goto(B + "#browser"); await pg.wait_for_timeout(1500)
-        await pg.click("text=接管 Take over"); await pg.wait_for_timeout(800)
+        await pg.click("button.take"); await pg.wait_for_timeout(800)
         await pg.fill(".bbar .url", "http://shop.test:8099/popup_login.html"); await pg.click("text=前往 Go")
         await pg.wait_for_timeout(2500)
         img = pg.locator(".screen-wrap img"); bb = await img.bounding_box()
@@ -20,7 +20,7 @@ async def main():
         await pg.keyboard.type(TEXT, delay=5)           # fast typing -> many concurrent input events
         await pg.wait_for_timeout(4000)
         await pg.keyboard.press("Backspace"); await pg.keyboard.type("m"); await pg.wait_for_timeout(1500)
-        await pg.click("text=交还给 Agent Hand back"); await pg.wait_for_timeout(800)
+        await pg.click("button.release"); await pg.wait_for_timeout(800)
         await br.close()
     c = httpx.Client(trust_env=False, timeout=30)
     st = c.get(B + "sentinel/api/browser/state").json()
@@ -39,7 +39,7 @@ async def first_key_without_click():
         sent = []
         pg.on("request", lambda r: sent.append(r.post_data) if "browser/input" in r.url else None)
         await pg.goto(B + "#browser"); await pg.wait_for_timeout(1500)
-        await pg.click("text=接管 Take over"); await pg.wait_for_timeout(1500)
+        await pg.click("button.take"); await pg.wait_for_timeout(1500)
         hint = await pg.locator(".kbd-hint").text_content()
         img = pg.locator(".screen-wrap img"); bb = await img.bounding_box()
         nat = await img.evaluate("i => [i.naturalWidth, i.naturalHeight]")
@@ -50,7 +50,7 @@ async def first_key_without_click():
         await pg.evaluate("document.activeElement.blur()")   # focus lost (e.g. user clicked elsewhere)
         await pg.keyboard.type("abc", delay=30); await pg.wait_for_timeout(2500)
         print("sent:", sent)
-        await pg.click("text=交还给 Agent Hand back"); await pg.wait_for_timeout(800)
+        await pg.click("button.release"); await pg.wait_for_timeout(800)
         await br.close()
     c = httpx.Client(trust_env=False, timeout=30)
     st = c.get(B + "sentinel/api/browser/state").json()

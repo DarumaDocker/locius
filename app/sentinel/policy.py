@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from app.sentinel import guard
 from app.sentinel.catalog import TOOLS
@@ -79,11 +79,16 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
             return Decision(DENY, "high", f"域名 {dom} 在黑名单中 (blocked domain)")
         p = urlparse(url)
         carries_data = bool(p.query) or len(p.path or "") > 60
-        trusted = dom in set(cfg.get("allowed_domains") or [])
+        # a site the user named in their own request is where they want the data to go (2026-10-04 V3-03: searching
+        # fairprice.com.sg for the items of the attached shopping list needed an approval per item)
+        trusted = dom in set(cfg.get("allowed_domains") or []) or (
+            not ctx["injection"] and guard.named_in_request(store.user_request(task_id), dom))   # never after an injection
         if tainted and dom not in ctx["domains"] and not trusted and carries_data:
             risk = _bump(risk, "high")
             reasons.append("本任务已读取机密数据（邮件等），且此网址带有参数，可能造成数据外泄 (data egress check)")
-        elif ctx["injection"] and dom not in ctx["domains"] and not trusted and carries_data:
+        elif ctx["injection"] and carries_data and (dom not in ctx["domains"] or "@" in unquote(p.query) or len(p.query) > 60):
+            # after a suspected injection, a link that carries data needs the user's OK — also on the SAME site, since the
+            # injected page can name an address on its own domain (httpbin.org/anything?owner_email=…)
             risk = _bump(risk, "high")
             reasons.append("本任务读到疑似提示注入的内容后，要访问一个带参数的新网址 (possible exfiltration after injection)")
     if tool == "browser_read":
@@ -102,9 +107,14 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
                 return Decision(DENY, "high", f"域名 {dom} 在黑名单中 (blocked domain)")
             p = urlparse(u)
             carries_data = bool(p.query) or len(p.path or "") > 60
-            if tainted and dom not in ctx["domains"] and dom not in set(cfg.get("allowed_domains") or []) and carries_data:
+            if tainted and dom not in ctx["domains"] and dom not in set(cfg.get("allowed_domains") or []) and carries_data \
+                    and not (not ctx["injection"] and guard.named_in_request(store.user_request(task_id), dom)):
                 risk = _bump(risk, "high")
                 reasons.append("本任务已读取机密数据，且此网址带有参数，可能造成数据外泄 (data egress check)")
+                break
+            if ctx["injection"] and carries_data and (dom not in ctx["domains"] or "@" in unquote(p.query) or len(p.query) > 60):
+                risk = _bump(risk, "high")
+                reasons.append("本任务读到疑似提示注入的内容后，要读取一个带参数的网址 (possible exfiltration after injection)")
                 break
     if tool == "browser_save_media":
         if args.get("url") and not str(args["url"]).startswith("data:"):
@@ -124,17 +134,25 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
     if tool == "browser_click_at" and not (elem and elem.get("tag")):
         risk = _bump(risk, "high")
         reasons.append("无法确认这个位置上是什么元素 (can't tell what is at this position)")
-    if tool in ("browser_click", "browser_click_at") and elem:
+    per_use = False
+    if tool in ("browser_click", "browser_click_at") and elem and guard.money_click(
+            elem.get("name", ""), elem.get("input_type", ""), (page or {}).get("url", "")):
+        risk = _bump(risk, "high")
+        per_use = True
+        reasons.append(f"「{elem.get('name', '')}」会花钱或确认付款：每次都要你单独批准，任何长期授权都不覆盖 "
+                       "(spends money — approved one by one, never by a standing grant)")
+    if tool in ("browser_click", "browser_click_at") and elem and not per_use:
         # a <button> reports type "submit" by default; outside a <form> it submits nothing (chat launchers, menus)
         itype = elem.get("input_type", "") if elem.get("in_form", True) else ""
-        if guard.click_is_risky(elem.get("role", ""), elem.get("name", ""), itype):
+        if guard.click_is_risky(elem.get("role", ""), elem.get("name", ""), itype) and \
+                not guard.user_named_click(store.user_request(task_id), elem.get("name", "")):
             risk = _bump(risk, "high")
             reasons.append(f"点击的按钮「{elem.get('name', '')}」可能提交/购买/发送/删除 (consequential click)")
     if tool == "browser_type" or (tool == "browser_click_at" and args.get("text")):
         if elem and (elem.get("input_type", "").lower() == "password" or elem.get("is_password")):
             return Decision(DENY, "high", "Agent 不能输入密码。请调用 browser_request_takeover 让用户接管输入 (use takeover for passwords)")
         text = str(args.get("text", ""))
-        is_search = elem and guard.looks_like_search(elem.get("role", ""), elem.get("name", ""))
+        is_search = elem and (guard.looks_like_search(elem.get("role", ""), elem.get("name", "")) or bool(elem.get("searchy")))
         if args.get("submit") and not is_search:
             risk = _bump(risk, "high")
             reasons.append("输入后会按回车提交表单 (submits a form)")
@@ -172,11 +190,14 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
         if urlparse(page.get("url", "")).scheme != "https" and not (dom.endswith(".test") or dom in ("localhost", "127.0.0.1")):
             reasons.append("⚠ 这个页面不是 HTTPS 加密连接 (page is not HTTPS)")
     if tool == "browser_press" and str(args.get("key", "")).lower() in ("enter", "return"):
-        if elem and not guard.looks_like_search(elem.get("role", ""), elem.get("name", "")) and elem.get("in_form"):
+        if elem and not (guard.looks_like_search(elem.get("role", ""), elem.get("name", "")) or bool(elem.get("searchy"))) and elem.get("in_form"):
             risk = _bump(risk, "high")
             reasons.append("回车会提交表单 (Enter submits a form)")
     if tool == "browser_upload":
-        reasons.append("上传本地文件到网站 (uploads a local file)")
+        if page and guard.user_asked_upload(store.user_request(task_id), page.get("url", ""), str(args.get("path", ""))):
+            risk = "medium"    # the user attached this file and asked for it to be uploaded on this very site
+        else:
+            reasons.append("上传本地文件到网站 (uploads a local file)")
 
     # ---------------------------------------------------------------- gmail rules
     if tool in ("gmail_send", "gmail_reply", "gmail_forward"):
@@ -244,17 +265,17 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
         reasons.append("本任务读到的外部内容疑似包含提示注入，所有写操作需要人工确认 "
                        f"(prompt-injection suspected: {', '.join(ctx['injection'])})")
 
-    return _finish(store, tool, task_id, risk, reasons, dest, ctx)
+    return _finish(store, tool, task_id, risk, reasons, dest, ctx, per_use=per_use)
 
 
-def _finish(store, tool: str, task_id: str, risk: str, reasons: list[str], dest: str, ctx: dict) -> Decision:
+def _finish(store, tool: str, task_id: str, risk: str, reasons: list[str], dest: str, ctx: dict, per_use: bool = False) -> Decision:
     reason = "；".join(reasons)
     if RISK_ORDER[risk] < RISK_ORDER["high"]:
         return Decision(ALLOW, risk, reason, dest)
 
     # ---------------------------------------------------------------- grants for high-risk actions
     # vault fills are approved one by one, never by a standing grant
-    if not ctx["injection"] and tool not in PER_USE_TOOLS:
+    if not ctx["injection"] and tool not in PER_USE_TOOLS and not per_use:
         for g in store.active_grants():
             if g["tool"] != tool:
                 continue

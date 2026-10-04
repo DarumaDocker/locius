@@ -55,7 +55,24 @@ with tarfile.open(fileobj=buf, mode="w:xz", preset=9 | lzma.PRESET_EXTREME) as t
     tar.add(f"{ROOT}/requirements-browser.txt", arcname="requirements-browser.txt", filter=filt)
 raw = buf.getvalue()
 b64 = base64.b64encode(raw).decode()
-lines = "\n".join("    " + b64[i:i + 76] for i in range(0, len(b64), 76))
+# Bundle delivery. "remote" (default): the bundle is published as dist/bundles/<file> (pushed to the repo's `bundles`
+# branch by the deploy script) and the chart only pins its sha256 + download URLs, so the Helm release stays tiny.
+# "embed": the old way, the whole bundle inside the ConfigMap (Helm release ~1 MB).
+MODE = os.environ.get("BUNDLE_MODE", "remote")
+REPO = os.environ.get("BUNDLE_REPO", "Drlucaslu/locius")
+sha = hashlib.sha256(raw).hexdigest()
+if MODE == "embed":
+    lines = "  app.tgz.b64: |\n" + "\n".join("    " + b64[i:i + 76] for i in range(0, len(b64), 76))
+else:
+    bname = f"{APP}-{ver}-{sha[:12]}.tar.xz"
+    os.makedirs(f"{ROOT}/dist/bundles", exist_ok=True)
+    open(f"{ROOT}/dist/bundles/{bname}", "wb").write(raw)
+    urls = [u.replace("{repo}", REPO).replace("{file}", bname) for u in os.environ.get("BUNDLE_URLS", "").split(",") if u] or [
+        f"https://raw.githubusercontent.com/{REPO}/bundles/{bname}",
+        f"https://cdn.jsdelivr.net/gh/{REPO}@bundles/{bname}",
+        f"https://github.com/{REPO}/raw/bundles/{bname}"]
+    lines = f"  bundle.sha256: \"{sha}\"\n  bundle.urls: |\n" + "\n".join("    " + u for u in urls)
+    print(f"bundle file dist/bundles/{bname} -> push it to the `bundles` branch of {REPO} before installing")
 boot = "\n".join("    " + l for l in open(f"{ROOT}/app/bootstrap.sh").read().splitlines())
 tpl = open(f"{ROOT}/chart/deployment.tpl.yaml").read()
 out = tpl.replace("__BOOTSTRAP__", boot).replace("__BUNDLE__", lines).replace("__HASH__", hashlib.sha256(raw).hexdigest()[:16])

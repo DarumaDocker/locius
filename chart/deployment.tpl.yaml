@@ -8,7 +8,6 @@ metadata:
 data:
   bootstrap.sh: |
 __BOOTSTRAP__
-  app.tgz.b64: |
 __BUNDLE__
 ---
 apiVersion: apps/v1

@@ -33,13 +33,44 @@
       const r = el.getBoundingClientRect();
       if (r.width < 1 || r.height < 1) return false;
       const s = getComputedStyle(el);
-      return s.visibility !== 'hidden' && s.display !== 'none' && parseFloat(s.opacity || '1') > 0.05;
+      // Amazon's "Add to Cart" is a transparent <input type=submit> laid over its label (class a-button-input,
+      // opacity ~0): it is the real button, so transparency doesn't hide buttons (2026-10-04 V3-04 / V3-10)
+      const clearBtn = (el.tagName === 'INPUT' && /^(submit|button|image)$/i.test(el.type || '')) || el.tagName === 'BUTTON';
+      return s.visibility !== 'hidden' && s.display !== 'none' && (clearBtn || parseFloat(s.opacity || '1') > 0.05);
     } catch (e) { return false; }
   };
   const INTERACTIVE = 'a[href],button,input,select,textarea,summary,[role=button],[role=link],[role=checkbox],[role=radio],[role=tab],' +
-    '[role=menuitem],[role=option],[role=switch],[role=combobox],[role=textbox],[role=searchbox],[role=slider],[contenteditable=""],[contenteditable=true]';
-  const isInteractive = el => { try { return el.matches(INTERACTIVE); } catch (e) { return false; } };
+    '[role=menuitem],[role=option],[role=switch],[role=combobox],[role=textbox],[role=searchbox],[role=slider],[contenteditable=""],[contenteditable=true],' +
+    // calendar day cells (2026-10-04: singaporeair.com's date picker days had no refs, so the agent clicked by coordinates
+    // and hit a banner): grid cells, cells carrying a date, and focusable labelled cells
+    '[role=gridcell],[data-date],[data-day],td[aria-label],div[tabindex][aria-label],span[tabindex][aria-label]';
+  // Day cells of custom date pickers are often plain <div>s with a click handler (no role, no tabindex): give them refs
+  // too (2026-10-04: singaporeair.com — the agent could only click by coordinates and kept landing on the wrong day).
+  const DAYS = new Set();
+  try {
+    const boxes = deepAll('[class*="calendar" i],[class*="datepicker" i],[class*="date-picker" i],[class*="daypicker" i],[role=grid],[role=dialog]')
+      .filter(visible).slice(0, 6);
+    for (const box of boxes) {
+      const all = box.querySelectorAll('*');
+      if (all.length > 4000) continue;
+      const cand = [];
+      for (const e of all) {
+        const first = ((e.innerText || '').trim().split('\n')[0] || '').trim();
+        if (!/^\d{1,2}$/.test(first) || +first < 1 || +first > 31) continue;
+        if (!visible(e)) continue;
+        if (getComputedStyle(e).cursor !== 'pointer' && !/(^|[\s_-])day/i.test(typeof e.className === 'string' ? e.className : '')) continue;
+        cand.push(e);
+      }
+      // a row or a whole month also starts with a day number: a cell holds exactly one day (2026-10-04 V2-09: the
+      // whole week row got one ref, and every click landed on its first day)
+      const dayOf = e => ((e.innerText || '').trim().split('\n')[0] || '').trim();
+      const cells = cand.filter(e => !cand.some(o => o !== e && e.contains(o) && dayOf(o) !== dayOf(e)));
+      for (const e of cells) { let a = e.parentElement, inner = false; for (let k = 0; a && k < 4; k++, a = a.parentElement) { if (cells.includes(a)) { inner = true; break; } } if (!inner) DAYS.add(e); }
+    }
+  } catch (e) {}
+  const isInteractive = el => { try { return el.matches(INTERACTIVE) || DAYS.has(el); } catch (e) { return false; } };
   const roleOf = el => {
+    if (DAYS.has(el)) return 'day';
     const r = el.getAttribute('role');
     if (r) return r;
     const t = el.tagName;

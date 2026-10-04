@@ -397,12 +397,29 @@ async def _watchdog(store, call: dict):
         await asyncio.sleep(2)
 
 
+def plain_result(call: dict) -> str:
+    """One sentence that states what is known about how the call ended, so the agent reports it as is.
+    2026-10-04: a call that failed on the carrier side (hangup cause "error") was reported to the user as 未接听."""
+    st, cause, err = call.get("status"), call.get("hangup_cause") or "", call.get("error") or ""
+    said = any(x.get("who") != "omuse" for x in call.get("transcript") or [])
+    if st == "failed":
+        return ("The call FAILED on the phone line / carrier side (" + (err or cause or "no reason given") + "). It is NOT known "
+                "that nobody answered; do not say 'no answer'. Report this reason as is; the other phone may still have rung.")
+    if st == "no_answer":
+        return "Nobody answered (" + (cause or "no answer") + ")."
+    if st == "ended":
+        return ("The call connected and ended" + (f" ({cause})" if cause else "") + "." if said or call.get("answered_at")
+                else "The call ended" + (f" ({cause})" if cause else "") + " before anyone spoke.")
+    return f"The call is still {st}."
+
+
 def status_view(call: dict, max_lines: int = 80) -> dict:
     tr = call.get("transcript") or []
     lines = [(f"[{x['t']:>6.1f}s] " if x.get("t") else "") + f"{'OMuse' if x['who'] == 'omuse' else 'Them'}: {x['text']}"
              for x in tr[-max_lines:]]
     return {"trust": "untrusted", "source": f"phone call {call['to']}",
-            "call_id": call["id"], "to": call["to"], "status": call["status"], "seconds": _duration(call),
+            "call_id": call["id"], "to": call["to"], "status": call["status"], "what_happened": plain_result(call),
+            "seconds": _duration(call),
             "outcome": call.get("outcome", ""), "summary": call.get("summary", ""),
             "hangup_cause": call.get("hangup_cause", ""), "error": call.get("error", ""),
             "transcript": "\n".join(lines) + (f"\n… ({len(tr) - max_lines} earlier lines omitted)" if len(tr) > max_lines else ""),

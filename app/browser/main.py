@@ -576,6 +576,10 @@ class Broker:
                 input_type: (el.type || '').toLowerCase(),
                 is_password: (el.type || '').toLowerCase() === 'password' || (el.getAttribute('autocomplete')||'').includes('password'),
                 in_form: !!el.closest('form'),
+                // a site search box whose label is a rotating promo text (2026-10-04 FairPrice: "1 for $21.30 - ...")
+                searchy: (el.type || '').toLowerCase() === 'search' || /search|query|keyword|^q$/i.test((el.getAttribute('name') || '') + ' ' + (el.id || '')) ||
+                         (el.getAttribute('enterkeyhint') || '') === 'search' || !!(el.closest('form') && (el.closest('form').getAttribute('role') === 'search' ||
+                         /search|query/i.test(el.closest('form').getAttribute('action') || ''))) || !!el.closest('[role=search]'),
                 href: el.getAttribute('href') || ''
             })""", timeout=5000)
         except Exception as e:
@@ -924,9 +928,21 @@ async def agent_action(action: str, req: Request):
             elif action == "click":
                 loc = broker.locate(task_id, body.get("ref", ""))
                 try:
-                    await loc.click(timeout=10000)
+                    await loc.click(timeout=8000)
                 except Exception as e:
-                    raise HTTPException(409, f"点击失败 click failed: {str(e)[:200]}")
+                    # 2026-10-04 chope.co "Book Now": the button was covered by another layer and every click timed out.
+                    # Scroll it into view and try again; if something still covers it, click the element itself via script
+                    # (it is the same element the agent chose, so the approval check already covered it).
+                    first = str(e)
+                    try:
+                        await loc.scroll_into_view_if_needed(timeout=3000)
+                        await loc.click(timeout=4000)
+                    except Exception:
+                        try:
+                            await loc.evaluate("e => e.click()", timeout=4000)
+                        except Exception as e2:
+                            cover = " (另一个元素挡住了它 another element covers it)" if "intercepts pointer events" in first else ""
+                            raise HTTPException(409, f"点击失败 click failed{cover}: {first[:160]} / {str(e2)[:80]}")
                 await broker.settle(page, 1200)
                 page = await broker.page_for(task_id)
             elif action == "click_at":
@@ -1082,6 +1098,9 @@ async def user_view(req: Request):
 async def user_takeover(req: Request):
     body = await req.json()
     tid = body.get("task_id") or (broker.requested or {}).get("task_id") or broker.view_task or "default"
+    if broker.mode == "user" and broker.takeover_task and broker.takeover_task != tid:
+        # one takeover at a time: switching silently would resume the first task while the user is still in it
+        raise HTTPException(409, f"你正在接管另一个任务（{broker.takeover_task}），请先交还它 (hand back the current task first)")
     async with broker.task_lock(tid):  # waits for that task's in-flight action; other tasks keep running
         broker.mode = "user"
         broker.takeover_task = tid

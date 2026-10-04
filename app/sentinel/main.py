@@ -647,8 +647,8 @@ async def _resolve(aid: str, b: dict, via: str) -> dict:
     if scope not in ("ONCE", "TASK", "SESSION", "TIME_BOUND", "PERMANENT"):
         scope = "ONCE"
     tool, args, task_id = ap["tool"], dict(ap["args"]), ap["task_id"]
-    if tool in PER_USE_TOOLS:
-        scope = "ONCE"
+    if tool in PER_USE_TOOLS or "spends money" in str(ap.get("reason") or ""):
+        scope = "ONCE"     # payments are approved one by one: no 'always allow' for them
     if decision != "approve":
         store.resolve_approval(aid, "denied", scope, {"status": "denied"})
         store.audit("user", "approval.deny", task_id=task_id, resource=tool, risk=ap["risk"], decision=DENY,
@@ -1663,6 +1663,19 @@ async def proxy(path: str, request: Request):
         print(f"[proxy] 503 {request.method} /api/{path}: {type(e).__name__}: {str(e)[:120]}", flush=True)
         return JSONResponse({"detail": "Agent Runtime 暂不可用 (runtime unavailable)"}, status_code=503)
     resp_headers = {k: v for k, v in r.headers.items() if k.lower() not in HOP and k.lower() != "content-encoding"}
+    if path == "chat" and request.method == "POST" and r.status_code == 200:
+        # remember the user's own words for the task they start (policy uses them for buttons the user named)
+        data = await r.aread()
+        await r.aclose()
+        try:
+            tid = json.loads(data or b"{}").get("task_id")
+            msg = json.loads(body or b"{}").get("message")
+            if tid and isinstance(msg, str):
+                store.set_user_request(tid, msg)
+        except Exception:
+            pass
+        resp_headers.pop("content-length", None)
+        return Response(data, status_code=r.status_code, headers=resp_headers)
 
     async def gen():
         try:

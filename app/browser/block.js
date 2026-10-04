@@ -7,6 +7,16 @@
   const url = location.href.toLowerCase();
   const short = body.trim().length < 1500;
   const frames = Array.from(document.querySelectorAll('iframe')).map(f => (f.src || '').toLowerCase());
+  // captcha widgets the user would actually have to solve: visible, not the invisible reCAPTCHA "aframe" that ad and
+  // analytics tags load on ordinary pages (2026-10-04: demoqa.com forms were reported as a bot wall because of it)
+  const visibleCaptcha = Array.from(document.querySelectorAll('iframe')).some(f => {
+    const s = (f.src || '').toLowerCase();
+    if (!(s.includes('recaptcha') || s.includes('hcaptcha.com') || s.includes('arkoselabs') || s.includes('funcaptcha'))) return false;
+    if (s.includes('/aframe') || s.includes('size=invisible')) return false;
+    const r = f.getBoundingClientRect();
+    return r.width > 60 && r.height > 40 && getComputedStyle(f).visibility !== 'hidden';
+  });
+  const fields = document.querySelectorAll('input:not([type=hidden]), select, textarea').length;
   const has = (s) => text.includes(s) || title.includes(s);
   const hit = (kind, detail) => ({ kind, detail, status: status || 0 });
   if (url.includes('google.') && url.includes('/sorry/')) return hit('google-unusual-traffic', 'Google "unusual traffic" check');
@@ -23,7 +33,7 @@
     return hit('amazon', 'Amazon robot check');
   if (short && (has('are you a robot') || has('are you a human') || has('not a robot') || has('bot detection') ||
       has('unusual traffic') || has('automated access') || has('blocked for security reasons') ||
-      frames.some(s => s.includes('recaptcha') || s.includes('hcaptcha.com') || s.includes('arkoselabs') || s.includes('funcaptcha'))))
+      (visibleCaptcha && fields < 4)))
     return hit('captcha', 'CAPTCHA / robot check');
   if ((status === 403 || status === 429 || status === 451) && short)
     return hit('http-' + status, 'HTTP ' + status + (status === 429 ? ' Too Many Requests' : ' Forbidden'));

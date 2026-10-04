@@ -766,5 +766,17 @@ window.OMUSE_EN = {
 "把生成的「客户端 ID」和「客户端密钥」粘贴到下面，点「保存并用 Google 登录」": "Paste the Client ID and Client secret below and press \"Save & sign in\"",
 "本机已保存一键登录用的 Google 客户端，上面的「用 Google 登录」会用它。": "A Google client for one-click sign-in is saved on this box; \"Sign in with Google\" above uses it.",
 "用本机地址连接 Connect": "Connect with this box's address",
-"移除本机保存的 Google 客户端？已连接的日历会失效。": "Remove the Google client saved on this box? The connected calendar will stop working."
+"移除本机保存的 Google 客户端？已连接的日历会失效。": "Remove the Google client saved on this box? The connected calendar will stop working.",
+"接管中": "Taken over",
+"请先交还当前接管的任务": "Hand back the task you are controlling first",
+"请先选择要接管的任务标签页": "Pick the task tab to take over first",
+"🖐 接管这个": "🖐 Take over this one",
+"🙋「{0}」请求你接管：{1}": "🙋 “{0}” asks you to take over: {1}",
+"你已接管「{0}」的浏览器，这个任务已暂停": "You are controlling the browser of “{0}”; that task is paused",
+"已交还「{0}」，这个任务继续执行": "Handed “{0}” back; that task continues",
+"🖐 你正在控制「{0}」的浏览器（只有这个任务暂停，其他任务照常进行）。完成登录/验证后点击「交还给 Agent」。": "🖐 You are controlling the browser of “{0}” (only that task is paused; others keep running). When you have finished logging in / verifying, click “Hand back”.",
+"🙋 {0} 个任务在等你接管，见下方列表，每个任务有自己的「接管」按钮": "🙋 {0} tasks are waiting for you to take over; each one in the list below has its own Take over button",
+"🖐 接管「{0}」": "🖐 Take over “{0}”",
+"↩ 交还「{0}」给 Agent": "↩ Hand “{0}” back to the agent",
+"任务标签页 task tabs": "Task tabs"
 };

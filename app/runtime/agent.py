@@ -51,6 +51,12 @@ REPEAT_STREAK_OK = {"browser_scroll", "browser_press", "browser_wait", "browser_
 REPEAT_READ = re.compile(r"navigate|search|read|list|_get|fetch|query")
 
 
+def _search_key(q) -> str:
+    """Order- and case-insensitive key for a web search, so a re-worded copy of an earlier search is recognised."""
+    words = re.findall(r"[\w\u4e00-\u9fff]+", str(q or "").lower())
+    return " ".join(sorted(set(words)))
+
+
 def _call_sig(name: str, args) -> str:
     if isinstance(args, str):
         try:
@@ -149,7 +155,15 @@ def repeat_guard(transcript: list[dict], call: dict) -> str | None:
         # 2026-10-04 M2-06: the earlier result was compressed out of the context, so the model cannot see it any more —
         # blocking the re-read left it asking for the same two searches until it gave up
         return None
-    if (name not in REPEAT_STREAK_OK and streak >= REPEAT_STREAK) or (REPEAT_READ.search(name) and total >= REPEAT_TOTAL):
+    searchy = name == "browser_type" and bool((call.get("args") or {}).get("submit"))   # a site search box (V3-03)
+    if name in ("browser_click", "browser_click_at") and total >= 4:
+        # 2026-10-04 V3-10: the same "Add to cart" ref was clicked 22 times while the cart stayed at 0 items
+        return (f"ERROR: 同一个元素已经点了 {total} 次，没有效果，这次没有执行。它可能不是你要的按钮，或者点了也不会变化。"
+                "先 browser_find(\"<按钮上的字>\") 或 browser_look 找到真正的按钮（注意是否要先选规格/配送选项），"
+                "或换一种方式；还是不行就如实告诉用户。"
+                f" This element was already clicked {total}x with no effect; not clicked again. It is probably not the right "
+                "button or needs another step first: browser_find the real button (check options first) or report honestly.")
+    if (name not in REPEAT_STREAK_OK and streak >= REPEAT_STREAK) or ((REPEAT_READ.search(name) or searchy) and total >= REPEAT_TOTAL):
         n = total + 1
         if name == "gmail_search":
             # 2026-10-04 M2-06 / M3-08: the model re-ran the same mail search 5-11 times instead of moving on
@@ -535,6 +549,8 @@ LOCAL_TOOLS = [
         {"status": {"type": "string", "enum": ["active", "blocked", "achieved", "failed"]}, "progress": S}, ["status", "progress"]),
     _fn("schedule_list", "列出定时任务 List schedules.", {}),
     _fn("schedule_delete", "删除定时任务 Delete a schedule by id.", {"id": S}, ["id"]),
+    _fn("goal_delete", "删除长期目标（连同它的定期检查）Delete a long-running goal by id (goal_list shows ids), together with "
+        "its check schedule. Only when the user asks to remove that goal.", {"id": S}, ["id"]),
     _fn("schedule_state_get", "读取本定时任务上次保存的状态 Read state saved by previous runs of this schedule.", {}),
     _fn("schedule_state_set", "保存本定时任务的状态（用于下次对比变化）Save state for the next run of this schedule.",
         {"key": S, "value": S}, ["key", "value"]),
@@ -576,6 +592,33 @@ class Suspend(Exception):
 
 _ERRORISH = re.compile(r"(system[-_]?error|/error|errorpage|error\.html|session[-_]?(expired|timeout)|timeout|expired|/sorry|"
                        r"invalid[-_]?(request|access)|access[-_]?denied)", re.I)
+
+
+_PRODUCT_PAGE = re.compile(r"amazon\.[a-z.]+/(?:[^/]+/)?(?:dp|gp/product)/|lazada\.[a-z.]+/products/|shopee\.[a-z.]+/.+-i\.\d+\.\d+|"
+                           r"fairprice\.com\.sg/product/|courts\.com\.sg/.+\.html|challenger\.sg/products/", re.I)
+
+
+_PARKED = re.compile(r"(this|the) domain (name )?(\S+ )?(is|may be) for sale|\S+\.\w+ is for sale|domain is for sale|buy this domain|is parked free|"
+                     r"parked (domain|by|courtesy)|sedoparking|domain parking|godaddy\.com/domain|域名.{0,6}(出售|转让)", re.I)
+
+
+def parked_domain_hint(url: str, title: str, snapshot: str) -> str:
+    """A guessed address that is a parked / for-sale domain (2026-10-04 V3-07: "scoot.com" instead of flyscoot.com)."""
+    if not _PARKED.search((title or "") + "\n" + (snapshot or "")[:3000]):
+        return ""
+    return ("（提示）这是一个停放/出售中的域名，不是这家公司的官网——网址可能猜错了。用 browser_search 搜索"
+            "「<公司名> official site」找到正确网址再继续。 (Hint) This is a parked / for-sale domain, not the company's site — "
+            "the address was probably guessed wrong. browser_search \"<company> official site\" for the right one.")
+
+
+def product_page_hint(url: str, task_goal: str) -> str:
+    """On a shop's product page the next step is the cart button, not another search (2026-10-04 V3-04: the agent bounced
+    between the search page and the product page eight times and never pressed Add to Cart)."""
+    if not _PRODUCT_PAGE.search(url or "") or not re.search(r"购物车|加购|cart|basket|买|buy|下单|order", task_goal or "", re.I):
+        return ""
+    return ("（提示）这是商品详情页。下一步：有颜色/尺寸选项就先选，然后 browser_find(\"Add to Cart\") 并点击它的 ref；"
+            "不要回到搜索页重新打开。 (Hint) This is the product page: pick options if any, then browser_find(\"Add to Cart\") "
+            "and click its ref — don't go back to the search results.")
 
 
 def deep_link_hint(asked: str, landed: str, title: str) -> str:
@@ -1078,6 +1121,7 @@ class Runtime:
         timed_out = False
         stuck = 0          # turns in a row where every call was refused by a loop guard
         gave_up = False    # set when the agent keeps going round in circles: it must answer now, without tools
+        searched: dict[str, str] = {}   # normalised browser_search query -> first call id (whole task)
         nudged = False
         numbers_checked = False
         ctx_retries = 0
@@ -1178,6 +1222,7 @@ class Runtime:
                     await self.event(task_id, "message", {"text": truncate(resp["content"], 2000)})
                 self.store.update_task(task_id, transcript=transcript)
                 seen_sigs, progress = {}, False
+                typed_this_turn = ""
                 try:
                     for i, call in enumerate(calls):
                         sig = _call_sig(call["name"], call.get("args") or {})
@@ -1187,6 +1232,22 @@ class Runtime:
                             await self._skip_duplicate(task_id, call, seen_sigs[sig], transcript)
                             continue
                         seen_sigs[sig] = call["id"]
+                        cargs = call.get("args") or {}
+                        if call["name"] == "browser_type" and cargs.get("submit"):
+                            if typed_this_turn:
+                                # 2026-10-04 V3-03: 12 searches typed into one shop's search box in a single turn — only the
+                                # last results page existed, the rest were never read, and the list was searched 3x over
+                                await self._skip_duplicate(task_id, call, typed_this_turn, transcript, one_page=True)
+                                continue
+                            typed_this_turn = call["id"]
+                        if call["name"] == "browser_search":
+                            qk = _search_key((call.get("args") or {}).get("query", ""))
+                            if qk and qk in searched:
+                                # 2026-10-04 V1-07: the same weather / hotel searches ran 3 times in one task
+                                await self._skip_duplicate(task_id, call, searched[qk], transcript, whole_task=True)
+                                continue
+                            if qk:
+                                searched[qk] = call["id"]
                         ok = await self._exec_call(t, call, transcript, catalog, remaining=calls[i + 1:])
                         consecutive_errors = 0 if ok else consecutive_errors + 1
                         progress = progress or not call.get("_refused")
@@ -1226,6 +1287,19 @@ class Runtime:
             if final and not numbers_checked and not force_final and not timed_out and steps < max_steps - 1:
                 numbers_checked = True
                 bad = ungrounded_numbers(transcript, final, t["goal"])
+                codes = ungrounded_codes(transcript, final, t["goal"])
+                if codes and not bad:
+                    # 2026-10-04 V8-05: a return flight "SQ 637 11:30" that no email mentioned
+                    await self.event(task_id, "number_check", {"unsupported_codes": codes[:10]})
+                    transcript.append({"role": "assistant", "content": final})
+                    transcript.append({"role": "user", "content": prompts.L(
+                        agent_lang(s),
+                        "（系统）你回答里的这些航班号/编号没有出现在任何工具结果里：" + "、".join(codes[:10]) + "。"
+                        "不要编造航班、预订号或时间：删掉它们，或者写明「未找到」，然后重新写完整的最终回答。",
+                        "(System) These flight numbers / codes in your answer appear in no tool result: " + ", ".join(codes[:10]) +
+                        ". Never invent flights, booking codes or times: remove them or say \"not found\", then write the complete "
+                        "final answer again.")})
+                    continue
                 if bad:
                     # 2026-10-03 M1-06: calculate returned the right building blocks, the answer then carried a
                     # hand-made table whose balances came from nowhere (17,016.64 instead of 16,962.71)
@@ -1235,10 +1309,11 @@ class Runtime:
                         agent_lang(s),
                         "（系统）你回答里的这些数字没有出现在任何工具结果里：" + "、".join(bad[:10]) + "。"
                         "请用 calculate（表格数据用 data_query）把它们重新算一遍——如果之前某个工具结果看起来不对，就改正输入再算——"
-                        "然后重新写完整的最终回答，只使用工具算出的数字。",
+                        "然后重新写完整的最终回答，只使用工具算出的数字。回答直接从内容开始，不要提到这次核对或“以下是完整回答”之类的话。",
                         "(System) These figures in your answer do not appear in any tool result: " + ", ".join(bad[:10]) + ". "
                         "Recompute them with calculate (data_query for table data) — if an earlier result looked wrong, fix the "
-                        "inputs — then write the complete final answer again using only figures the tools produced.")})
+                        "inputs — then write the complete final answer again using only figures the tools produced. Start "
+                        "straight with the content: don't mention this check or say \"here is the complete answer\".")})
                     continue
             final = merge_stranded_answer(transcript, final)
             if agent_lang(s) == "en" and prompts.cjk_share(final) > 0.5 and not prompts.wants_cjk_output(t["goal"]):
@@ -1249,7 +1324,13 @@ class Runtime:
                 if st.get("status") in ("pending", "running"):
                     st["status"] = "done" if not force_final else st["status"]
             self.store.update_task(task_id, transcript=transcript, result=final, plan=plan, finished_at=now_ts())
-            if timed_out and not gave_up and steps < max_steps:
+            needs_user = (gave_up or force_final) and not timed_out and asks_user(final)
+            if needs_user:
+                # stopped because something only the user knows is missing, and the answer asks for it: not a failure
+                await self.event(task_id, "needs_user", {"reason": "gave_up" if gave_up else "step_limit"})
+                await self.set_status(task_id, "COMPLETED")
+                gave_up = force_final = False
+            elif timed_out and not gave_up and steps < max_steps:
                 why = (f"Stopped at the {max_minutes:.0f}-minute time limit; answered with what was found" if s.get("language") == "en"
                        else f"达到 {max_minutes:.0f} 分钟用时上限，按已有信息作答")
                 await self.set_status(task_id, "FAILED", error=why)
@@ -1552,10 +1633,25 @@ class Runtime:
                                                                 "and do not repeat the calls that failed.")
                                                     + ("\n" + dead_ends if dead_ends else "")})
 
-    async def _skip_duplicate(self, task_id: str, call: dict, first_id: str, transcript: list[dict]):
-        """A call identical to one earlier in the same turn: answer its tool_call id without running it again."""
-        msg = (f"已跳过 — 与本轮前面的调用 {first_id} 完全相同，请直接使用那个结果。"
-               f" Skipped: identical to call {first_id} earlier in this same turn; use that result.")
+    async def _skip_duplicate(self, task_id: str, call: dict, first_id: str, transcript: list[dict], whole_task: bool = False,
+                              one_page: bool = False):
+        """A call identical to one earlier in the same turn (or, for searches, earlier in the task): answer its tool_call
+        id without running it again."""
+        if one_page:
+            msg = (f"已跳过 — 这一轮已经在网页搜索框里搜过一次（调用 {first_id}），同一个浏览器页面一次只能显示一个结果页，"
+                   "后面的搜索会把前面的结果冲掉。先读完这次的结果并记下（update_plan 的 note），下一轮再搜下一个；"
+                   "要一次查多个，用 browser_read 读多个搜索网址（每次最多 4 个）。"
+                   f" Skipped: this turn already searched the site (call {first_id}); one page shows one result page, so later "
+                   "searches would replace it unread. Read and note these results, then search the next item in the next turn — "
+                   "or browser_read several search URLs (up to 4) at once.")
+        elif whole_task:
+            msg = (f"已跳过 — 这个任务里已经搜索过几乎相同的内容（调用 {first_id}）。请使用那次的结果：读其中的网址，"
+                   f"或换一个明显不同的关键词 / 来源；如果确实找不到，就在回答里说明“未找到”。"
+                   f" Skipped: you already ran this search in this task (call {first_id}). Use those results (read their URLs), "
+                   f"try a clearly different query or source, or say in the answer that it wasn't found.")
+        else:
+            msg = (f"已跳过 — 与本轮前面的调用 {first_id} 完全相同，请直接使用那个结果。"
+                   f" Skipped: identical to call {first_id} earlier in this same turn; use that result.")
         transcript.append({"role": "tool", "tool_call_id": call["id"], "content": msg})
         await self.event(task_id, "tool_call", {"call_id": call["id"], "name": call["name"], "args": _preview_args(call.get("args") or {}),
                                                 "sub": False})
@@ -1701,6 +1797,20 @@ class Runtime:
             call["_refused"] = True
             await self.audit("executor", name, task_id, resource="loop_guard", risk="low", decision="DENY",
                              result="repeat_blocked", detail={"args": _preview_args(args)})
+        elif "_unparsed" in args and name in ("files_write", "make_pdf", "make_docx", "make_xlsx", "notion_create_page", "notion_append"):
+            # 2026-10-04 V8-06: a 270-row CSV in one files_write call was cut off every time
+            content = ("ERROR: 内容太长，参数被截断了，没有执行。请分几次写：每次不超过约 3000 字，第一次正常写，之后用 append=true 追加"
+                       "（Notion 用 notion_append 分段追加）。"
+                       " The content was too long and got cut off; nothing was written. Write it in parts of about 3,000 characters: "
+                       "the first call normally, then append=true for the rest (notion_append for Notion).")
+            ok = False
+        elif "_unparsed" in args:
+            # 2026-10-04 V4-07: the model looped ("conference OR conference OR …"), the arguments weren't valid JSON, and
+            # gmail_search ran with no query at all — 50 unrelated emails, so the travel mails were "not found"
+            content = ("ERROR: 这次调用的参数不是有效的 JSON（可能重复输出了同一个词或被截断），没有执行。请用简短、不重复的参数重新调用。"
+                       " The arguments were not valid JSON (repeated words or cut off); the call was not run. Call it again "
+                       "with short arguments and no repetition.")
+            ok = False
         elif allow is not None and name not in allow:
             content = f"ERROR: tool {name} is not available to this agent."
             ok = False
@@ -1772,6 +1882,15 @@ class Runtime:
                                     submitted=name != "browser_navigate")
                 if name == "browser_navigate" and not hint:
                     hint = deep_link_hint(str(args.get("url") or ""), str(r0.get("url") or ""), str(r0.get("title") or ""))
+                if not hint and name == "browser_navigate":
+                    hint = parked_domain_hint(str(r0.get("url") or ""), str(r0.get("title") or ""), str(r0.get("snapshot") or ""))
+                if not hint:
+                    hint = product_page_hint(str(r0.get("url") or ""), str(t.get("goal") or ""))
+                    seen_h = self.__dict__.setdefault("_product_hinted", {}).setdefault(task_id, set())
+                    if hint and str(r0.get("url") or "") in seen_h:
+                        hint = ""     # once per product page, not after every click on it
+                    elif hint:
+                        seen_h.add(str(r0.get("url") or ""))
                 if hint:
                     content = hint + "\n" + content
             if st == "ok" and name != "browser_locate":
@@ -2451,8 +2570,20 @@ class Runtime:
                              for x in self.store.schedules()) or "(无 none)"
         if name == "schedule_delete":
             self.store.db.execute("DELETE FROM schedules WHERE id=?", (str(a["id"]),))
+            # a goal whose check schedule is gone would stay "active" forever (2026-10-04 V7-10)
+            self.store.db.execute("DELETE FROM goals WHERE schedule_id=?", (str(a["id"]),))
             await self.publish({"kind": "schedule_update"})
+            await self.publish({"kind": "goal_update"})
             return "已删除 deleted"
+        if name == "goal_delete":
+            g = self.store.goal(str(a.get("id", "")))
+            if not g:
+                return "ERROR: 没有这个目标，请先 goal_list (unknown goal id)"
+            self.store.db.execute("DELETE FROM schedules WHERE id=?", (g["schedule_id"],))
+            self.store.db.execute("DELETE FROM goals WHERE id=?", (g["id"],))
+            await self.audit("executor", "goal.delete", tid, resource=g["id"], detail={"title": g["title"]})
+            await self.publish({"kind": "goal_update", "goal_id": g["id"]})
+            return f"已删除目标 goal deleted:「{g['title']}」"
         if name in ("schedule_state_get", "schedule_state_set"):
             sid = t.get("schedule_id")
             if not sid:
@@ -2568,6 +2699,20 @@ class Runtime:
 _POINTS_BACK = re.compile(r"\babove\b|\bpreceding\b|\bearlier (table|summary|message)\b|上面|上方|如上|上述|前面(的|那)", re.I)
 
 
+_ASK_RE = re.compile(r"(请(你)?(告诉|提供|确认|发给|补充)|能(否|不能)告诉我|需要你(提供|告诉|确认)|你(想|要)(选|用)哪|哪一(个|家|天|封)|"
+                     r"please (tell|confirm|provide|send|let me know)|could you (tell|confirm|provide|share)|which (one|of)|do you want me to)",
+                     re.I)
+
+
+def asks_user(final: str) -> bool:
+    """The answer ends by asking the user for a missing detail or a choice (needs-info), rather than reporting a failure.
+    2026-10-04 TC34: "find my dentist appointment and call to move it" ended correctly by asking which appointment /
+    the clinic's number, but the task showed FAILED because the searches had come back empty."""
+    tail = (final or "")[-500:]
+    return bool(_ASK_RE.search(tail)) and ("?" in tail or "？" in tail)
+
+
+
 def merge_stranded_answer(transcript: list[dict], final: str) -> str:
     """2026-10-02 R7-02: the model wrote the full answer (a table of bills) as text next to an update_plan call, then
     finished with "the summary table above covers …" — the chat only shows the final message, so the table was lost.
@@ -2579,7 +2724,7 @@ def merge_stranded_answer(transcript: list[dict], final: str) -> str:
         if m.get("role") == "user" and not str(m.get("content") or "").startswith(("(System)", "（系统）")):
             break    # only look inside this run
         txt = str(m.get("content") or "").strip() if m.get("role") == "assistant" and m.get("tool_calls") else ""
-        if len(txt) >= 300 and txt not in f:
+        if len(txt) >= 300 and txt not in f and txt[:160] not in f:   # V2-10: same answer twice when only the end differed
             return txt + "\n\n" + f
     return final
 
@@ -2626,6 +2771,28 @@ def ungrounded_numbers(transcript: list[dict], final: str, goal: str = "") -> li
         if any(abs(v + x) <= max(tol, 0.001 * abs(x)) for x in src):     # sign shown differently
             continue
         lbl = tok + (wan or "")
+        if lbl not in bad:
+            bad.append(lbl)
+    return bad
+
+
+_FLIGHT = re.compile(r"(?<![A-Za-z0-9])([A-Z]{2}|[A-Z]\d|\d[A-Z])\s?(\d{2,4})(?![\d])")
+_TRAVEL = re.compile(r"航班|flight|起飞|落地|抵达|airline|航空|depart|arriv", re.I)
+
+
+def ungrounded_codes(transcript: list[dict], final: str, goal: str = "") -> list[str]:
+    """Flight numbers in a travel answer that no tool result, nor the request, contains (made up)."""
+    f = str(final or "")
+    if not _TRAVEL.search(f):
+        return []
+    src = re.sub(r"\s+", "", (str(goal or "") + "\n" + "\n".join(str(m.get("content") or "") for m in transcript
+                                                             if m.get("role") in ("tool", "user", "system"))).upper())
+    bad: list[str] = []
+    for m in _FLIGHT.finditer(f):
+        code = m.group(1) + m.group(2)
+        if code in src or code.upper() in src:
+            continue
+        lbl = m.group(0).strip()
         if lbl not in bad:
             bad.append(lbl)
     return bad

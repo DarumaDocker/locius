@@ -244,19 +244,115 @@ _COOKIE_DECLINE = re.compile(r"^\s*(reject( all)?( cookies)?|decline( all)?( coo
 _BADGES = re.compile(r"(buyer|purchase|payment) protection|free (returns|delivery)|apply (coupon|voucher)s? at checkout", re.I)
 
 
+_READONLY_SUBMIT = re.compile(
+    r"(display|show( results| rates| data)?|view( results)?|search|find|filter|apply filters?|get (rates|data|results|quote)|"
+    r"look ?up|refresh|reload|load( more)?|more|next|previous|prev|calculate|convert|check( availability)?|compare|sort|"
+    r"显示|查看|查询|搜索|筛选|计算|换算|刷新|下一页|上一页|更多|比较|检查)\s*[»›>→]*", re.I)
+_AGREE = re.compile(r"agree|accept|consent|terms|authori[sz]e|同意|接受|授权|条款", re.I)
+
+
+# Buttons that spend money (or commit to paying). These are approved ONE BY ONE: no standing grant covers them
+# (2026-10-04: a permanent "clicks on amazon.sg" grant let "Place your order" through and a real order was placed).
+_MONEY_CLICK = re.compile(
+    r"place (your )?order|order now|buy now|pay( now|ment)?\b|purchase|checkout|check out|proceed to (checkout|payment|pay)|"
+    r"complete (order|purchase|booking|payment)|confirm (order|purchase|payment|booking)|subscribe|start (my )?(subscription|trial)|"
+    r"upgrade|donate|transfer|top ?up|book now|reserve now|"
+    r"付款|支付|购买|立即购买|下单|提交订单|结账|结算|确认支付|确认订单|订阅|升级|捐|转账|充值|预订|"
+    r"購入|注文|支払|決済", re.I)
+_MONEY_URL = re.compile(r"/(checkout|buy|payment|pay|billing|cart/checkout|order/confirm|subscribe|upgrade)\b", re.I)
+
+
+def money_click(name: str, input_type: str = "", page_url: str = "") -> bool:
+    label = str(name or "")
+    if _MONEY_CLICK.search(label):
+        return True
+    # any submit button on a checkout / payment page
+    return (input_type or "").lower() == "submit" and bool(_MONEY_URL.search(str(page_url or "")))
+
+
 def click_is_risky(role: str, name: str, input_type: str = "") -> bool:
     label = _BADGES.sub(" ", f"{name or ''}")
+    r = (role or "").lower()
+    # choosing an option is not submitting (2026-10-04 V3-08: the "Pay monthly / Pay yearly" switch on a pricing page
+    # needed approval); ticking "I agree to the terms" still does
+    if r in ("radio", "tab", "option", "switch", "menuitemradio", "day") or (r == "checkbox" and not _AGREE.search(label)):
+        return False
     if (role or "").lower() == "link" and ("\n" in label.strip() or len(label) > 80):
         # a whole product / listing card is one link: judge it by its first line, like a person reading the title
         label = label.strip().split("\n")[0][:80]
     if _CART_ADD.search(label) or _COOKIE_DECLINE.search(label):
         return False
     if (input_type or "").lower() == "submit":
-        return True
+        # a form that only shows data ("Display", "Show rates", "Calculate") submits nothing of the user's
+        # (2026-10-04 V8-01: the MAS exchange-rate page's "Display" button needed approval)
+        return not _READONLY_SUBMIT.fullmatch(label.strip())
     if _SEARCH_WORDS.search(label):
         return False
     return bool(_RISKY_CLICK.search(label))
 
 
+_NAMED_NEVER = re.compile(
+    r"pay|payment|buy|purchase|order|checkout|check out|place|send|transfer|donate|subscribe|book|reserve|confirm|sign|agree|"
+    r"accept|delete account|close account|withdraw|付款|支付|购买|下单|结账|结算|发送|转账|捐|订阅|预订|预约|订位|确认|签|同意|注销|提现",
+    re.I)
+_NEGATED = re.compile(r"(不要|别|不用|勿|先别|don'?t|do not|never|not)\s*(点|按|click|press|hit|tap)?\s*(击)?\s*[「『\"'“]?\s*$", re.I)
+
+
+_SUBMIT_VERBS = ("提交", "submit", "添加", "新增", "加一条", "add a", "add the", "保存", "save")
+_GENERIC_BTN = {"submit": _SUBMIT_VERBS, "save": _SUBMIT_VERBS, "add": _SUBMIT_VERBS, "ok": _SUBMIT_VERBS,
+                "apply": _SUBMIT_VERBS, "done": _SUBMIT_VERBS, "提交": _SUBMIT_VERBS, "保存": _SUBMIT_VERBS, "添加": _SUBMIT_VERBS}
+
+
+def _asked_verb(request: str, verbs) -> bool:
+    low = str(request or "").lower()
+    if verbs is _SUBMIT_VERBS and re.search(r"(不要|别|先别|不用|勿|don'?t|do not|never)\s*(点|按|click|press)?\s*[「『\"'“*]*\s*(提交|submit)", low):
+        return False
+    for v in verbs:
+        i = low.find(v)
+        while i >= 0:
+            if not _NEGATED.search(request[max(0, i - 12):i]):
+                return True
+            i = low.find(v, i + 1)
+    return False
+
+
+def user_asked_upload(request: str, page_url: str, path: str) -> bool:
+    """The user's own request asks to upload one of their attached files on the site they named (2026-10-04: test pages
+    stopped at an approval card for the file the user had just attached and told OMuse to upload there)."""
+    req = str(request or "")
+    dom = domain_of(page_url or "")
+    if not dom or not str(path or "").startswith("uploads/"):
+        return False
+    named = dom in req.lower() or dom.removeprefix("www.") in req.lower()
+    return named and _asked_verb(req, ("上传", "upload", "选择附件", "选好文件", "选择文件", "attach"))
+
+
+def user_named_click(request: str, label: str) -> bool:
+    """The user's own request explicitly asks to click this button (e.g. "先点 Remove") and the button is not about money,
+    sending, booking, signing or accepting terms. Then the consequential-click approval is skipped: the user already
+    said so. 2026-10-04 (Lucas): "先放宽一些吧，尽量让这个流程往下走" after "click Remove" on a test page needed approval."""
+    lab = re.sub(r"\s+", " ", str(label or "")).strip()
+    req = str(request or "")
+    if len(lab) < 2 or len(lab) > 40 or _NAMED_NEVER.search(lab):
+        return False
+    low = req.lower()
+    # generic form buttons count as named when the user asked for that operation in words ("添加一条记录" → Submit)
+    if lab.lower() in _GENERIC_BTN and _asked_verb(req, _GENERIC_BTN[lab.lower()]):
+        return True
+    i = low.find(lab.lower())
+    while i >= 0:
+        before = req[max(0, i - 12):i]
+        if not _NEGATED.search(before):
+            return True
+        i = low.find(lab.lower(), i + 1)
+    return False
+
+
 def looks_like_search(role: str, name: str) -> bool:
     return (role or "").lower() in ("searchbox", "combobox") or bool(_SEARCH_WORDS.search(name or ""))
+
+
+def named_in_request(request: str, dom: str) -> bool:
+    """The user's own request names this site ("在 FairPrice 网上超市（fairprice.com.sg）…")."""
+    d = (dom or "").lower().removeprefix("www.")
+    return bool(d) and len(d) > 4 and d in str(request or "").lower()
