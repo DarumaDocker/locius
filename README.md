@@ -69,6 +69,29 @@ docker run -d --name omuse --restart unless-stopped \
 
 Open `http://localhost:8080` and sign in as `omuse` (change with `OMUSE_USER`) with your password. Olares normally does the login; here the container asks for HTTP Basic auth and refuses to start without `OMUSE_PASSWORD`. Before opening the port to the internet, put HTTPS in front (Cloudflare Tunnel, Tailscale Funnel, Caddy, …) — Basic auth over plain HTTP sends the password in the clear. `OMUSE_MODEL_API_KEY` is sent as a Bearer token to the model endpoint and is never stored in Settings. Add `-p 8083:8083` only if you use the Telnyx phone line.
 
+**Configuration.** Instead of `-e` flags you can keep the settings in a file on the host and pass it with `--env-file` (one `NAME=value` per line, no quotes; keep it out of git, it holds your password and API key):
+
+```bash
+docker run -d --name omuse --restart unless-stopped \
+  -p 8080:8080 -v omuse-data:/omuse \
+  --env-file ~/.config/omuse/omuse.env omuse
+```
+
+Docker reads the file when the container is created: after editing it, `docker rm -f omuse` and run it again (your data stays in the volume). To use another host port, change the left side of `-p`, e.g. `-p 9000:8080`.
+
+| Variable | Meaning |
+|---|---|
+| `OMUSE_PASSWORD` | Login password (required) |
+| `OMUSE_USER` | Login name (default `omuse`) |
+| `OMUSE_AUTH=off` | No login — only behind another proxy that already authenticates |
+| `OMUSE_MODEL_URL`, `OMUSE_MODEL` | OpenAI-compatible endpoint and model id (defaults; a value saved in Settings wins) |
+| `OMUSE_MODEL_API_KEY` | API key for the model endpoint (environment only, not in Settings) |
+| `TZ` | Default timezone (a value saved in Settings wins) |
+| `TELEGRAM_BOT=0`, `VOICE_PORT=0` | Turn off the Telegram bot / the phone port |
+| `BROWSER_HEADLESS=1` | Run the browser headless instead of on the virtual display |
+
+Everything else (connections, vault, language, limits) is set in the web UI and stored in the volume.
+
 ### Development
 
 ```bash
