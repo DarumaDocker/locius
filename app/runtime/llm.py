@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import time
 import uuid
@@ -27,6 +28,13 @@ def _xml_value(v: str):
 def strip_tool_markup(text: str) -> str:
     """Remove tool-call markup a model wrote as plain text (it must never reach the user as the answer)."""
     return _ANY_TOOLCALL.sub("", text or "").strip()
+
+
+def auth_headers() -> dict:
+    """Bearer key for hosted OpenAI-compatible APIs (OMUSE_MODEL_API_KEY). Read from the environment only, so it never
+    shows up in Settings or the audit log; the Olares router needs none."""
+    key = (os.environ.get("OMUSE_MODEL_API_KEY") or os.environ.get("PERSONA_MODEL_API_KEY") or "").strip()
+    return {"Authorization": f"Bearer {key}"} if key else {}
 
 
 class LLMError(Exception):
@@ -113,7 +121,7 @@ class LLM:
     async def first_model(self, base: str, exclude: str = "") -> str:
         try:
             async with httpx.AsyncClient(timeout=15) as c:
-                r = await c.get(f"{base}/models")
+                r = await c.get(f"{base}/models", headers=auth_headers())
             ids = [m.get("id") for m in (r.json().get("data") or []) if m.get("id")]
         except Exception:
             return ""
@@ -128,7 +136,7 @@ class LLM:
         base = str(s["model_base_url"]).rstrip("/")
         try:
             async with httpx.AsyncClient(timeout=15) as c:
-                r = await c.get(f"{base}/models")
+                r = await c.get(f"{base}/models", headers=auth_headers())
             ids = [m.get("id") for m in (r.json().get("data") or []) if m.get("id")]
         except Exception:
             return ""
@@ -148,7 +156,7 @@ class LLM:
         async with self.stt_sem:
             async with httpx.AsyncClient(timeout=httpx.Timeout(float(s.get("llm_timeout") or 600), connect=15)) as c:
                 r = await c.post(f"{base}/audio/transcriptions", data={"model": model, "response_format": "json"},
-                                 files={"file": (filename, audio, "audio/wav")})
+                                 files={"file": (filename, audio, "audio/wav")}, headers=auth_headers())
         if r.status_code >= 400:
             raise LLMError(f"语音转文字失败 transcription failed HTTP {r.status_code}: {r.text[:200]}")
         try:
@@ -196,7 +204,7 @@ class LLM:
                 t0 = time.time()
                 try:
                     async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=15)) as c:
-                        r = await c.post(f"{base}/chat/completions", json=body)
+                        r = await c.post(f"{base}/chat/completions", json=body, headers=auth_headers())
                     if r.status_code in (400, 413, 500) and _context_exceeded(r.text):
                         raise LLMContextError(f"上下文太长 (prompt exceeds the model's context window): {r.text[:200]}",
                                               chars=sum(len(str(m.get("content") or "")) for m in messages))

@@ -51,6 +51,47 @@ OMuse is a local-first AI agent for [Olares](https://www.olares.com). It doesn't
 
 The model endpoint defaults to `https://router.<your-olares-name>.olares.com/v1`; change it in the app's settings or the `PERSONA_MODEL_URL` / `PERSONA_MODEL` environment values. If the configured model isn't served, OMuse picks an available one.
 
+### Run with Docker
+
+One container holds all three services; state lives in the `omuse-data` volume.
+
+```bash
+docker build -t omuse .
+docker run -d --name omuse --restart unless-stopped \
+  -p 8080:8080 -v omuse-data:/omuse \
+  -e OMUSE_PASSWORD='choose-a-long-password' \
+  -e OMUSE_MODEL_URL=https://api.openai.com/v1 \
+  -e OMUSE_MODEL=gpt-4.1 \
+  -e OMUSE_MODEL_API_KEY=sk-... \
+  -e TZ=America/Los_Angeles \
+  omuse
+```
+
+Open `http://localhost:8080` and sign in as `omuse` (change with `OMUSE_USER`) with your password. Olares normally does the login; here the container asks for HTTP Basic auth and refuses to start without `OMUSE_PASSWORD`. Before opening the port to the internet, put HTTPS in front (Cloudflare Tunnel, Tailscale Funnel, Caddy, …) — Basic auth over plain HTTP sends the password in the clear. `OMUSE_MODEL_API_KEY` is sent as a Bearer token to the model endpoint and is never stored in Settings. Add `-p 8083:8083` only if you use the Telnyx phone line.
+
+**Configuration.** Instead of `-e` flags you can keep the settings in a file on the host and pass it with `--env-file` (one `NAME=value` per line, no quotes; keep it out of git, it holds your password and API key):
+
+```bash
+docker run -d --name omuse --restart unless-stopped \
+  -p 8080:8080 -v omuse-data:/omuse \
+  --env-file ~/.config/omuse/omuse.env omuse
+```
+
+Docker reads the file when the container is created: after editing it, `docker rm -f omuse` and run it again (your data stays in the volume). To use another host port, change the left side of `-p`, e.g. `-p 9000:8080`.
+
+| Variable | Meaning |
+|---|---|
+| `OMUSE_PASSWORD` | Login password (required) |
+| `OMUSE_USER` | Login name (default `omuse`) |
+| `OMUSE_AUTH=off` | No login — only behind another proxy that already authenticates |
+| `OMUSE_MODEL_URL`, `OMUSE_MODEL` | OpenAI-compatible endpoint and model id (defaults; a value saved in Settings wins) |
+| `OMUSE_MODEL_API_KEY` | API key for the model endpoint (environment only, not in Settings) |
+| `TZ` | Default timezone (a value saved in Settings wins) |
+| `TELEGRAM_BOT=0`, `VOICE_PORT=0` | Turn off the Telegram bot / the phone port |
+| `BROWSER_HEADLESS=1` | Run the browser headless instead of on the virtual display |
+
+Everything else (connections, vault, language, limits) is set in the web UI and stored in the volume.
+
 ### Development
 
 ```bash
@@ -60,6 +101,15 @@ python3 -m pytest -q tests/test_units.py
 python3 tests/integration.py        # and the other *_e2e.py suites
 bash tests/stop_local.sh
 ```
+
+Or run the local e2e suites inside the Docker image, with nothing on the host but Docker (it installs the test-only dependencies in the container and gives every suite a freshly started stack with the fake LLM):
+
+```bash
+bash tests/run_in_docker.sh                  # every suite, about 15 minutes
+bash tests/run_in_docker.sh e2e_027 mcp_e2e  # only these
+```
+
+It builds the `omuse` image from the Dockerfile if it is missing (`OMUSE_IMAGE` picks another image), prints one `SUITE <name> rc=… pass=… fail=…` line per suite, and exits 1 if any suite fails. `tests/docker_browser_e2e.py` is separate: it drives a running container with a real, vision-capable model (see its docstring).
 
 ---
 
