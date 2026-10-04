@@ -71,11 +71,11 @@ spec:
 
     Runs on the local models served by your Olares by default — any OpenAI-compatible endpoint works. English and 中文 interface.
   upgradeDescription: |
+    0.2.53: Amazon Add to Cart found (transparent buttons), repeated clicks stopped, option switches and site search boxes need no approval, calendar day cells, upload relaxation fix
     0.2.52: Browser takeover per chat: one named tab per task, Take over always targets the selected chat, each waiting chat has its own button; shopping and wrong-domain fixes
     0.2.51: Fewer approval stops: buttons and uploads the user explicitly asked for go through (payments, sending and bookings still ask); date-picker day cells get refs
     0.2.50: Browser: calendar day cells clickable, covered buttons retried, no false CAPTCHA alarm on pages with ad reCAPTCHA
     0.2.49: Research accuracy (official sources, no estimates), FX direction, no repeated searches, mail-first for orders/bills, needs-info tasks no longer FAILED, exact phone failure reasons
-    0.2.48: Smaller install: the app code is downloaded once at startup (checked against a pinned SHA-256) instead of being packed into the Helm release
   developer: Lucas Lu
   website: https://github.com/Drlucaslu/locius
   sourceCode: https://github.com/Drlucaslu/locius

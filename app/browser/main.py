@@ -576,6 +576,10 @@ class Broker:
                 input_type: (el.type || '').toLowerCase(),
                 is_password: (el.type || '').toLowerCase() === 'password' || (el.getAttribute('autocomplete')||'').includes('password'),
                 in_form: !!el.closest('form'),
+                // a site search box whose label is a rotating promo text (2026-10-04 FairPrice: "1 for $21.30 - ...")
+                searchy: (el.type || '').toLowerCase() === 'search' || /search|query|keyword|^q$/i.test((el.getAttribute('name') || '') + ' ' + (el.id || '')) ||
+                         (el.getAttribute('enterkeyhint') || '') === 'search' || !!(el.closest('form') && (el.closest('form').getAttribute('role') === 'search' ||
+                         /search|query/i.test(el.closest('form').getAttribute('action') || ''))) || !!el.closest('[role=search]'),
                 href: el.getAttribute('href') || ''
             })""", timeout=5000)
         except Exception as e:

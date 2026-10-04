@@ -33,7 +33,10 @@
       const r = el.getBoundingClientRect();
       if (r.width < 1 || r.height < 1) return false;
       const s = getComputedStyle(el);
-      return s.visibility !== 'hidden' && s.display !== 'none' && parseFloat(s.opacity || '1') > 0.05;
+      // Amazon's "Add to Cart" is a transparent <input type=submit> laid over its label (class a-button-input,
+      // opacity ~0): it is the real button, so transparency doesn't hide buttons (2026-10-04 V3-04 / V3-10)
+      const clearBtn = (el.tagName === 'INPUT' && /^(submit|button|image)$/i.test(el.type || '')) || el.tagName === 'BUTTON';
+      return s.visibility !== 'hidden' && s.display !== 'none' && (clearBtn || parseFloat(s.opacity || '1') > 0.05);
     } catch (e) { return false; }
   };
   const INTERACTIVE = 'a[href],button,input,select,textarea,summary,[role=button],[role=link],[role=checkbox],[role=radio],[role=tab],' +
@@ -58,7 +61,11 @@
         if (getComputedStyle(e).cursor !== 'pointer' && !/(^|[\s_-])day/i.test(typeof e.className === 'string' ? e.className : '')) continue;
         cand.push(e);
       }
-      for (const e of cand) { let a = e.parentElement, inner = false; for (let k = 0; a && k < 4; k++, a = a.parentElement) { if (cand.includes(a)) { inner = true; break; } } if (!inner) DAYS.add(e); }
+      // a row or a whole month also starts with a day number: a cell holds exactly one day (2026-10-04 V2-09: the
+      // whole week row got one ref, and every click landed on its first day)
+      const dayOf = e => ((e.innerText || '').trim().split('\n')[0] || '').trim();
+      const cells = cand.filter(e => !cand.some(o => o !== e && e.contains(o) && dayOf(o) !== dayOf(e)));
+      for (const e of cells) { let a = e.parentElement, inner = false; for (let k = 0; a && k < 4; k++, a = a.parentElement) { if (cells.includes(a)) { inner = true; break; } } if (!inner) DAYS.add(e); }
     }
   } catch (e) {}
   const isInteractive = el => { try { return el.matches(INTERACTIVE) || DAYS.has(el); } catch (e) { return false; } };

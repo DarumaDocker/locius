@@ -156,6 +156,13 @@ def repeat_guard(transcript: list[dict], call: dict) -> str | None:
         # blocking the re-read left it asking for the same two searches until it gave up
         return None
     searchy = name == "browser_type" and bool((call.get("args") or {}).get("submit"))   # a site search box (V3-03)
+    if name in ("browser_click", "browser_click_at") and total >= 4:
+        # 2026-10-04 V3-10: the same "Add to cart" ref was clicked 22 times while the cart stayed at 0 items
+        return (f"ERROR: 同一个元素已经点了 {total} 次，没有效果，这次没有执行。它可能不是你要的按钮，或者点了也不会变化。"
+                "先 browser_find(\"<按钮上的字>\") 或 browser_look 找到真正的按钮（注意是否要先选规格/配送选项），"
+                "或换一种方式；还是不行就如实告诉用户。"
+                f" This element was already clicked {total}x with no effect; not clicked again. It is probably not the right "
+                "button or needs another step first: browser_find the real button (check options first) or report honestly.")
     if (name not in REPEAT_STREAK_OK and streak >= REPEAT_STREAK) or ((REPEAT_READ.search(name) or searchy) and total >= REPEAT_TOTAL):
         n = total + 1
         if name == "gmail_search":
@@ -1833,6 +1840,11 @@ class Runtime:
                     hint = parked_domain_hint(str(r0.get("url") or ""), str(r0.get("title") or ""), str(r0.get("snapshot") or ""))
                 if not hint:
                     hint = product_page_hint(str(r0.get("url") or ""), str(t.get("goal") or ""))
+                    seen_h = self.__dict__.setdefault("_product_hinted", {}).setdefault(task_id, set())
+                    if hint and str(r0.get("url") or "") in seen_h:
+                        hint = ""     # once per product page, not after every click on it
+                    elif hint:
+                        seen_h.add(str(r0.get("url") or ""))
                 if hint:
                     content = hint + "\n" + content
             if st == "ok" and name != "browser_locate":
@@ -2654,7 +2666,7 @@ def merge_stranded_answer(transcript: list[dict], final: str) -> str:
         if m.get("role") == "user" and not str(m.get("content") or "").startswith(("(System)", "（系统）")):
             break    # only look inside this run
         txt = str(m.get("content") or "").strip() if m.get("role") == "assistant" and m.get("tool_calls") else ""
-        if len(txt) >= 300 and txt not in f:
+        if len(txt) >= 300 and txt not in f and txt[:160] not in f:   # V2-10: same answer twice when only the end differed
             return txt + "\n\n" + f
     return final
 

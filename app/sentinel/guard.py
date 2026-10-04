@@ -244,8 +244,16 @@ _COOKIE_DECLINE = re.compile(r"^\s*(reject( all)?( cookies)?|decline( all)?( coo
 _BADGES = re.compile(r"(buyer|purchase|payment) protection|free (returns|delivery)|apply (coupon|voucher)s? at checkout", re.I)
 
 
+_AGREE = re.compile(r"agree|accept|consent|terms|authori[sz]e|同意|接受|授权|条款", re.I)
+
+
 def click_is_risky(role: str, name: str, input_type: str = "") -> bool:
     label = _BADGES.sub(" ", f"{name or ''}")
+    r = (role or "").lower()
+    # choosing an option is not submitting (2026-10-04 V3-08: the "Pay monthly / Pay yearly" switch on a pricing page
+    # needed approval); ticking "I agree to the terms" still does
+    if r in ("radio", "tab", "option", "switch", "menuitemradio", "day") or (r == "checkbox" and not _AGREE.search(label)):
+        return False
     if (role or "").lower() == "link" and ("\n" in label.strip() or len(label) > 80):
         # a whole product / listing card is one link: judge it by its first line, like a person reading the title
         label = label.strip().split("\n")[0][:80]
@@ -272,7 +280,7 @@ _GENERIC_BTN = {"submit": _SUBMIT_VERBS, "save": _SUBMIT_VERBS, "add": _SUBMIT_V
 
 def _asked_verb(request: str, verbs) -> bool:
     low = str(request or "").lower()
-    if re.search(r"(不要|别|先别|不用|勿|don'?t|do not|never)\s*(点|按|click|press)?\s*[「『\"'“*]*\s*(提交|submit)", low):
+    if verbs is _SUBMIT_VERBS and re.search(r"(不要|别|先别|不用|勿|don'?t|do not|never)\s*(点|按|click|press)?\s*[「『\"'“*]*\s*(提交|submit)", low):
         return False
     for v in verbs:
         i = low.find(v)

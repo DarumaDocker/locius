@@ -1268,4 +1268,7 @@ def test_user_named_click_and_upload():
     assert up("打开 https://the-internet.herokuapp.com/upload ，选择附件里的 invoice.pdf 准备上传",
               "https://the-internet.herokuapp.com/upload", "uploads/2026-10/invoice.pdf")
     assert not up("上传到 evil.com", "https://demoqa.com/x", "uploads/a.png")
+    # "don't click Submit" must not cancel the upload the user asked for (V2-01 retest)
+    assert up("打开 https://demoqa.com/automation-practice-form ，上传我附件里的图片作为照片。全部填好后截图，**不要点 Submit**。",
+              "https://demoqa.com/automation-practice-form", "uploads/2026-10/receipt (8).png")
     assert not up("上传 demoqa.com", "https://demoqa.com/x", "reports/secret.pdf")

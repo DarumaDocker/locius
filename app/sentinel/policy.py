@@ -135,7 +135,7 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
         if elem and (elem.get("input_type", "").lower() == "password" or elem.get("is_password")):
             return Decision(DENY, "high", "Agent 不能输入密码。请调用 browser_request_takeover 让用户接管输入 (use takeover for passwords)")
         text = str(args.get("text", ""))
-        is_search = elem and guard.looks_like_search(elem.get("role", ""), elem.get("name", ""))
+        is_search = elem and (guard.looks_like_search(elem.get("role", ""), elem.get("name", "")) or bool(elem.get("searchy")))
         if args.get("submit") and not is_search:
             risk = _bump(risk, "high")
             reasons.append("输入后会按回车提交表单 (submits a form)")
@@ -173,7 +173,7 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
         if urlparse(page.get("url", "")).scheme != "https" and not (dom.endswith(".test") or dom in ("localhost", "127.0.0.1")):
             reasons.append("⚠ 这个页面不是 HTTPS 加密连接 (page is not HTTPS)")
     if tool == "browser_press" and str(args.get("key", "")).lower() in ("enter", "return"):
-        if elem and not guard.looks_like_search(elem.get("role", ""), elem.get("name", "")) and elem.get("in_form"):
+        if elem and not (guard.looks_like_search(elem.get("role", ""), elem.get("name", "")) or bool(elem.get("searchy"))) and elem.get("in_form"):
             risk = _bump(risk, "high")
             reasons.append("回车会提交表单 (Enter submits a form)")
     if tool == "browser_upload":
