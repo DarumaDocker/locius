@@ -24,6 +24,9 @@ CREATE TABLE IF NOT EXISTS grants (
 CREATE TABLE IF NOT EXISTS task_ctx (
   task_id TEXT PRIMARY KEY, taint TEXT, injection TEXT, domains TEXT, updated_at REAL
 );
+CREATE TABLE IF NOT EXISTS user_requests (
+  task_id TEXT PRIMARY KEY, text TEXT, created_at REAL
+);
 CREATE TABLE IF NOT EXISTS connections (
   name TEXT PRIMARY KEY, config TEXT, permissions TEXT, enabled INTEGER, updated_at REAL
 );
@@ -177,6 +180,16 @@ class Store:
         q = "SELECT COUNT(*) AS n FROM audit WHERE task_id=? AND action IN (%s) AND result='success'" % ",".join("?" * len(actions))
         row = self.db.one(q, (task_id, *actions))
         return int(row["n"] if row else 0)
+
+    def set_user_request(self, task_id: str, text: str) -> None:
+        """The user's own words that started a task, recorded by Sentinel at the front door (the agent can't change it)."""
+        if task_id and text:
+            self.db.execute("INSERT OR REPLACE INTO user_requests(task_id, text, created_at) VALUES (?,?,?)",
+                            (task_id, str(text)[:4000], now_ts()))
+
+    def user_request(self, task_id: str) -> str:
+        row = self.db.one("SELECT text FROM user_requests WHERE task_id=?", (task_id or "",))
+        return row["text"] if row else ""
 
     def update_task_ctx(self, task_id: str, taint: str | None = None, injection: list | None = None,
                         domain: str | None = None) -> dict:

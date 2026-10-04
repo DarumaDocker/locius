@@ -127,7 +127,8 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
     if tool in ("browser_click", "browser_click_at") and elem:
         # a <button> reports type "submit" by default; outside a <form> it submits nothing (chat launchers, menus)
         itype = elem.get("input_type", "") if elem.get("in_form", True) else ""
-        if guard.click_is_risky(elem.get("role", ""), elem.get("name", ""), itype):
+        if guard.click_is_risky(elem.get("role", ""), elem.get("name", ""), itype) and \
+                not guard.user_named_click(store.user_request(task_id), elem.get("name", "")):
             risk = _bump(risk, "high")
             reasons.append(f"点击的按钮「{elem.get('name', '')}」可能提交/购买/发送/删除 (consequential click)")
     if tool == "browser_type" or (tool == "browser_click_at" and args.get("text")):
@@ -176,7 +177,10 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
             risk = _bump(risk, "high")
             reasons.append("回车会提交表单 (Enter submits a form)")
     if tool == "browser_upload":
-        reasons.append("上传本地文件到网站 (uploads a local file)")
+        if page and guard.user_asked_upload(store.user_request(task_id), page.get("url", ""), str(args.get("path", ""))):
+            risk = "medium"    # the user attached this file and asked for it to be uploaded on this very site
+        else:
+            reasons.append("上传本地文件到网站 (uploads a local file)")
 
     # ---------------------------------------------------------------- gmail rules
     if tool in ("gmail_send", "gmail_reply", "gmail_forward"):

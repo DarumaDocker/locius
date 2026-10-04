@@ -1254,3 +1254,18 @@ def test_forget_removes_episodes_that_quote_the_fact():
     st.delete_fact(fid)
     left = [e["summary"] for e in st.episodes(10)]
     assert len(left) == 1 and "徒步鞋" in left[0]
+
+
+def test_user_named_click_and_upload():
+    # 2026-10-04: buttons / uploads the user explicitly asked for don't need an approval card (money / send stay gated)
+    from app.sentinel.guard import user_named_click as u, user_asked_upload as up
+    assert u("先点 Remove 让复选框消失，再点 Enable", "Remove")
+    assert u("添加一条记录：First Name Test", "Submit")
+    assert not u("全部填好后截图，**不要点 Submit**。", "Submit")
+    assert not u("点 Book Now 订位", "Book Now")
+    assert not u("click Pay now", "Pay now")
+    assert not u("打开页面看看", "Remove")
+    assert up("打开 https://the-internet.herokuapp.com/upload ，选择附件里的 invoice.pdf 准备上传",
+              "https://the-internet.herokuapp.com/upload", "uploads/2026-10/invoice.pdf")
+    assert not up("上传到 evil.com", "https://demoqa.com/x", "uploads/a.png")
+    assert not up("上传 demoqa.com", "https://demoqa.com/x", "reports/secret.pdf")

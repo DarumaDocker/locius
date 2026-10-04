@@ -41,8 +41,29 @@
     // calendar day cells (2026-10-04: singaporeair.com's date picker days had no refs, so the agent clicked by coordinates
     // and hit a banner): grid cells, cells carrying a date, and focusable labelled cells
     '[role=gridcell],[data-date],[data-day],td[aria-label],div[tabindex][aria-label],span[tabindex][aria-label]';
-  const isInteractive = el => { try { return el.matches(INTERACTIVE); } catch (e) { return false; } };
+  // Day cells of custom date pickers are often plain <div>s with a click handler (no role, no tabindex): give them refs
+  // too (2026-10-04: singaporeair.com — the agent could only click by coordinates and kept landing on the wrong day).
+  const DAYS = new Set();
+  try {
+    const boxes = deepAll('[class*="calendar" i],[class*="datepicker" i],[class*="date-picker" i],[class*="daypicker" i],[role=grid],[role=dialog]')
+      .filter(visible).slice(0, 6);
+    for (const box of boxes) {
+      const all = box.querySelectorAll('*');
+      if (all.length > 4000) continue;
+      const cand = [];
+      for (const e of all) {
+        const first = ((e.innerText || '').trim().split('\n')[0] || '').trim();
+        if (!/^\d{1,2}$/.test(first) || +first < 1 || +first > 31) continue;
+        if (!visible(e)) continue;
+        if (getComputedStyle(e).cursor !== 'pointer' && !/(^|[\s_-])day/i.test(typeof e.className === 'string' ? e.className : '')) continue;
+        cand.push(e);
+      }
+      for (const e of cand) { let a = e.parentElement, inner = false; for (let k = 0; a && k < 4; k++, a = a.parentElement) { if (cand.includes(a)) { inner = true; break; } } if (!inner) DAYS.add(e); }
+    }
+  } catch (e) {}
+  const isInteractive = el => { try { return el.matches(INTERACTIVE) || DAYS.has(el); } catch (e) { return false; } };
   const roleOf = el => {
+    if (DAYS.has(el)) return 'day';
     const r = el.getAttribute('role');
     if (r) return r;
     const t = el.tagName;

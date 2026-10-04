@@ -258,5 +258,62 @@ def click_is_risky(role: str, name: str, input_type: str = "") -> bool:
     return bool(_RISKY_CLICK.search(label))
 
 
+_NAMED_NEVER = re.compile(
+    r"pay|payment|buy|purchase|order|checkout|check out|place|send|transfer|donate|subscribe|book|reserve|confirm|sign|agree|"
+    r"accept|delete account|close account|withdraw|付款|支付|购买|下单|结账|结算|发送|转账|捐|订阅|预订|预约|订位|确认|签|同意|注销|提现",
+    re.I)
+_NEGATED = re.compile(r"(不要|别|不用|勿|先别|don'?t|do not|never|not)\s*(点|按|click|press|hit|tap)?\s*(击)?\s*[「『\"'“]?\s*$", re.I)
+
+
+_SUBMIT_VERBS = ("提交", "submit", "添加", "新增", "加一条", "add a", "add the", "保存", "save")
+_GENERIC_BTN = {"submit": _SUBMIT_VERBS, "save": _SUBMIT_VERBS, "add": _SUBMIT_VERBS, "ok": _SUBMIT_VERBS,
+                "apply": _SUBMIT_VERBS, "done": _SUBMIT_VERBS, "提交": _SUBMIT_VERBS, "保存": _SUBMIT_VERBS, "添加": _SUBMIT_VERBS}
+
+
+def _asked_verb(request: str, verbs) -> bool:
+    low = str(request or "").lower()
+    if re.search(r"(不要|别|先别|不用|勿|don'?t|do not|never)\s*(点|按|click|press)?\s*[「『\"'“*]*\s*(提交|submit)", low):
+        return False
+    for v in verbs:
+        i = low.find(v)
+        while i >= 0:
+            if not _NEGATED.search(request[max(0, i - 12):i]):
+                return True
+            i = low.find(v, i + 1)
+    return False
+
+
+def user_asked_upload(request: str, page_url: str, path: str) -> bool:
+    """The user's own request asks to upload one of their attached files on the site they named (2026-10-04: test pages
+    stopped at an approval card for the file the user had just attached and told OMuse to upload there)."""
+    req = str(request or "")
+    dom = domain_of(page_url or "")
+    if not dom or not str(path or "").startswith("uploads/"):
+        return False
+    named = dom in req.lower() or dom.removeprefix("www.") in req.lower()
+    return named and _asked_verb(req, ("上传", "upload", "选择附件", "选好文件", "选择文件", "attach"))
+
+
+def user_named_click(request: str, label: str) -> bool:
+    """The user's own request explicitly asks to click this button (e.g. "先点 Remove") and the button is not about money,
+    sending, booking, signing or accepting terms. Then the consequential-click approval is skipped: the user already
+    said so. 2026-10-04 (Lucas): "先放宽一些吧，尽量让这个流程往下走" after "click Remove" on a test page needed approval."""
+    lab = re.sub(r"\s+", " ", str(label or "")).strip()
+    req = str(request or "")
+    if len(lab) < 2 or len(lab) > 40 or _NAMED_NEVER.search(lab):
+        return False
+    low = req.lower()
+    # generic form buttons count as named when the user asked for that operation in words ("添加一条记录" → Submit)
+    if lab.lower() in _GENERIC_BTN and _asked_verb(req, _GENERIC_BTN[lab.lower()]):
+        return True
+    i = low.find(lab.lower())
+    while i >= 0:
+        before = req[max(0, i - 12):i]
+        if not _NEGATED.search(before):
+            return True
+        i = low.find(lab.lower(), i + 1)
+    return False
+
+
 def looks_like_search(role: str, name: str) -> bool:
     return (role or "").lower() in ("searchbox", "combobox") or bool(_SEARCH_WORDS.search(name or ""))
