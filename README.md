@@ -102,6 +102,15 @@ python3 tests/integration.py        # and the other *_e2e.py suites
 bash tests/stop_local.sh
 ```
 
+Or run the local e2e suites inside the Docker image, with nothing on the host but Docker (it installs the test-only dependencies in the container and gives every suite a freshly started stack with the fake LLM):
+
+```bash
+bash tests/run_in_docker.sh                  # every suite, about 15 minutes
+bash tests/run_in_docker.sh e2e_027 mcp_e2e  # only these
+```
+
+It builds the `omuse` image from the Dockerfile if it is missing (`OMUSE_IMAGE` picks another image), prints one `SUITE <name> rc=… pass=… fail=…` line per suite, and exits 1 if any suite fails. `tests/docker_browser_e2e.py` is separate: it drives a running container with a real, vision-capable model (see its docstring).
+
 ---
 
 ## 中文
