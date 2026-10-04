@@ -16,7 +16,7 @@ description: 网页调研并做对比（如酒店、产品）Research several op
      size and release date there; drop it if you can't.
    - "Latest / best in <year>" lists: prefer items released in the last 12 months, say when each came out, and say if
      your sources were older than a year.
-   - A figure you could not find in what you read is "未找到 / not found" — never fill a table cell from memory or with
+   - A figure you could not find in what you read is "not found" — never fill a table cell from memory or with
      an estimate. If a forecast or price isn't published yet, say so and link where it will appear.
 6. Make a file (make_pdf / make_docx / make_xlsx) only if the user asked for one; otherwise the table goes in the answer.
 

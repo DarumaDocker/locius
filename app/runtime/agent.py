@@ -1287,6 +1287,19 @@ class Runtime:
             if final and not numbers_checked and not force_final and not timed_out and steps < max_steps - 1:
                 numbers_checked = True
                 bad = ungrounded_numbers(transcript, final, t["goal"])
+                codes = ungrounded_codes(transcript, final, t["goal"])
+                if codes and not bad:
+                    # 2026-10-04 V8-05: a return flight "SQ 637 11:30" that no email mentioned
+                    await self.event(task_id, "number_check", {"unsupported_codes": codes[:10]})
+                    transcript.append({"role": "assistant", "content": final})
+                    transcript.append({"role": "user", "content": prompts.L(
+                        agent_lang(s),
+                        "（系统）你回答里的这些航班号/编号没有出现在任何工具结果里：" + "、".join(codes[:10]) + "。"
+                        "不要编造航班、预订号或时间：删掉它们，或者写明「未找到」，然后重新写完整的最终回答。",
+                        "(System) These flight numbers / codes in your answer appear in no tool result: " + ", ".join(codes[:10]) +
+                        ". Never invent flights, booking codes or times: remove them or say \"not found\", then write the complete "
+                        "final answer again.")})
+                    continue
                 if bad:
                     # 2026-10-03 M1-06: calculate returned the right building blocks, the answer then carried a
                     # hand-made table whose balances came from nowhere (17,016.64 instead of 16,962.71)
@@ -1784,6 +1797,13 @@ class Runtime:
             call["_refused"] = True
             await self.audit("executor", name, task_id, resource="loop_guard", risk="low", decision="DENY",
                              result="repeat_blocked", detail={"args": _preview_args(args)})
+        elif "_unparsed" in args and name in ("files_write", "make_pdf", "make_docx", "make_xlsx", "notion_create_page", "notion_append"):
+            # 2026-10-04 V8-06: a 270-row CSV in one files_write call was cut off every time
+            content = ("ERROR: 内容太长，参数被截断了，没有执行。请分几次写：每次不超过约 3000 字，第一次正常写，之后用 append=true 追加"
+                       "（Notion 用 notion_append 分段追加）。"
+                       " The content was too long and got cut off; nothing was written. Write it in parts of about 3,000 characters: "
+                       "the first call normally, then append=true for the rest (notion_append for Notion).")
+            ok = False
         elif "_unparsed" in args:
             # 2026-10-04 V4-07: the model looped ("conference OR conference OR …"), the arguments weren't valid JSON, and
             # gmail_search ran with no query at all — 50 unrelated emails, so the travel mails were "not found"
@@ -2751,6 +2771,28 @@ def ungrounded_numbers(transcript: list[dict], final: str, goal: str = "") -> li
         if any(abs(v + x) <= max(tol, 0.001 * abs(x)) for x in src):     # sign shown differently
             continue
         lbl = tok + (wan or "")
+        if lbl not in bad:
+            bad.append(lbl)
+    return bad
+
+
+_FLIGHT = re.compile(r"(?<![A-Za-z0-9])([A-Z]{2}|[A-Z]\d|\d[A-Z])\s?(\d{2,4})(?![\d])")
+_TRAVEL = re.compile(r"航班|flight|起飞|落地|抵达|airline|航空|depart|arriv", re.I)
+
+
+def ungrounded_codes(transcript: list[dict], final: str, goal: str = "") -> list[str]:
+    """Flight numbers in a travel answer that no tool result, nor the request, contains (made up)."""
+    f = str(final or "")
+    if not _TRAVEL.search(f):
+        return []
+    src = re.sub(r"\s+", "", (str(goal or "") + "\n" + "\n".join(str(m.get("content") or "") for m in transcript
+                                                             if m.get("role") in ("tool", "user", "system"))).upper())
+    bad: list[str] = []
+    for m in _FLIGHT.finditer(f):
+        code = m.group(1) + m.group(2)
+        if code in src or code.upper() in src:
+            continue
+        lbl = m.group(0).strip()
         if lbl not in bad:
             bad.append(lbl)
     return bad
