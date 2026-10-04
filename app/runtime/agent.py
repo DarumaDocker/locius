@@ -51,6 +51,12 @@ REPEAT_STREAK_OK = {"browser_scroll", "browser_press", "browser_wait", "browser_
 REPEAT_READ = re.compile(r"navigate|search|read|list|_get|fetch|query")
 
 
+def _search_key(q) -> str:
+    """Order- and case-insensitive key for a web search, so a re-worded copy of an earlier search is recognised."""
+    words = re.findall(r"[\w\u4e00-\u9fff]+", str(q or "").lower())
+    return " ".join(sorted(set(words)))
+
+
 def _call_sig(name: str, args) -> str:
     if isinstance(args, str):
         try:
@@ -1078,6 +1084,7 @@ class Runtime:
         timed_out = False
         stuck = 0          # turns in a row where every call was refused by a loop guard
         gave_up = False    # set when the agent keeps going round in circles: it must answer now, without tools
+        searched: dict[str, str] = {}   # normalised browser_search query -> first call id (whole task)
         nudged = False
         numbers_checked = False
         ctx_retries = 0
@@ -1187,6 +1194,14 @@ class Runtime:
                             await self._skip_duplicate(task_id, call, seen_sigs[sig], transcript)
                             continue
                         seen_sigs[sig] = call["id"]
+                        if call["name"] == "browser_search":
+                            qk = _search_key((call.get("args") or {}).get("query", ""))
+                            if qk and qk in searched:
+                                # 2026-10-04 V1-07: the same weather / hotel searches ran 3 times in one task
+                                await self._skip_duplicate(task_id, call, searched[qk], transcript, whole_task=True)
+                                continue
+                            if qk:
+                                searched[qk] = call["id"]
                         ok = await self._exec_call(t, call, transcript, catalog, remaining=calls[i + 1:])
                         consecutive_errors = 0 if ok else consecutive_errors + 1
                         progress = progress or not call.get("_refused")
@@ -1249,7 +1264,13 @@ class Runtime:
                 if st.get("status") in ("pending", "running"):
                     st["status"] = "done" if not force_final else st["status"]
             self.store.update_task(task_id, transcript=transcript, result=final, plan=plan, finished_at=now_ts())
-            if timed_out and not gave_up and steps < max_steps:
+            needs_user = (gave_up or force_final) and not timed_out and asks_user(final)
+            if needs_user:
+                # stopped because something only the user knows is missing, and the answer asks for it: not a failure
+                await self.event(task_id, "needs_user", {"reason": "gave_up" if gave_up else "step_limit"})
+                await self.set_status(task_id, "COMPLETED")
+                gave_up = force_final = False
+            elif timed_out and not gave_up and steps < max_steps:
                 why = (f"Stopped at the {max_minutes:.0f}-minute time limit; answered with what was found" if s.get("language") == "en"
                        else f"达到 {max_minutes:.0f} 分钟用时上限，按已有信息作答")
                 await self.set_status(task_id, "FAILED", error=why)
@@ -1552,10 +1573,17 @@ class Runtime:
                                                                 "and do not repeat the calls that failed.")
                                                     + ("\n" + dead_ends if dead_ends else "")})
 
-    async def _skip_duplicate(self, task_id: str, call: dict, first_id: str, transcript: list[dict]):
-        """A call identical to one earlier in the same turn: answer its tool_call id without running it again."""
-        msg = (f"已跳过 — 与本轮前面的调用 {first_id} 完全相同，请直接使用那个结果。"
-               f" Skipped: identical to call {first_id} earlier in this same turn; use that result.")
+    async def _skip_duplicate(self, task_id: str, call: dict, first_id: str, transcript: list[dict], whole_task: bool = False):
+        """A call identical to one earlier in the same turn (or, for searches, earlier in the task): answer its tool_call
+        id without running it again."""
+        if whole_task:
+            msg = (f"已跳过 — 这个任务里已经搜索过几乎相同的内容（调用 {first_id}）。请使用那次的结果：读其中的网址，"
+                   f"或换一个明显不同的关键词 / 来源；如果确实找不到，就在回答里说明“未找到”。"
+                   f" Skipped: you already ran this search in this task (call {first_id}). Use those results (read their URLs), "
+                   f"try a clearly different query or source, or say in the answer that it wasn't found.")
+        else:
+            msg = (f"已跳过 — 与本轮前面的调用 {first_id} 完全相同，请直接使用那个结果。"
+                   f" Skipped: identical to call {first_id} earlier in this same turn; use that result.")
         transcript.append({"role": "tool", "tool_call_id": call["id"], "content": msg})
         await self.event(task_id, "tool_call", {"call_id": call["id"], "name": call["name"], "args": _preview_args(call.get("args") or {}),
                                                 "sub": False})
@@ -2566,6 +2594,20 @@ class Runtime:
 
 
 _POINTS_BACK = re.compile(r"\babove\b|\bpreceding\b|\bearlier (table|summary|message)\b|上面|上方|如上|上述|前面(的|那)", re.I)
+
+
+_ASK_RE = re.compile(r"(请(你)?(告诉|提供|确认|发给|补充)|能(否|不能)告诉我|需要你(提供|告诉|确认)|你(想|要)(选|用)哪|哪一(个|家|天|封)|"
+                     r"please (tell|confirm|provide|send|let me know)|could you (tell|confirm|provide|share)|which (one|of)|do you want me to)",
+                     re.I)
+
+
+def asks_user(final: str) -> bool:
+    """The answer ends by asking the user for a missing detail or a choice (needs-info), rather than reporting a failure.
+    2026-10-04 TC34: "find my dentist appointment and call to move it" ended correctly by asking which appointment /
+    the clinic's number, but the task showed FAILED because the searches had come back empty."""
+    tail = (final or "")[-500:]
+    return bool(_ASK_RE.search(tail)) and ("?" in tail or "？" in tail)
+
 
 
 def merge_stranded_answer(transcript: list[dict], final: str) -> str:

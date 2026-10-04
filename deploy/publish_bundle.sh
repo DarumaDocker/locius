@@ -5,6 +5,7 @@
 set -e
 F="$1"; REPO="${2:-Drlucaslu/locius}"
 [ -f "$F" ] || { echo "no bundle file: $F"; exit 1; }
+F=$(readlink -f "$F")  # we cd into the worktree below
 NAME=$(basename "$F")
 W="${BUNDLE_WORKTREE:-/root/px/bundles-wt}"
 if [ ! -d "$W/.git" ]; then

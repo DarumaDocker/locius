@@ -71,11 +71,11 @@ spec:
 
     Runs on the local models served by your Olares by default — any OpenAI-compatible endpoint works. English and 中文 interface.
   upgradeDescription: |
+    0.2.49: Research accuracy (official sources, no estimates), FX direction, no repeated searches, mail-first for orders/bills, needs-info tasks no longer FAILED, exact phone failure reasons
     0.2.48: Smaller install: the app code is downloaded once at startup (checked against a pinned SHA-256) instead of being packed into the Helm release
     0.2.47: Calendar: Sign in with Google in one click — save your own Google client on the box once (redirect URI = the OMuse relay page), later reconnects take one click
     0.2.46: Calendar: connect in 30 seconds by pasting your calendar's secret iCal address (read-only; Google, iCloud, Outlook); ready for one-click Sign in with Google
     0.2.45: Phone calls via DialMCP: sign in once (OAuth 2.1) and OMuse calls US/Canadian numbers from your own number, with live listening, recordings and structured call results; MCP servers can now use OAuth sign-in
-    0.2.44: Trip and meeting prep plans start by checking existing bookings, cancellations and delays in your mail
   developer: Lucas Lu
   website: https://github.com/Drlucaslu/locius
   sourceCode: https://github.com/Drlucaslu/locius
