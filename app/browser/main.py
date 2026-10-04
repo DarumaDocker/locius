@@ -924,9 +924,21 @@ async def agent_action(action: str, req: Request):
             elif action == "click":
                 loc = broker.locate(task_id, body.get("ref", ""))
                 try:
-                    await loc.click(timeout=10000)
+                    await loc.click(timeout=8000)
                 except Exception as e:
-                    raise HTTPException(409, f"点击失败 click failed: {str(e)[:200]}")
+                    # 2026-10-04 chope.co "Book Now": the button was covered by another layer and every click timed out.
+                    # Scroll it into view and try again; if something still covers it, click the element itself via script
+                    # (it is the same element the agent chose, so the approval check already covered it).
+                    first = str(e)
+                    try:
+                        await loc.scroll_into_view_if_needed(timeout=3000)
+                        await loc.click(timeout=4000)
+                    except Exception:
+                        try:
+                            await loc.evaluate("e => e.click()", timeout=4000)
+                        except Exception as e2:
+                            cover = " (另一个元素挡住了它 another element covers it)" if "intercepts pointer events" in first else ""
+                            raise HTTPException(409, f"点击失败 click failed{cover}: {first[:160]} / {str(e2)[:80]}")
                 await broker.settle(page, 1200)
                 page = await broker.page_for(task_id)
             elif action == "click_at":

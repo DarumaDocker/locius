@@ -37,7 +37,10 @@
     } catch (e) { return false; }
   };
   const INTERACTIVE = 'a[href],button,input,select,textarea,summary,[role=button],[role=link],[role=checkbox],[role=radio],[role=tab],' +
-    '[role=menuitem],[role=option],[role=switch],[role=combobox],[role=textbox],[role=searchbox],[role=slider],[contenteditable=""],[contenteditable=true]';
+    '[role=menuitem],[role=option],[role=switch],[role=combobox],[role=textbox],[role=searchbox],[role=slider],[contenteditable=""],[contenteditable=true],' +
+    // calendar day cells (2026-10-04: singaporeair.com's date picker days had no refs, so the agent clicked by coordinates
+    // and hit a banner): grid cells, cells carrying a date, and focusable labelled cells
+    '[role=gridcell],[data-date],[data-day],td[aria-label],div[tabindex][aria-label],span[tabindex][aria-label]';
   const isInteractive = el => { try { return el.matches(INTERACTIVE); } catch (e) { return false; } };
   const roleOf = el => {
     const r = el.getAttribute('role');
