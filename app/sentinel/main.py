@@ -778,7 +778,10 @@ def _conn_view(name: str) -> dict:
         from app.sentinel import gcal
         sec = store.get_secret("cred_calendar_1") or {}
         c["mode"] = "ical" if sec.get("ical_url") else ("google" if sec.get("managed") else ("google_own" if sec else ""))
-        c["managed_available"] = gcal.managed() is not None
+        m = gcal.managed(store)
+        c["managed_available"] = m is not None
+        c["managed_source"] = m["source"] if m else ""
+        c["relay_url"] = (m or {}).get("relay") or gcal.DEFAULT_RELAY
     if name == "phone":
         c["dialmcp"] = {"connected": dialmcp.ready(store), "account": dialmcp.account(store), "url": dialmcp.url(store)}
         c["telnyx_ready"] = phone.telnyx_ready(store)
@@ -1253,7 +1256,7 @@ async def calendar_google_start(req: Request):
     import hashlib
     import json as _json
     from app.sentinel import gcal
-    m = gcal.managed()
+    m = gcal.managed(store)
     if not m:
         raise HTTPException(400, "这个版本还没有内置 OMuse 的 Google 登录，请用下面的「自己的 Google Cloud 客户端」或 iCal 地址 (not available in this build)")
     b = await req.json()
@@ -1268,6 +1271,33 @@ async def calendar_google_start(req: Request):
     store.kv_set("calendar_oauth", {"state": state, "ts": time.time(), "redirect": m["relay"], "mode": "managed", "verifier": verifier})
     store.audit("user", "credential.calendar.start", resource="calendar", result="success", detail={"mode": "managed"})
     return {"auth_url": gcal.auth_url(m["client_id"], m["relay"], state, challenge)}
+
+
+@app.post("/sentinel/api/connections/calendar/google/client", dependencies=[Depends(ui_auth)])
+async def calendar_google_client(req: Request):
+    """Save the user's own Google OAuth client on this box for one-click sign-in through the relay page."""
+    from app.sentinel import gcal
+    b = await req.json()
+    cid = str(b.get("client_id", "")).strip()
+    secret = str(b.get("client_secret", "")).strip()
+    old = store.get_secret(gcal.BOX_CLIENT) or store.get_secret("cred_calendar_client") or {}
+    if not secret and old.get("client_id") == cid:
+        secret = old.get("client_secret", "")
+    if not re.fullmatch(r"[0-9]+-[A-Za-z0-9_]+\.apps\.googleusercontent\.com", cid):
+        raise HTTPException(400, "请粘贴 OAuth 客户端 ID（形如 1234-abc.apps.googleusercontent.com）(Client ID)")
+    if not re.fullmatch(r"[A-Za-z0-9_\-]{10,100}", secret):
+        raise HTTPException(400, "请粘贴客户端密钥 Client secret（GOCSPX- 开头）")
+    store.put_secret("calendar", {"client_id": cid, "client_secret": secret, "relay": gcal.DEFAULT_RELAY}, handle=gcal.BOX_CLIENT)
+    store.audit("user", "credential.calendar.box_client", resource="calendar", result="success", detail={"client_id": cid[:24]})
+    return {"ok": True, "relay": gcal.DEFAULT_RELAY, "connection": _conn_view("calendar")}
+
+
+@app.delete("/sentinel/api/connections/calendar/google/client", dependencies=[Depends(ui_auth)])
+async def calendar_google_client_delete():
+    from app.sentinel import gcal
+    store.delete_secret(gcal.BOX_CLIENT)
+    store.audit("user", "credential.calendar.box_client_delete", resource="calendar", result="success")
+    return {"ok": True, "connection": _conn_view("calendar")}
 
 
 @app.post("/sentinel/api/connections/calendar/ical", dependencies=[Depends(ui_auth)])
@@ -1317,7 +1347,7 @@ async def calendar_callback(req: Request, code: str = "", state: str = "", error
     store.kv_set("calendar_oauth", {})
     managed = pend.get("mode") == "managed"
     if managed:
-        m = gcal.managed()
+        m = gcal.managed(store)
         if not m:
             return _cal_page(False, "这个版本没有内置 OMuse 的 Google 登录 (managed client missing)")
         cl = {"client_id": m["client_id"], "client_secret": "" if m["broker"] else m["client_secret"]}

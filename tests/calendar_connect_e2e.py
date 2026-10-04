@@ -113,6 +113,29 @@ r = act("calendar_list_events", {})
 check("broker: calls work", r["status"] == "ok", r)
 c.post(S + "/connections/calendar/test", json={}, headers=H)
 
+# ------------------------------------------------------------------ a Google client the user saved on this box (relay redirect)
+open(GM, "w").write("{}")
+c.delete(S + "/connections/calendar/credential", headers=H)
+r = c.post(S + "/connections/calendar/google/client", json={"client_id": "nope", "client_secret": "x"}, headers=H)
+check("box client: malformed client id refused", r.status_code == 400, r.text)
+r = c.post(S + "/connections/calendar/google/client", json={"client_id": "123-abc.apps.googleusercontent.com",
+                                                             "client_secret": "GOCSPX-test-secret-123"}, headers=H).json()
+x = r.get("connection") or {}
+check("box client: saved, one-click available from this box, relay address shown, secret not echoed",
+      r.get("ok") and x.get("managed_available") and x.get("managed_source") == "box" and x.get("relay_url") == F + "/relay/callback"
+      and "GOCSPX" not in json.dumps(r), r)
+au = c.post(S + "/connections/calendar/google/start", json={"origin": B}, headers=H).json()["auth_url"]
+check("box client: consent uses the saved client and the relay", "client_id=123-abc.apps.googleusercontent.com" in au
+      and "redirect_uri=" + "http%3A%2F%2F127.0.0.1%3A8094%2Frelay%2Fcallback" in au, au)
+page = c.get(au, follow_redirects=True)
+check("box client: sign-in completes", page.status_code == 200 and "lucas@example.com" in page.text, page.text[:300])
+r = act("calendar_list_events", {})
+check("box client: calls work (refresh with the saved secret)", r["status"] == "ok" and cal()["mode"] == "google", r)
+c.delete(S + "/connections/calendar/credential", headers=H)
+check("disconnecting the calendar keeps the saved client for a one-click reconnect", cal()["managed_available"] is True, cal())
+c.delete(S + "/connections/calendar/google/client", headers=H)
+check("removing the saved client hides one-click again", cal()["managed_available"] is False, cal())
+
 # ------------------------------------------------------------------ switching back to iCal clears Google tokens
 r = c.post(S + "/connections/calendar/ical", json={"url": F + "/ics/private-ok/basic.ics"}, headers=H).json()
 check("switching to iCal works and is read-only again", r.get("ok") and cal()["mode"] == "ical" and "calendar_create_event" not in tools(), r)

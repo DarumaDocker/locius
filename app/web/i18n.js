@@ -758,5 +758,13 @@ window.OMUSE_EN = {
 "连接 iCal Connect": "Connect",
 "重新用 Google 登录 Sign in again": "Sign in with Google again",
 "高级：用自己的 Google Cloud 客户端": "Advanced: use your own Google Cloud client",
-"，左侧「我的日历的设置」里点你的日历": ", then pick your calendar under \"Settings for my calendars\""
+"，左侧「我的日历的设置」里点你的日历": ", then pick your calendar under \"Settings for my calendars\"",
+"「凭据 Credentials → 创建凭据 → OAuth 客户端 ID」：应用类型选「Web 应用 Web application」，在「已获授权的重定向 URI」里填下面这个中转页地址（推荐，之后一键重连）：": "\"Credentials → Create credentials → OAuth client ID\": choose \"Web application\" and add this relay address under \"Authorized redirect URIs\" (recommended: later reconnects take one click):",
+"不用中转页：用本机回调地址": "Without the relay: use this box's callback address",
+"保存并用 Google 登录 Save & sign in": "Save & sign in with Google",
+"在 Google Cloud 的重定向 URI 里改填本机地址：": "Use this box's address as the redirect URI in Google Cloud instead:",
+"把生成的「客户端 ID」和「客户端密钥」粘贴到下面，点「保存并用 Google 登录」": "Paste the Client ID and Client secret below and press \"Save & sign in\"",
+"本机已保存一键登录用的 Google 客户端，上面的「用 Google 登录」会用它。": "A Google client for one-click sign-in is saved on this box; \"Sign in with Google\" above uses it.",
+"用本机地址连接 Connect": "Connect with this box's address",
+"移除本机保存的 Google 客户端？已连接的日历会失效。": "Remove the Google client saved on this box? The connected calendar will stop working."
 };

@@ -750,7 +750,7 @@ def calendar_client(store):
     cache = store.get_secret("cred_calendar_access") or {}
     secret, url = sec.get("client_secret", ""), ""
     if sec.get("managed"):
-        m = gcal.managed()
+        m = gcal.managed(store)
         if not m:
             raise ActionError("这个版本没有内置 OMuse 的 Google 登录，请在「连接」页重新连接 Google 日历 (managed client missing)")
         secret, url = ("" if m["broker"] else m["client_secret"]), gcal.token_url(m)

@@ -1438,6 +1438,8 @@ function calendarCard(c, permRow) {
   const csec = h('input', { type: 'password', placeholder: mode === 'google_own' ? T('已保存 saved（同一个客户端可留空）') : 'GOCSPX-…', autocomplete: 'new-password' });
   const icalUrl = h('input', { type: 'password', placeholder: 'https://calendar.google.com/calendar/ical/…/private-…/basic.ics', autocomplete: 'off' });
   const copyBtn = h('button', { class: 'btn small', onclick: safe(async () => { await navigator.clipboard.writeText(redirect); toast(T('已复制 Copied')); }) }, T('复制 Copy'));
+  const relay = c.relay_url || 'https://drlucaslu.github.io/omuse-oauth/';
+  const copyRelay = h('button', { class: 'btn small', onclick: safe(async () => { await navigator.clipboard.writeText(relay); toast(T('已复制 Copied')); }) }, T('复制 Copy'));
   const modeLabel = { google: T('Google 登录'), google_own: T('自己的 Google Cloud 客户端'), ical: T('iCal 只读 read-only') }[mode] || '';
   const googleBtn = h('button', { class: 'btn primary', onclick: safe(async e => {
     e.target.disabled = true;
@@ -1472,20 +1474,33 @@ function calendarCard(c, permRow) {
     h('details', { open: mode === 'google_own' && !connected },
       h('summary', null, h('b', null, T('高级：用自己的 Google Cloud 客户端'))),
       h('div', { class: 'stack', style: 'margin-top:10px' },
+        c.managed_source === 'box' ? h('div', { class: 'row small muted' }, h('span', { style: 'flex:1' }, T('本机已保存一键登录用的 Google 客户端，上面的「用 Google 登录」会用它。')),
+          h('button', { class: 'btn small', onclick: safe(async () => { if (!confirmInline(T('移除本机保存的 Google 客户端？已连接的日历会失效。'))) return; await sapi('connections/calendar/google/client', { method: 'DELETE' }); route(); }) }, T('移除 Remove'))) : null,
         h('ol', { class: 'steps-help' },
           h('li', null, T('打开 '), h('a', { href: 'https://console.cloud.google.com/projectcreate', target: '_blank', rel: 'noopener' }, 'Google Cloud Console'), T('，新建一个项目（名字随意，如 OMuse）')),
           h('li', null, T('在「API 和服务 → 库」里搜索并启用 '), h('a', { href: 'https://console.cloud.google.com/apis/library/calendar-json.googleapis.com', target: '_blank', rel: 'noopener' }, 'Google Calendar API')),
           h('li', null, T('「OAuth 同意屏幕 OAuth consent screen」：用户类型选「外部 External」，把你自己的 Gmail 加为测试用户；建议最后点「发布应用 Publish app」，否则授权 7 天就会过期')),
-          h('li', null, T('「凭据 Credentials → 创建凭据 → OAuth 客户端 ID」：应用类型选「Web 应用 Web application」，在「已获授权的重定向 URI」里填下面这个地址：'),
-            h('div', { class: 'row', style: 'flex-wrap:nowrap;margin-top:4px' }, h('code', { class: 'mono small', style: 'word-break:break-all' }, redirect), copyBtn)),
-          h('li', null, T('把生成的「客户端 ID」和「客户端密钥」粘贴到下面，点「连接 Google 日历」，在 Google 页面里同意授权'))),
+          h('li', null, T('「凭据 Credentials → 创建凭据 → OAuth 客户端 ID」：应用类型选「Web 应用 Web application」，在「已获授权的重定向 URI」里填下面这个中转页地址（推荐，之后一键重连）：'),
+            h('div', { class: 'row', style: 'flex-wrap:nowrap;margin-top:4px' }, h('code', { class: 'mono small', style: 'word-break:break-all' }, relay), copyRelay)),
+          h('li', null, T('把生成的「客户端 ID」和「客户端密钥」粘贴到下面，点「保存并用 Google 登录」'))),
         h('label', { class: 'field' }, h('span', null, T('客户端 ID Client ID')), cid),
         h('label', { class: 'field' }, h('span', null, T('客户端密钥 Client secret')), csec),
-        h('div', null, h('button', { class: 'btn', onclick: safe(async e => {
+        h('div', { class: 'row' }, h('button', { class: 'btn primary', onclick: safe(async e => {
           e.target.disabled = true;
-          try { const r = await sapi('connections/calendar/start', { method: 'POST', body: { client_id: cid.value.trim(), client_secret: csec.value.trim(), origin: location.origin } }); location.href = r.auth_url; }
-          finally { e.target.disabled = false; }
-        }) }, T('连接 Google 日历 Connect with Google'))))),
+          try {
+            await sapi('connections/calendar/google/client', { method: 'POST', body: { client_id: cid.value.trim(), client_secret: csec.value.trim() } });
+            const r = await sapi('connections/calendar/google/start', { method: 'POST', body: { origin: location.origin } }); location.href = r.auth_url;
+          } finally { e.target.disabled = false; }
+        }) }, T('保存并用 Google 登录 Save & sign in'))),
+        h('details', null, h('summary', { class: 'small muted' }, T('不用中转页：用本机回调地址')),
+          h('div', { class: 'stack', style: 'margin-top:6px' },
+            h('div', { class: 'small muted' }, T('在 Google Cloud 的重定向 URI 里改填本机地址：')),
+            h('div', { class: 'row', style: 'flex-wrap:nowrap' }, h('code', { class: 'mono small', style: 'word-break:break-all' }, redirect), copyBtn),
+            h('div', null, h('button', { class: 'btn small', onclick: safe(async e => {
+              e.target.disabled = true;
+              try { const r = await sapi('connections/calendar/start', { method: 'POST', body: { client_id: cid.value.trim(), client_secret: csec.value.trim(), origin: location.origin } }); location.href = r.auth_url; }
+              finally { e.target.disabled = false; }
+            }) }, T('用本机地址连接 Connect'))))))),
     h('div', null, h('b', null, T('权限 Permissions')),
       permRow(c, 'read', T('查看日程与空闲时间'), 'read', 'low'),
       mode === 'ical' ? h('div', { class: 'small muted' }, T('iCal 只读连接不能写入日程；要让 OMuse 帮你建日程，请用 Google 登录。'))

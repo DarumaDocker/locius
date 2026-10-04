@@ -37,8 +37,23 @@ class GCalError(Exception):
 _MANAGED_FILE = os.environ.get("GOOGLE_MANAGED_FILE") or os.path.join(os.path.dirname(__file__), "google_managed.json")
 
 
-def managed() -> dict | None:
-    """{client_id, client_secret, relay, broker} or None when this build has no OMuse Google client."""
+DEFAULT_RELAY = os.environ.get("GOOGLE_RELAY_URL") or "https://drlucaslu.github.io/omuse-oauth/"
+BOX_CLIENT = "cred_google_oauth_client"   # a client the user pasted on this box (redirect URI = DEFAULT_RELAY)
+
+
+def managed(store=None) -> dict | None:
+    """{client_id, client_secret, relay, broker, source} or None: the build's OMuse client, else one saved on this box."""
+    m = _built_in()
+    if m:
+        return {**m, "source": "build"}
+    rec = store.get_secret(BOX_CLIENT) if store is not None else None
+    if rec and rec.get("client_id") and rec.get("client_secret"):
+        return {"client_id": rec["client_id"], "client_secret": rec["client_secret"], "relay": rec.get("relay") or DEFAULT_RELAY,
+                "broker": "", "source": "box"}
+    return None
+
+
+def _built_in() -> dict | None:
     cfg = {}
     try:
         import json

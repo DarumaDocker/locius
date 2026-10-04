@@ -25,8 +25,8 @@ spec:
 
     Runs on the local models served by your Olares by default — any OpenAI-compatible endpoint works. English and 中文 interface.
   upgradeDescription: |
+    0.2.47: Calendar: Sign in with Google in one click — save your own Google client on the box once (redirect URI = the OMuse relay page), later reconnects take one click
     0.2.46: Calendar: connect in 30 seconds by pasting your calendar's secret iCal address (read-only; Google, iCloud, Outlook); ready for one-click Sign in with Google
     0.2.45: Phone calls via DialMCP: sign in once (OAuth 2.1) and OMuse calls US/Canadian numbers from your own number, with live listening, recordings and structured call results; MCP servers can now use OAuth sign-in
     0.2.44: Trip and meeting prep plans start by checking existing bookings, cancellations and delays in your mail
     0.2.43: Forgetting a memory also removes past-task summaries that quote it; trip and meeting prep checks existing bookings and the timeline
-    0.2.42: Bill payments check for unusual amounts and only use the merchant's own payment link; repeated searches are pointed at the next concrete step
