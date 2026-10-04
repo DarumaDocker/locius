@@ -51,7 +51,7 @@ OMuse is a local-first AI agent for [Olares](https://www.olares.com). It doesn't
 
 The model endpoint defaults to `https://router.<your-olares-name>.olares.com/v1`; change it in the app's settings or the `PERSONA_MODEL_URL` / `PERSONA_MODEL` environment values. If the configured model isn't served, OMuse picks an available one.
 
-### Run with Docker (no Olares)
+### Run with Docker
 
 One container holds all three services; state lives in the `omuse-data` volume.
 
