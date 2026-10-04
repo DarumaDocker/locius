@@ -371,6 +371,7 @@ class Gmail:
 
     def search(self, query: str, max_results: int = 10) -> list[dict]:
         max_results = max(1, min(int(max_results or 10), 100))
+        query = dedupe_or_terms(query)
         m = self._imap()
         try:
             if not self._gm():
@@ -976,3 +977,23 @@ def parse_list_unsubscribe(value: str, post: str = "") -> dict:
     else:
         out["method"] = ""
     return out
+
+
+def dedupe_or_terms(q: str) -> str:
+    """A looping model writes "conference OR conference OR conference …" (2026-10-04 V4-07); keep each OR term once."""
+    q = str(q or "")
+    if q.count(" OR ") < 3:
+        return q
+    out, seen = [], set()
+    for part in re.split(r"(\s+OR\s+)", q):
+        if re.fullmatch(r"\s+OR\s+", part):
+            out.append(part)
+            continue
+        k = part.strip().lower()
+        if k in seen:
+            if out and re.fullmatch(r"\s+OR\s+", out[-1]):
+                out.pop()
+            continue
+        seen.add(k)
+        out.append(part)
+    return "".join(out).strip()

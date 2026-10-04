@@ -1765,6 +1765,13 @@ class Runtime:
             call["_refused"] = True
             await self.audit("executor", name, task_id, resource="loop_guard", risk="low", decision="DENY",
                              result="repeat_blocked", detail={"args": _preview_args(args)})
+        elif "_unparsed" in args:
+            # 2026-10-04 V4-07: the model looped ("conference OR conference OR …"), the arguments weren't valid JSON, and
+            # gmail_search ran with no query at all — 50 unrelated emails, so the travel mails were "not found"
+            content = ("ERROR: 这次调用的参数不是有效的 JSON（可能重复输出了同一个词或被截断），没有执行。请用简短、不重复的参数重新调用。"
+                       " The arguments were not valid JSON (repeated words or cut off); the call was not run. Call it again "
+                       "with short arguments and no repetition.")
+            ok = False
         elif allow is not None and name not in allow:
             content = f"ERROR: tool {name} is not available to this agent."
             ok = False
