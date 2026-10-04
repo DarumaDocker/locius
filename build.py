@@ -25,7 +25,15 @@ with tarfile.open(fileobj=buf, mode="w:xz", preset=9 | lzma.PRESET_EXTREME) as t
                     and isinstance(n.body[0], ast.Expr) and isinstance(getattr(n.body[0], "value", None), ast.Constant) \
                     and isinstance(n.body[0].value.value, str):
                 n.body = n.body[1:] or [ast.Pass()]
-        return ast.unparse(tree) + "\n"
+        out = ast.unparse(tree) + "\n"
+        # ast.unparse writes every string literal on one line, so leading indentation is pure code: 1 space per level
+        return re.sub(r"(?m)^((?:    )+)", lambda m: " " * (len(m.group(1)) // 4), out)
+
+    def _strip_js(src: str) -> str:
+        """Drop indentation and whole-line // comments (no multi-line template literals in our JS; checked)."""
+        if any(l.count("`") % 2 for l in src.split("\n")):
+            return src
+        return "\n".join(l.strip() for l in src.split("\n") if l.strip() and not l.strip().startswith("//")) + "\n"
 
     for r, ds, fs in os.walk(f"{ROOT}/app"):
         ds[:] = sorted(d for d in ds if d != "__pycache__")
@@ -36,6 +44,9 @@ with tarfile.open(fileobj=buf, mode="w:xz", preset=9 | lzma.PRESET_EXTREME) as t
             data = open(p, "rb").read()
             if f.endswith(".py") and os.environ.get("KEEP_DOCSTRINGS") != "1":
                 data = _strip_docstrings(data.decode()).encode()
+                compile(data, p, "exec")
+            elif f in ("app.js", "app.css") and os.environ.get("KEEP_DOCSTRINGS") != "1":
+                data = _strip_js(data.decode()).encode()
             ti = tarfile.TarInfo(os.path.relpath(p, ROOT))
             ti.size, ti.mode, ti.mtime = len(data), os.stat(p).st_mode & 0o777, 0
             ti.uid = ti.gid = 0; ti.uname = ti.gname = "root"

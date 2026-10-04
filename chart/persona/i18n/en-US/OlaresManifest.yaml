@@ -30,6 +30,3 @@ spec:
     0.2.44: Trip and meeting prep plans start by checking existing bookings, cancellations and delays in your mail
     0.2.43: Forgetting a memory also removes past-task summaries that quote it; trip and meeting prep checks existing bookings and the timeline
     0.2.42: Bill payments check for unusual amounts and only use the merchant's own payment link; repeated searches are pointed at the next concrete step
-    0.2.41: New gmail_find_receipts: finds receipts, bills and invoices across all mailboxes and reads the amounts in one step; better suggestions when a mail search keeps failing
-    0.2.40: Local stores for shopping (from your time zone), no more endless plan updates, empty mail searches fall back to the sender, fewer needless approvals on listing links
-    0.2.39: Mail search fixes wrong date formats and hints how to narrow broad or empty searches
