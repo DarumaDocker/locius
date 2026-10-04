@@ -7,6 +7,11 @@ description: 网购：搜索商品、用视觉挑选、加入购物车（不结�
 1. **Search with a direct URL** (fast, no typing):
    Amazon: `https://www.amazon.<sg|com|co.jp…>/s?k=<words+joined+by+plus>` · Lazada: `https://www.lazada.sg/catalog/?q=<words>` ·
    Shopee: `https://shopee.sg/search?keyword=<words>` · other shops: their search box (browser_type with submit=true).
+   FairPrice: `https://www.fairprice.com.sg/search?query=<words>` · Lazada / Shopee may show a robot check → takeover.
+   **A shopping list of several items** (2026-10-04 V3-03: 12 items were searched three times over and nothing was written
+   down): read 3–4 search URLs per browser_read call, and as soon as you have an item's best match and price, write it down
+   with update_plan(note=…) or files_write — older results are compressed out of your context. Never search an item again
+   that is already in your notes; when the list is done, answer from the notes.
 2. **See the results.** Shop pages are long; the text snapshot is cut off. Do NOT re-open the same URL.
    - browser_look("List the products on screen with title, price, rating and the label of each product link") — the vision model
      sees the real page, including images.

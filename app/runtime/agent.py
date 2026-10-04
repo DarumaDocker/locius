@@ -155,7 +155,8 @@ def repeat_guard(transcript: list[dict], call: dict) -> str | None:
         # 2026-10-04 M2-06: the earlier result was compressed out of the context, so the model cannot see it any more —
         # blocking the re-read left it asking for the same two searches until it gave up
         return None
-    if (name not in REPEAT_STREAK_OK and streak >= REPEAT_STREAK) or (REPEAT_READ.search(name) and total >= REPEAT_TOTAL):
+    searchy = name == "browser_type" and bool((call.get("args") or {}).get("submit"))   # a site search box (V3-03)
+    if (name not in REPEAT_STREAK_OK and streak >= REPEAT_STREAK) or ((REPEAT_READ.search(name) or searchy) and total >= REPEAT_TOTAL):
         n = total + 1
         if name == "gmail_search":
             # 2026-10-04 M2-06 / M3-08: the model re-ran the same mail search 5-11 times instead of moving on
@@ -582,6 +583,33 @@ class Suspend(Exception):
 
 _ERRORISH = re.compile(r"(system[-_]?error|/error|errorpage|error\.html|session[-_]?(expired|timeout)|timeout|expired|/sorry|"
                        r"invalid[-_]?(request|access)|access[-_]?denied)", re.I)
+
+
+_PRODUCT_PAGE = re.compile(r"amazon\.[a-z.]+/(?:[^/]+/)?(?:dp|gp/product)/|lazada\.[a-z.]+/products/|shopee\.[a-z.]+/.+-i\.\d+\.\d+|"
+                           r"fairprice\.com\.sg/product/|courts\.com\.sg/.+\.html|challenger\.sg/products/", re.I)
+
+
+_PARKED = re.compile(r"(this|the) domain (name )?(\S+ )?(is|may be) for sale|\S+\.\w+ is for sale|domain is for sale|buy this domain|is parked free|"
+                     r"parked (domain|by|courtesy)|sedoparking|domain parking|godaddy\.com/domain|域名.{0,6}(出售|转让)", re.I)
+
+
+def parked_domain_hint(url: str, title: str, snapshot: str) -> str:
+    """A guessed address that is a parked / for-sale domain (2026-10-04 V3-07: "scoot.com" instead of flyscoot.com)."""
+    if not _PARKED.search((title or "") + "\n" + (snapshot or "")[:3000]):
+        return ""
+    return ("（提示）这是一个停放/出售中的域名，不是这家公司的官网——网址可能猜错了。用 browser_search 搜索"
+            "「<公司名> official site」找到正确网址再继续。 (Hint) This is a parked / for-sale domain, not the company's site — "
+            "the address was probably guessed wrong. browser_search \"<company> official site\" for the right one.")
+
+
+def product_page_hint(url: str, task_goal: str) -> str:
+    """On a shop's product page the next step is the cart button, not another search (2026-10-04 V3-04: the agent bounced
+    between the search page and the product page eight times and never pressed Add to Cart)."""
+    if not _PRODUCT_PAGE.search(url or "") or not re.search(r"购物车|加购|cart|basket|买|buy|下单|order", task_goal or "", re.I):
+        return ""
+    return ("（提示）这是商品详情页。下一步：有颜色/尺寸选项就先选，然后 browser_find(\"Add to Cart\") 并点击它的 ref；"
+            "不要回到搜索页重新打开。 (Hint) This is the product page: pick options if any, then browser_find(\"Add to Cart\") "
+            "and click its ref — don't go back to the search results.")
 
 
 def deep_link_hint(asked: str, landed: str, title: str) -> str:
@@ -1250,10 +1278,11 @@ class Runtime:
                         agent_lang(s),
                         "（系统）你回答里的这些数字没有出现在任何工具结果里：" + "、".join(bad[:10]) + "。"
                         "请用 calculate（表格数据用 data_query）把它们重新算一遍——如果之前某个工具结果看起来不对，就改正输入再算——"
-                        "然后重新写完整的最终回答，只使用工具算出的数字。",
+                        "然后重新写完整的最终回答，只使用工具算出的数字。回答直接从内容开始，不要提到这次核对或“以下是完整回答”之类的话。",
                         "(System) These figures in your answer do not appear in any tool result: " + ", ".join(bad[:10]) + ". "
                         "Recompute them with calculate (data_query for table data) — if an earlier result looked wrong, fix the "
-                        "inputs — then write the complete final answer again using only figures the tools produced.")})
+                        "inputs — then write the complete final answer again using only figures the tools produced. Start "
+                        "straight with the content: don't mention this check or say \"here is the complete answer\".")})
                     continue
             final = merge_stranded_answer(transcript, final)
             if agent_lang(s) == "en" and prompts.cjk_share(final) > 0.5 and not prompts.wants_cjk_output(t["goal"]):
@@ -1800,6 +1829,10 @@ class Runtime:
                                     submitted=name != "browser_navigate")
                 if name == "browser_navigate" and not hint:
                     hint = deep_link_hint(str(args.get("url") or ""), str(r0.get("url") or ""), str(r0.get("title") or ""))
+                if not hint and name == "browser_navigate":
+                    hint = parked_domain_hint(str(r0.get("url") or ""), str(r0.get("title") or ""), str(r0.get("snapshot") or ""))
+                if not hint:
+                    hint = product_page_hint(str(r0.get("url") or ""), str(t.get("goal") or ""))
                 if hint:
                     content = hint + "\n" + content
             if st == "ok" and name != "browser_locate":

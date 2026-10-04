@@ -1094,6 +1094,9 @@ async def user_view(req: Request):
 async def user_takeover(req: Request):
     body = await req.json()
     tid = body.get("task_id") or (broker.requested or {}).get("task_id") or broker.view_task or "default"
+    if broker.mode == "user" and broker.takeover_task and broker.takeover_task != tid:
+        # one takeover at a time: switching silently would resume the first task while the user is still in it
+        raise HTTPException(409, f"你正在接管另一个任务（{broker.takeover_task}），请先交还它 (hand back the current task first)")
     async with broker.task_lock(tid):  # waits for that task's in-flight action; other tasks keep running
         broker.mode = "user"
         broker.takeover_task = tid

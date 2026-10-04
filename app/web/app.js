@@ -133,6 +133,7 @@ function route() {
   S.view = VIEWS.some(x => x[0] === v) ? v : 'chat';
   const arg = (location.hash || '').split('/')[1];
   if (S.view === 'tasks' && arg) S.selTask = arg;
+  if (S.view === 'browser') S.browserSel = arg || S.browserSel || null;
   if (S.view === 'chat') { const c = arg || null; if (c !== S.conv) { S.conv = c; S.convData = null; } }
   if (S.browserTimer) { clearInterval(S.browserTimer); S.browserTimer = null; }
   $('#nav').classList.remove('open'); if ($('#navBack')) $('#navBack').hidden = true;
@@ -356,7 +357,7 @@ function renderThread(thread) {
           const active = t && t.status === 'WAITING_EXTERNAL';
           msgs.append(h('div', { class: 'msg' }, h('div', { class: 'sys-card takeover' }, '🖐',
             h('span', null, Tf("Agent 请你接管浏览器：{0}", (j.reason || ''))),
-            active ? h('a', { class: 'btn small', href: '#browser' }, T('打开浏览器 Open browser')) : h('span', { class: 'small muted' }, T('已结束 done')))));
+            active ? h('a', { class: 'btn small', href: '#browser/' + (t ? t.id : '') }, T('打开浏览器 Open browser')) : h('span', { class: 'small muted' }, T('已结束 done')))));
         }
       }
     }
@@ -551,7 +552,7 @@ function taskCard(t) {
       h('button', { class: 'btn approve small', onclick: () => openApproval(t.waiting.approval_id) }, T('🛡 审批：') + ((t.waiting.summary || {}).title || '')))
       : null,
     t.status === 'WAITING_EXTERNAL' ? h('div', { class: 'row', style: 'margin-top:8px' },
-      h('a', { class: 'btn small', href: '#browser' }, T('🖐 去浏览器接管 Take over'))) : null,
+      h('a', { class: 'btn small', href: '#browser/' + t.id }, T('🖐 去浏览器接管 Take over'))) : null,
     t.status === 'FAILED' && t.error ? h('p', { class: 'small', style: 'color:var(--danger);margin:8px 0 0' }, t.error) : null,
     traceBox(t)));
   return card;
@@ -642,7 +643,7 @@ async function renderTaskDetail(box, id) {
       t.waiting ? [h('dt', null, T('等待 Waiting')), h('dd', null, t.waiting.type === 'approval' ? '🛡 ' + B((t.waiting.summary || {}).title || T('审批')) : '🖐 ' + (t.waiting.reason || t.waiting.type))] : null),
     h('div', { class: 'row' },
       t.status === 'WAITING_APPROVAL' && t.waiting ? h('button', { class: 'btn approve small', onclick: () => openApproval(t.waiting.approval_id) }, T('🛡 去审批')) : null,
-      t.status === 'WAITING_EXTERNAL' ? h('a', { class: 'btn small', href: '#browser' }, T('🖐 接管浏览器')) : null,
+      t.status === 'WAITING_EXTERNAL' ? h('a', { class: 'btn small', href: '#browser/' + t.id }, T('🖐 接管浏览器')) : null,
       ['RUNNING', 'PLANNING'].includes(t.status) ? h('button', { class: 'btn small', onclick: act('pause') }, T('⏸ 暂停 Pause')) : null,
       t.status === 'PAUSED' ? h('button', { class: 'btn small', onclick: act('resume') }, T('▶ 继续 Resume')) : null,
       active ? h('button', { class: 'btn danger small', onclick: act('cancel') }, T('■ 取消 Cancel')) : h('button', { class: 'btn small', onclick: act('retry') }, T('↻ 重新执行 Retry')),
@@ -786,13 +787,41 @@ async function viewBrowser(root) {
   const trap = h('textarea', { class: 'keytrap', 'aria-label': T('键盘输入 keyboard input') });
   const kbd = h('div', { class: 'kbd-hint' });
   const wrap = h('div', { class: 'screen-wrap' }, img, trap, kbd);
-  const takeBtn = h('button', { class: 'btn' }, T('🖐 接管 Take over'));
-  const relBtn = h('button', { class: 'btn primary' }, T('↩ 交还给 Agent Hand back'));
-  const tabsSel = h('select', { style: 'width:auto', 'aria-label': T('任务标签页 task tab') });
+  const takeBtn = h('button', { class: 'btn take' }, T('🖐 接管 Take over'));
+  const relBtn = h('button', { class: 'btn primary release' }, T('↩ 交还给 Agent Hand back'));
+  // One tab per task (each chat's agent has its own page). Take over / screenshot / URL always belong to the SELECTED tab,
+  // so a takeover never lands in another chat's browser (it used to follow whichever agent had acted last).
+  const tabsBar = h('div', { class: 'btabs', role: 'tablist', 'aria-label': T('任务标签页 task tabs') });
+  const reqList = h('div', { class: 'breqs' });
   const bar = h('div', { class: 'bbar' },
     h('button', { class: 'btn small', title: T('后退 back'), onclick: () => input({ type: 'back' }) }, '←'),
     h('button', { class: 'btn small', title: T('刷新 reload'), onclick: () => input({ type: 'reload' }) }, '⟳'),
-    url, h('button', { class: 'btn small', onclick: () => go() }, T('前往 Go')), tabsSel);
+    url, h('button', { class: 'btn small', onclick: () => go() }, T('前往 Go')));
+  S.taskNames = S.taskNames || {};
+  const nameOf = tid => {
+    if (!tid || tid === 'default') return T('浏览器');
+    if (!(tid in S.taskNames)) {
+      S.taskNames[tid] = '';
+      api('tasks/' + tid).then(t => { S.taskNames[tid] = (t && (t.goal || t.plan && t.plan.objective) || '').replace(/^\[\u6d4b\u8bd5\]\s*/, ''); refresh(true); }).catch(() => {});
+    }
+    const n = S.taskNames[tid] || tid.slice(0, 14);
+    return n.length > 28 ? n.slice(0, 28) + '…' : n;
+  };
+  const host = u => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch (e) { return ''; } };
+  const select = async tid => {
+    S.browserSel = tid;
+    if (location.hash !== '#browser/' + tid) history.replaceState(null, '', '#browser/' + tid);
+    try { await sapi('browser/view', { method: 'POST', body: { task_id: tid } }); } catch (e) {}
+    refresh(true);
+  };
+  const takeOver = async tid => {
+    // no task tab at all: the shared page (e.g. to log in to a site before asking OMuse anything)
+    if (!tid && ((st.tasks || []).length || (st.requests || []).length)) { toast(T('请先选择要接管的任务标签页'), true); return; }
+    S.browserSel = tid || null;
+    st = await sapi('browser/takeover', { method: 'POST', body: { task_id: tid } });
+    toast(Tf("你已接管「{0}」的浏览器，这个任务已暂停", nameOf(tid)));
+    refresh(true);
+  };
   let urlDirty = false;
   const go = () => { urlDirty = false; input({ type: 'navigate', url: url.value }); };
   url.addEventListener('input', () => { urlDirty = true; });
@@ -801,7 +830,7 @@ async function viewBrowser(root) {
   const sendText = h('div', { class: 'row' }, typeBox, h('button', { class: 'btn small', onclick: () => { input({ type: 'text', text: typeBox.value }); typeBox.value = ''; } }, T('输入 Type')),
     ['Enter', 'Tab', 'Backspace', 'Escape'].map(k => h('button', { class: 'btn small', onclick: () => input({ type: 'key', key: k }) }, k)));
   typeBox.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); input({ type: 'text', text: typeBox.value }); typeBox.value = ''; } });
-  root.append(h('div', { class: 'bview' }, banner, h('div', { class: 'row' }, takeBtn, relBtn), bar, sendText, wrap,
+  root.append(h('div', { class: 'bview' }, banner, reqList, tabsBar, h('div', { class: 'row' }, takeBtn, relBtn), bar, sendText, wrap,
     h('p', { class: 'small muted' }, T('Agent 只能通过受限 API（打开网址 / 读取无障碍快照 / 点击 / 输入）操作这个浏览器，不能执行任意 JavaScript。接管期间 Agent 完全暂停，你的输入不会进入 Agent 上下文。'))));
   let st = {};
   // Inputs are sent strictly one after another (typing fast used to arrive out of order: "test" -> "tste").
@@ -826,9 +855,8 @@ async function viewBrowser(root) {
     queue = queue.then(() => send(ev));
     return queue;
   }
-  takeBtn.onclick = safe(async () => { st = await sapi('browser/takeover', { method: 'POST', body: { task_id: tabsSel.value || null } }); toast(T('你已接管浏览器，Agent 已暂停')); refresh(true); });
-  relBtn.onclick = safe(async () => { await sapi('browser/release', { method: 'POST', body: {} }); toast(T('已交还，Agent 继续执行')); refresh(true); });
-  tabsSel.onchange = safe(async () => { await sapi('browser/view', { method: 'POST', body: { task_id: tabsSel.value } }); refresh(true); });
+  takeBtn.onclick = safe(() => takeOver(S.browserSel));
+  relBtn.onclick = safe(async () => { const was = st.takeover_task; await sapi('browser/release', { method: 'POST', body: {} }); toast(Tf("已交还「{0}」，这个任务继续执行", nameOf(was))); refresh(true); });
   const kbdState = () => {
     const on = document.activeElement === trap;
     wrap.classList.toggle('kbd-on', on && st.mode === 'user');
@@ -872,20 +900,45 @@ async function viewBrowser(root) {
     if (busy && !force) return; busy = true;
     try {
       st = await sapi('browser/state');
-      const req = st.requested;
+      const reqs = st.requests || (st.requested ? [st.requested] : []);
+      const req = reqs[0];
+      const tasks = (st.tasks || []).slice();
+      reqs.forEach(r => { if (r.task_id && !tasks.some(t => t.task_id === r.task_id)) tasks.push({ task_id: r.task_id, url: '' }); });
+      // which tab is selected: the one being taken over > the user's pick > the newest request > what agents show
+      const ids = tasks.map(t => t.task_id);
+      if (st.mode === 'user' && st.takeover_task) S.browserSel = st.takeover_task;
+      else if (!S.browserSel || !ids.includes(S.browserSel)) S.browserSel = (req && req.task_id) || st.view_task || ids[0] || null;
+      const sel = S.browserSel;
       banner.className = 'banner ' + (st.mode === 'user' ? 'user' : req ? 'req' : 'agent');
       banner.textContent = st.mode === 'offline' ? T('⚠️ 浏览器服务未就绪 browser offline: ') + (st.error || '') :
-        st.mode === 'user' ? T('🖐 你正在控制浏览器（Agent 已暂停）。完成登录/验证后点击「交还给 Agent」。') :
-        req ? Tf("🙋 Agent 请求你接管：{0}（点击「接管」）", (req.reason || '')) : T('🤖 Agent 控制中 — 实时画面 Live view');
+        st.mode === 'user' ? Tf("🖐 你正在控制「{0}」的浏览器（只有这个任务暂停，其他任务照常进行）。完成登录/验证后点击「交还给 Agent」。", nameOf(st.takeover_task)) :
+        reqs.length > 1 ? Tf("🙋 {0} 个任务在等你接管，见下方列表，每个任务有自己的「接管」按钮", reqs.length) :
+        req ? Tf("🙋「{0}」请求你接管：{1}", nameOf(req.task_id), (req.reason || '')) : T('🤖 Agent 控制中 — 实时画面 Live view');
+      reqList.innerHTML = '';
+      if (st.mode !== 'offline') reqs.forEach(r => reqList.append(h('div', { class: 'breq' + (r.task_id === sel ? ' on' : '') },
+        h('span', { class: 'who' }, '🙋 ' + nameOf(r.task_id)), h('span', { class: 'why small' }, r.reason || ''),
+        h('button', { class: 'btn small', disabled: st.mode === 'user' && st.takeover_task !== r.task_id,
+          title: st.mode === 'user' && st.takeover_task !== r.task_id ? T('请先交还当前接管的任务') : '',
+          onclick: safe(() => r.task_id === st.takeover_task ? null : takeOver(r.task_id)) },
+          r.task_id === st.takeover_task ? T('接管中') : T('🖐 接管这个')))));
+      tabsBar.innerHTML = '';
+      tasks.forEach(t => {
+        const asking = reqs.some(r => r.task_id === t.task_id), mine = st.mode === 'user' && st.takeover_task === t.task_id;
+        tabsBar.append(h('button', { class: 'btab' + (t.task_id === sel ? ' on' : '') + (asking ? ' ask' : ''), role: 'tab',
+          'aria-selected': String(t.task_id === sel), title: t.task_id + (t.url ? ' · ' + t.url : ''),
+          onclick: safe(() => (st.mode === 'user' ? null : select(t.task_id))) },
+          (mine ? '🖐 ' : asking ? '🙋 ' : '') + nameOf(t.task_id), host(t.url) ? h('span', { class: 'host' }, host(t.url)) : null));
+      });
+      if (!tasks.length) tabsBar.append(h('span', { class: 'small muted' }, T('（无标签页 no tabs）')));
+      const selTask = tasks.find(t => t.task_id === sel);
       if (st.popup && st.mode !== 'offline') banner.textContent += T(' ｜ 🪟 正在显示弹出窗口（如 Google 登录）；它关闭后会自动回到原页面 Popup window shown — returns to the page automatically when it closes.');
       wrap.classList.toggle('user', st.mode === 'user'); kbdState();
-      takeBtn.disabled = st.mode === 'user'; relBtn.disabled = st.mode !== 'user';
-      if (document.activeElement !== url && !urlDirty) url.value = st.url || '';
-      const cur = tabsSel.value;
-      tabsSel.innerHTML = '';
-      (st.tasks || []).forEach(t => tabsSel.append(h('option', { value: t.task_id, selected: t.task_id === st.view_task }, `${t.task_id.slice(0, 14)} · ${(t.url || '').slice(0, 40)}`)));
-      if (!st.tasks || !st.tasks.length) tabsSel.append(h('option', { value: '' }, T('（无标签页 no tabs）')));
-      const r = await fetch('sentinel/api/browser/screenshot?ts=' + Date.now());
+      takeBtn.disabled = st.mode === 'user' || (!sel && tasks.length > 0); relBtn.disabled = st.mode !== 'user';
+      takeBtn.textContent = sel ? Tf("🖐 接管「{0}」", nameOf(sel)) : T('🖐 接管 Take over');
+      relBtn.textContent = st.mode === 'user' ? Tf("↩ 交还「{0}」给 Agent", nameOf(st.takeover_task)) : T('↩ 交还给 Agent Hand back');
+      if (document.activeElement !== url && !urlDirty) url.value = (selTask && selTask.url) || st.url || '';
+      const shotTask = st.mode === 'user' ? st.takeover_task : sel;
+      const r = await fetch('sentinel/api/browser/screenshot?ts=' + Date.now() + (shotTask ? '&task_id=' + encodeURIComponent(shotTask) : ''));
       if (r.status === 200) { const b = await r.blob(); const u = URL.createObjectURL(b); const old = img.src; img.src = u; if (old.startsWith('blob:')) URL.revokeObjectURL(old); }
     } catch (e) { banner.textContent = '⚠️ ' + e.message; }
     finally { busy = false; }
@@ -1914,8 +1967,8 @@ function takeoverToast(ev) {
   TK.q.set(ev.task_id, ev.reason || '');
   clearTimeout(TK.timer);
   TK.timer = setTimeout(() => {
-    const reasons = [...TK.q.values()]; TK.q.clear();
-    const go = () => { location.hash = 'browser'; };
+    const ids = [...TK.q.keys()], reasons = [...TK.q.values()]; TK.q.clear();
+    const go = () => { location.hash = 'browser' + (ids.length === 1 ? '/' + ids[0] : ''); };
     if (reasons.length === 1) toast(T('🖐 Agent 请求你接管浏览器：') + reasons[0], false, go);
     else if (reasons.length) toast(Tf("🖐 {0} 个任务在等你接管浏览器（点这里打开浏览器）", reasons.length), false, go);
   }, 800);
