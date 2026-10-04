@@ -334,6 +334,10 @@ class Gmail:
                         cur["labels"] = [folder_name] + (["\\Starred"] if fl and "\\Flagged" in fl.group(1) else [])
                     if fl:
                         cur["unread"] = "\\Seen" not in fl.group(1)
+                        if "\\Draft" in fl.group(1):
+                            cur["draft"] = True
+                    if any(str(x).lower() in ("\\draft", "drafts", "[gmail]/drafts") for x in cur.get("labels") or []):
+                        cur["draft"] = True
                 if cur is None:
                     continue
                 if "HEADER.FIELDS" in head:
@@ -367,6 +371,8 @@ class Gmail:
     @staticmethod
     def public(msg: dict) -> dict:
         msg.pop("_unsub", None)
+        if msg.get("draft"):
+            msg["status"] = "草稿，从未发送 DRAFT - never sent (do not say the user replied / sent it)"
         return msg
 
     def search(self, query: str, max_results: int = 10) -> list[dict]:
