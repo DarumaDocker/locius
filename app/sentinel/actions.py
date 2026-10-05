@@ -301,6 +301,15 @@ async def execute(store, tool: str, args: dict, task_id: str) -> dict:
         res = await asyncio.to_thread(_gmail_sync, store, tool, args, task_id)
         store.update_task_ctx(task_id, taint=t["data_class"])
         return res
+    if tool == "purchase_confirm":
+        site = guard.domain_of("https://" + str(args.get("site", "")).strip().removeprefix("https://").removeprefix("http://"))
+        pid = store.add_purchase(task_id, site, str(args.get("card_item_id") or ""), float(args.get("total")),
+                                 str(args.get("currency") or ""), {k: args.get(k) for k in ("items", "shipping", "delivery", "note")})
+        return {"status": "approved", "purchase_id": pid,
+                "note": f"用户已批准这次购买。30 分钟内，在 {site} 上这笔订单的结账/下单/付款点击和用这张卡填写都不用再审批，"
+                        f"前提是页面总价不超过 {args.get('currency', '')} {float(args.get('total')):.2f}。下单成功后把订单号、总价和送达方式告诉用户。"
+                        f" Purchase approved: on {site}, for 30 minutes, the checkout / place-order / pay clicks and the card fills "
+                        "for this order go through without further approval while the page total stays within the confirmed amount."}
     if t["connector"] == "browser":
         return await _browser(store, tool, args, task_id)
     if t["connector"] == "telegram":

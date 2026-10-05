@@ -427,6 +427,31 @@ async def _summary(tool: str, args: dict, elem: dict | None, page: dict | None) 
             s["warning"] = f"无法读取邮件信息: {e}"
             s["items"] = [{"id": i, "from": "", "subject": "", "method": ""} for i in ids]
         s["fields"] = [["邮件数 Emails", str(len(ids))], ["同时归档 Also archive", "是 Yes" if args.get("archive") else "否 No"]]
+    elif tool == "purchase_confirm":
+        s["title"] = "确认购买 Confirm purchase"
+        cur = str(args.get("currency") or "")
+        items = args.get("items") or []
+        lines = []
+        for it in items[:10]:
+            try:
+                lines.append(f"{it.get('name', '')} × {it.get('qty', 1)} — {cur} {float(it.get('price', 0)):.2f}")
+            except (TypeError, ValueError, AttributeError):
+                lines.append(str(it)[:120])
+        card = "网站上已保存的卡 card saved on the site"
+        if args.get("card_item_id"):
+            it = vault.item(store, str(args.get("card_item_id")))
+            card = vault.summary_text(it, "number") if it else str(args.get("card_item_id"))
+        try:
+            ship = f"{cur} {float(args.get('shipping') or 0):.2f}"
+            total = f"{cur} {float(args.get('total')):.2f}"
+        except (TypeError, ValueError):
+            ship, total = str(args.get("shipping", "")), str(args.get("total", ""))
+        s["fields"] = [["网站 Site", str(args.get("site", ""))], ["商品 Items", "\n".join(lines)], ["运费 Shipping", ship],
+                       ["总价 Total", total], ["送货方式 Delivery", str(args.get("delivery", ""))], ["付款卡 Card", card],
+                       ["批准后 After approval", "30 分钟内、仅这个网站：结账、填卡、下单不再逐个审批；页面总价超过上面的金额会再问你 "
+                                                "(30 min, this site only; asks again if the page total is higher)"]]
+        s["body"] = str(args.get("note", ""))
+        s["screenshot"] = True
     elif tool.startswith("browser_"):
         verb = {"browser_click": "点击 Click", "browser_click_at": "按位置点击 Click at position", "browser_type": "输入 Type", "browser_select": "选择 Select",
                 "browser_press": "按键 Press key", "browser_upload": "上传文件 Upload", "browser_navigate": "打开网页 Open page",
@@ -543,6 +568,12 @@ async def act(req: Request):
                     detail={"args": _safe_args(tool, args), "error": str(e)})
         return {"status": e.status, "error": str(e)}
 
+    if tool in ("browser_click", "browser_click_at") and page and store.active_purchase(task_id, guard.domain_of(page.get("url", ""))):
+        try:   # a confirmed purchase: check the total the page shows before letting a pay click through
+            pt = await actions.broker("POST", "/agent/page_text", {"task_id": task_id}, timeout=15)
+            page = {**page, "text": str((pt or {}).get("text") or "")}
+        except Exception:
+            pass
     d = decide(store, tool, args, task_id, elem=elem, page=page, gmail_ready=gmail_ready())
     detail = {"args": _safe_args(tool, args), "reason": d.reason, "destination": d.destination}
     if elem:

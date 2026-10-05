@@ -385,3 +385,27 @@ def named_in_request(request: str, dom: str) -> bool:
     """The user's own request names this site ("在 FairPrice 网上超市（fairprice.com.sg）…")."""
     d = (dom or "").lower().removeprefix("www.")
     return bool(d) and len(d) > 4 and d in str(request or "").lower()
+
+
+
+_TOTAL_LINE = re.compile(r"(order total|grand total|total payable|amount payable|total to pay|total amount|\btotal\b|合计|总计|总价|应付|实付|合計)", re.I)
+_AMOUNT = re.compile(r"(?:S\$|SGD|US\$|USD|HK\$|HKD|RM|¥|￥|€|£|\$)\s?(\d{1,3}(?:[,\s]\d{3})*(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?)")
+
+
+def page_total(text: str) -> float | None:
+    """The order total a checkout page shows: the largest currency amount on a line that says total (or on the line
+    right after such a label). None when the page shows no total."""
+    lines = [x.strip() for x in str(text or "").splitlines() if x.strip()]
+    found: list[float] = []
+    for i, ln in enumerate(lines):
+        if not _TOTAL_LINE.search(ln) or re.search(r"sub-?total|小计|items? total", ln, re.I) and not re.search(r"grand|order total", ln, re.I):
+            continue
+        for cand in (ln, lines[i + 1] if i + 1 < len(lines) else ""):
+            for m in _AMOUNT.finditer(cand):
+                try:
+                    found.append(float(m.group(1).replace(",", "").replace(" ", "")))
+                except ValueError:
+                    pass
+            if found:
+                break
+    return max(found) if found else None

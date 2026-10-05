@@ -173,6 +173,26 @@ TOOLS: dict[str, dict] = {
                             "field": {"type": S, "description": "which field of the item, e.g. number / expiry / cvc / holder / name"}},
                            ["ref", "item_id", "field"]),
     },
+    "purchase_confirm": {
+        "connector": "browser", "capability": "interact", "operation": "purchase", "risk": "high", "data_class": "PUBLIC",
+        "description": "下单前的一张总确认卡：用户批准一次后，这个网站上本次订单的「结账/下单/付款」点击和从保险箱填卡都不用再逐个审批"
+                       "（30 分钟内、仅本网站、金额不超过确认的总价）。Ask the user ONCE to approve a whole purchase before paying: call it "
+                       "on the checkout page once the order total (items + shipping) and the delivery address are shown. After approval, "
+                       "on that site and within 30 minutes, the checkout / place-order / pay clicks and the card fills from the given "
+                       "vault item need no further approval, as long as the page total does not exceed the confirmed total. If anything "
+                       "changes (different item, higher total, other card, other site), call it again.",
+        "parameters": _obj({
+            "site": {"type": S, "description": "shop domain, e.g. decathlon.sg"},
+            "items": {"type": "array", "items": {"type": "object", "properties": {
+                "name": {"type": S}, "qty": {"type": "number"}, "price": {"type": "number"}}, "required": ["name", "price"]}},
+            "shipping": {"type": "number", "description": "delivery fee as shown on the page (0 if free)"},
+            "total": {"type": "number", "description": "order total as shown on the checkout page, shipping and tax included"},
+            "currency": {"type": S, "description": "e.g. SGD"},
+            "delivery": {"type": S, "description": "how it arrives, e.g. 'Home delivery to <address>, 3-5 working days'"},
+            "card_item_id": {"type": S, "description": "vault item id of the card to pay with (from vault_list); empty if the site already has the user's saved card"},
+            "note": {"type": S, "description": "anything the user should know (seller, return policy, ETA)"}},
+            ["site", "items", "total", "currency", "delivery"]),
+    },
     "browser_save_media": {
         "connector": "browser", "capability": "download", "operation": "download", "risk": "low", "data_class": "PUBLIC",
         "description": "把当前网页上的图片/视频/音频保存到工作区（media/ 文件夹），之后用 send_file 发给用户。给 ref（图片、视频元素或带背景图的元素）"

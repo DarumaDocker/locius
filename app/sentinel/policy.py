@@ -10,7 +10,7 @@ from app.sentinel.catalog import TOOLS
 
 ALLOW, DENY, ASK = "ALLOW", "DENY", "ASK_USER"
 RISK_ORDER = {"low": 0, "medium": 1, "high": 2, "critical": 3}
-PER_USE_TOOLS = {"browser_fill_secret"}
+PER_USE_TOOLS = {"browser_fill_secret", "purchase_confirm"}
 BULK_MAIL = 5   # archiving / trashing more emails than this in one call needs approval   # always ASK, approval scope forced to ONCE
 
 
@@ -136,6 +136,23 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
         risk = _bump(risk, "high")
         reasons.append("无法确认这个位置上是什么元素 (can't tell what is at this position)")
     per_use = False
+    if tool == "purchase_confirm":
+        site = guard.domain_of("https://" + str(args.get("site", "")).strip().removeprefix("https://").removeprefix("http://"))
+        try:
+            total = float(args.get("total"))
+        except (TypeError, ValueError):
+            total = 0
+        if not site or total <= 0 or not args.get("items"):
+            return Decision(DENY, "high", "purchase_confirm 需要 site、items 和页面上的总价 total (site, items and the page total are required)")
+        if args.get("card_item_id"):
+            from app.sentinel import vault
+            if not vault.item(store, str(args["card_item_id"])):
+                return Decision(DENY, "high", "保险箱里没有这张卡，请先用 vault_list 查看 (unknown vault item)")
+        return Decision(ASK, "high", f"确认这次购买：{site}，总价 {args.get('currency', '')} {total:.2f}；批准后本网站这笔订单的结账、填卡、"
+                                     "下单不再逐个审批（30 分钟内，金额不超过这个总价） (one approval for the whole purchase)", site)
+    purchase = None
+    if not ctx["injection"] and page and tool in ("browser_click", "browser_click_at", "browser_fill_secret"):
+        purchase = store.active_purchase(task_id, guard.domain_of(page.get("url", "")))
     if tool in ("browser_click", "browser_click_at") and elem and guard.order_change_click(elem.get("name", "")):
         risk = _bump(risk, "high")
         per_use = True
@@ -147,6 +164,16 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
         per_use = True
         reasons.append(f"「{elem.get('name', '')}」会花钱或确认付款：每次都要你单独批准，任何长期授权都不覆盖 "
                        "(spends money — approved one by one, never by a standing grant)")
+        if purchase and purchase["clicks_left"] > 0:
+            shown = guard.page_total((page or {}).get("text", ""))
+            limit = purchase["max_total"] * 1.02 + 0.5
+            if shown is not None and shown > limit:
+                reasons.append(f"页面显示的总价 {shown:.2f} 超过了你确认的 {purchase['max_total']:.2f}，需要重新确认 "
+                               f"(page total {shown:.2f} exceeds the confirmed {purchase['max_total']:.2f})")
+            else:
+                store.use_purchase(purchase["id"], "click")
+                return Decision(ALLOW, "high", f"已在购买确认 {purchase['id']} 中批准 (covered by the purchase you confirmed)",
+                                dest, grant_id=purchase["id"])
     if tool in ("browser_click", "browser_click_at") and elem and not per_use:
         # a <button> reports type "submit" by default; outside a <form> it submits nothing (chat launchers, menus)
         itype = elem.get("input_type", "") if elem.get("in_form", True) else ""
@@ -169,6 +196,15 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
             reasons.append("本任务读取过机密数据，正在把较长文本输入网页 (possible data egress)")
         elif not is_search:
             risk = _bump(risk, "medium")
+    if tool == "browser_fill_secret" and purchase and purchase["fills_left"] > 0 and purchase["card_item"] \
+            and purchase["card_item"] == str(args.get("item_id", "")):
+        from app.sentinel import vault as _v
+        it0 = _v.item(store, purchase["card_item"])
+        if it0 and str(args.get("field", "")) in it0["fields"] and elem and \
+                not (elem.get("input_type", "").lower() == "password" or elem.get("is_password")):
+            store.use_purchase(purchase["id"], "fill")
+            return Decision(ALLOW, "high", f"已在购买确认 {purchase['id']} 中批准 (covered by the purchase you confirmed)",
+                            dest, grant_id=purchase["id"])
     if tool == "browser_fill_secret":
         from app.sentinel import vault
         it = vault.item(store, str(args.get("item_id", "")))

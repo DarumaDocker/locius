@@ -866,6 +866,13 @@ async def agent_action(action: str, req: Request):
     task_id = body.get("task_id") or "default"
     if action == "describe":
         return await broker.describe(task_id, body.get("ref", ""))
+    if action == "page_text":   # Sentinel: the order total shown on the page before a pre-approved "Place order" click
+        page = await broker.page_for(task_id)
+        try:
+            txt = await page.evaluate("() => (document.body && document.body.innerText || '').slice(0, 60000)")
+        except Exception:
+            txt = ""
+        return {"url": page.url, "text": txt}
     if action == "focused":
         return await broker.focused(task_id)
     if action == "describe_at":

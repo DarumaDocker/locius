@@ -1461,3 +1461,31 @@ def test_followup_sees_what_a_cancelled_task_did(tmp_path):
     blob = "\n".join(m["content"] for m in hist)
     assert "decathlon.sg" in blob and "CANCELLED" in blob and "Proceed to Checkout" in blob and "选择取货门店" in blob
     assert "Card details entered from the vault: no" in blob
+
+
+def test_one_card_purchase_confirmation(store, monkeypatch):
+    # 2026-10-05 (Lucas): one approval for the whole purchase instead of checkout + card fill + place order cards
+    from app.sentinel import guard, vault
+    monkeypatch.setattr(vault, "item", lambda st, iid: {"id": iid, "label": "Visa", "fields": ["number", "expiry", "cvc", "holder"],
+                                                       "masked": "•••• 4242"} if iid == "v1" else None)
+    args = {"site": "decathlon.sg", "items": [{"name": "Water flask 0.8L", "qty": 1, "price": 9.0}], "shipping": 4.99,
+            "total": 13.99, "currency": "SGD", "delivery": "Home delivery to 1C Tyersall Rd", "card_item_id": "v1"}
+    d = decide(store, "purchase_confirm", args, "tp")
+    assert d.decision == ASK and d.destination == "decathlon.sg"
+    page = {"url": "https://www.decathlon.sg/checkout/abc", "title": "Checkout", "text": "Subtotal $9.00\nShipping $4.99\nOrder total\n$13.99"}
+    pay = {"tag": "button", "role": "button", "name": "Place Order", "input_type": "submit", "in_form": True}
+    assert decide(store, "browser_click", {"ref": "e9"}, "tp", elem=pay, page=page).decision == ASK     # not confirmed yet
+    store.add_purchase("tp", "decathlon.sg", "v1", 13.99, "SGD", {})
+    assert decide(store, "browser_click", {"ref": "e9"}, "tp", elem=pay, page=page).decision == ALLOW
+    box = {"tag": "input", "role": "textbox", "name": "Card number", "input_type": "text", "in_form": True}
+    assert decide(store, "browser_fill_secret", {"ref": "f1e2", "item_id": "v1", "field": "number"}, "tp", elem=box, page=page).decision == ALLOW
+    assert decide(store, "browser_fill_secret", {"ref": "f1e2", "item_id": "v2", "field": "number"}, "tp", elem=box, page=page).decision != ALLOW
+    dear = dict(page, text="Order total S$48.00")
+    assert decide(store, "browser_click", {"ref": "e9"}, "tp", elem=pay, page=dear).decision == ASK       # total went up
+    other = {"url": "https://www.lazada.sg/checkout", "title": "x", "text": ""}
+    assert decide(store, "browser_click", {"ref": "e9"}, "tp", elem=pay, page=other).decision == ASK      # other site
+    assert decide(store, "browser_click", {"ref": "e9"}, "tq", elem=pay, page=page).decision == ASK       # other task
+    cancel = {"tag": "button", "role": "button", "name": "Request cancellation", "input_type": "submit", "in_form": True}
+    assert decide(store, "browser_click", {"ref": "e3"}, "tp", elem=cancel, page=page).decision == ASK    # never covered
+    assert guard.page_total("Items total S$9.00\nDelivery S$4.99\nGrand Total S$13.99") == 13.99
+    assert guard.page_total("no money here") is None

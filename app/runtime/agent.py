@@ -515,7 +515,8 @@ LOCAL_TOOLS = [
         {"path": S, "values": {"type": "object"}, "output": {"type": "string", "description": "default: <name>-filled.pdf next to it"}},
         ["path", "values"]),
     _fn("memory_search", "搜索记忆 Search memory about the user (long-term facts, recent details and past tasks).", {"query": S}, ["query"]),
-    _fn("memory_remember", "记住用户明确要求记住的事实 Save a durable fact the user explicitly asked to remember. Not for profile "
+    _fn("memory_remember", "记住用户明确要求记住的事实 Save a durable fact the user explicitly asked to remember, or a site's form habit you just learned at checkout "
+        "(e.g. \"decathlon.sg accepts the phone number as 8 digits without +65\"). Not for profile "
         "fields (name, phone, email, address… → profile_suggest) and never for ID / membership / card numbers or passwords "
         "(those live in the Sentinel vault, which the user manages).",
         {"fact": S, "category": S, "entity": S}, ["fact"]),

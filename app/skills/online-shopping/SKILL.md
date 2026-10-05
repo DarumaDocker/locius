@@ -42,7 +42,20 @@ description: 网购：搜索商品、用视觉挑选、加入购物车（不结�
    prices, totals, budget checks — product pages are public), then browser_request_takeover for the cart / checkout step
    and say what is already done. Do not stop the whole task at the first "Log in" button.
    Never type passwords. Shipping name / phone / address: profile_get. Card details at checkout: vault_list + browser_fill_secret (each fill approved by the user), otherwise take over; the final Pay / Place order click is approved separately.
-8. **Final answer**: product title, price, seller/rating, link, and "added to cart ✓ (not checked out)"; mention anything uncertain.
+8. **Buying (the user asked you to actually order)**: delivery to the user's home unless they say otherwise.
+   - Shipping details: profile_get (name_en, phone, address_home). Before typing a phone number, check memory for a format
+     this site accepted before (memory_search "<site> phone"). If the field rejects it, read the hint and retry in another
+     common format (Singapore: "88478582", "8847 8582", "+65 88478582"; a separate country-code box → "+65" there and 8 digits
+     in the number box). Once a format is accepted, memory_remember "<site> accepts the phone number as …".
+   - Go through checkout up to the page that shows the final total (items + shipping + tax) and the delivery address.
+   - Then call **purchase_confirm ONCE**: site, items (name, qty, price as shown), shipping, total, currency, delivery
+     ("Home delivery to <address>, <ETA>"), card_item_id (vault_list → the card the user keeps for shopping). The user
+     approves this one card; after that, the card fills (browser_fill_secret, one call per field) and the Place order / Pay
+     click on that site go through without more approvals for 30 minutes, as long as the page total stays within it.
+   - If the total, the item, the card or the site changes, call purchase_confirm again. A card form inside a payment
+     iframe: snapshot shows its fields with refs like f1e3 — fill those.
+   - After the order: read the confirmation page and report the order number, items, total and delivery date.
+9. **Final answer**: product title, price, seller/rating, link, and "added to cart ✓ (not checked out)"; mention anything uncertain.
 
 ## Comparing and watching
 - Showing several candidates: call present_choices(kind="comparison") with labels/prices copied exactly from the page
