@@ -16,6 +16,11 @@ description: 网购：搜索商品、用视觉挑选、加入购物车（不结�
    conclude the product is not sold there. Search the web once — browser_search("<product> site:<shop domain>", e.g.
    "Dyson V15 Detect site:courts.com.sg") — and browser_read the product page it returns. Still nothing → say "not
    verified at <shop>" (not "not sold"). Only use shop domains you have seen in search results; never guess one.
+   **"The cheapest X"**: sorting by lowest price (Amazon `&s=price-asc-rank`) lists accessories first (cases, covers,
+   cables "for Anker …"). Keep only results whose title is the product itself (brand + product type + spec, e.g. "Anker
+   Power Bank 20000mAh"), using browser_find("<brand> <type> <spec>") to get those links with prices; if a sorted page
+   shows only accessories, drop the sort and pick the cheapest matching item from the normal results instead of
+   re-filtering the same URL.
 2. **See the results.** Shop pages are long; the text snapshot is cut off. Do NOT re-open the same URL.
    - browser_look("List the products on screen with title, price, rating and the label of each product link") — the vision model
      sees the real page, including images.
@@ -30,7 +35,10 @@ description: 网购：搜索商品、用视觉挑选、加入购物车（不结�
    the user explicitly asked to buy.
 6. **Verify**: browser_look("Was the item added to the cart? What does the confirmation say and how many items are in the cart?")
    or check the cart count in the snapshot.
-7. **Login / CAPTCHA / robot check** → browser_request_takeover. Never type passwords. Shipping name / phone / address: profile_get. Card details at checkout: vault_list + browser_fill_secret (each fill approved by the user), otherwise take over; the final Pay / Place order click is approved separately.
+7. **Login / CAPTCHA / robot check** → first finish everything that needs no login (look up every item on the list,
+   prices, totals, budget checks — product pages are public), then browser_request_takeover for the cart / checkout step
+   and say what is already done. Do not stop the whole task at the first "Log in" button.
+   Never type passwords. Shipping name / phone / address: profile_get. Card details at checkout: vault_list + browser_fill_secret (each fill approved by the user), otherwise take over; the final Pay / Place order click is approved separately.
 8. **Final answer**: product title, price, seller/rating, link, and "added to cart ✓ (not checked out)"; mention anything uncertain.
 
 ## Comparing and watching

@@ -22,7 +22,7 @@ import httpx
 from app.common.util import dumps, new_id, now_ts, truncate
 from app.runtime import attachments as AT
 from app.runtime import prompts
-from app.runtime.llm import LLM, LLMContextError, LLMError, extract_json
+from app.runtime.llm import LLM, LLMContextError, LLMError, extract_json, strip_tool_markup
 from app.runtime.store import RStore
 
 SENTINEL_URL = os.environ.get("SENTINEL_URL", "http://127.0.0.1:8080")
@@ -1309,6 +1309,10 @@ class Runtime:
                     agent_lang(s), "（系统）请直接用文字写出最终回答（不要调用工具，也不要输出 <tool_call> 之类的标记）。",
                     "(System) Write the final answer now as plain text (no tool calls, no <tool_call> markup).")})
                 continue
+            if not final:
+                final = await self._rescue_final(task_id, t["goal"], transcript, agent_lang(s))
+                if final:
+                    await self.event(task_id, "rescued_final", {"chars": len(final)})
             if not final:   # the model still gave no text: say what was done instead of an empty bubble
                 done = [st.get("description") or st.get("id") for st in (t["plan"] or {}).get("steps", [])
                         if st.get("status") == "done"]
@@ -1643,6 +1647,28 @@ class Runtime:
             await self.event(task_id, "language_fixed", {"from": "zh", "to": "en"})
             return text
         return final
+
+    async def _rescue_final(self, task_id: str, goal: str, transcript: list[dict], lg: str) -> str:
+        """The model returned no text even when asked for the final answer (2026-10-05 S1-04: after 27 steps of price
+        lookups the task ended with an empty bubble). Ask once more from a short, tool-free context: the goal, what the
+        agent noted while working and the last results — a long tool-call history primes it to call tools again."""
+        notes = [str(m.get("content") or "").strip() for m in transcript if m.get("role") == "assistant" and str(m.get("content") or "").strip()]
+        results = [str(m.get("content") or "")[:500] for m in transcript if m.get("role") == "tool"][-10:]
+        if not notes and not results:
+            return ""
+        body = (f"Task / 任务:\n{goal}\n\nNotes written while working / 工作中记下的内容:\n" + "\n".join(f"- {n[:600]}" for n in notes[-30:])
+                + "\n\nLast tool results / 最近的工具结果:\n" + "\n---\n".join(results))
+        sysmsg = prompts.L(lg, "你根据一个任务的工作记录写最终回答。不能调用工具。只用记录里的事实和数字（原样照抄），"
+                               "说清楚找到了什么、哪些没核实以及原因、用户下一步可以怎么做。用用户的语言。",
+                           "You write the final answer for a task from its working notes. No tools. Use only facts and numbers "
+                           "from the notes (copied exactly); say what was found, what is unverified and why, and what the "
+                           "user can do next. Answer in the user's language.")
+        try:
+            resp = await self.llm.chat([{"role": "system", "content": sysmsg}, {"role": "user", "content": body}], None,
+                                       purpose="rescue_final", task_id=task_id)
+        except Exception:
+            return ""
+        return strip_tool_markup(resp.get("content") or "").strip()
 
     async def _replan(self, task_id: str, transcript: list[dict], facts, history_txt, dead_ends: str = ""):
         t = self.store.task(task_id)

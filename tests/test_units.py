@@ -1376,3 +1376,26 @@ def test_retype_guard_allows_new_search_in_same_box():
         {"id": "c1", "function": {"name": "browser_type", "arguments": json.dumps({"ref": "e2", "text": "Lucas"})}},
         {"id": "c2", "function": {"name": "browser_type", "arguments": json.dumps({"ref": "e2", "text": "Lu"})}}]}]
     assert retype_guard(tr2, {"id": "c2", "name": "browser_type", "args": {"ref": "e2", "text": "Lu"}})
+
+
+def test_rescue_final_uses_notes_without_tools():
+    import asyncio
+    from app.runtime.agent import Runtime as Agent
+
+    class FakeLLM:
+        def __init__(self):
+            self.calls = []
+
+        async def chat(self, msgs, tools=None, **kw):
+            self.calls.append((msgs, tools, kw))
+            return {"content": "Sheng Siong 明治鲜奶 2L：S$6.70；其余未核实。", "tool_calls": []}
+
+    a = Agent.__new__(Agent)
+    a.llm = FakeLLM()
+    tr = [{"role": "user", "content": "比价"},
+          {"role": "assistant", "content": "Sheng Siong 明治鲜奶 2L 是 $6.70（原价 $6.97）。", "tool_calls": [{"id": "x"}]},
+          {"role": "tool", "content": "page text ... $6.70"}]
+    out = asyncio.run(a._rescue_final("t1", "比较三家超市", tr, "zh"))
+    assert "6.70" in out
+    msgs, tools, kw = a.llm.calls[0]
+    assert tools is None and "6.70" in msgs[1]["content"]
