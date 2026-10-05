@@ -316,8 +316,12 @@ class Broker:
                     "tabs": tabs, "feed": True}
         fmap = {}
         parts = []
+        # Payment forms put every card field in its own iframe, after many tracker / captcha frames (2026-10-05 decathlon.sg:
+        # Adyen's expiry and CVC boxes were frames 8 and 9, so only the number box was listed and all three card values
+        # were typed into it). Read up to 24 frames; empty ones add nothing to the snapshot.
         frames = [f for f in page.frames if not f.is_detached()]
-        for i, fr in enumerate(frames[:8]):
+        iframe_parts = []
+        for i, fr in enumerate(frames[:24]):
             prefix = "" if i == 0 else f"f{i}"
             fmap[prefix] = fr
             try:
@@ -327,19 +331,23 @@ class Broker:
             if i == 0:
                 parts.append(txt)
             elif txt and txt.strip():
-                parts.append(f"--- iframe {prefix}: {fr.url[:100]} ---\n{txt}")
+                iframe_parts.append(f"--- iframe {prefix}: {fr.url[:100]} ---\n{txt[:1500]}")
         self.frame_maps[task_id or "default"] = fmap
         title = ""
         try:
             title = await page.title()
         except Exception:
             pass
-        body = "\n".join(parts)
         max_chars = max(2000, min(int(max_chars or 12000), 40000))
-        truncated = len(body) > max_chars
+        # iframes (card fields, chat widgets) come after the page and must not be cut off by a long page
+        frames_txt = "\n".join(iframe_parts)[:max(1500, max_chars // 3)]
+        main = "\n".join(parts)
+        room = max(1000, max_chars - len(frames_txt))
+        truncated = len(main) > room
         if truncated:
-            body = body[:max_chars] + ("\n…[快照已截断 snapshot truncated — browser_find(\"text\") locates anything on the page; "
-                                       "browser_scroll shows the part around the new position; browser_look lets you see the page]")
+            main = main[:room] + ("\n…[快照已截断 snapshot truncated — browser_find(\"text\") locates anything on the page; "
+                                  "browser_scroll shows the part around the new position; browser_look lets you see the page]")
+        body = main + ("\n" + frames_txt if frames_txt else "")
         tabs = len([p for p in self.ctx.pages if not p.is_closed()])
         if near:
             body = "(showing the part of the page around the current scroll position)\n" + body
@@ -866,6 +874,13 @@ async def agent_action(action: str, req: Request):
     task_id = body.get("task_id") or "default"
     if action == "describe":
         return await broker.describe(task_id, body.get("ref", ""))
+    if action == "page_text":   # Sentinel: the order total shown on the page before a pre-approved "Place order" click
+        page = await broker.page_for(task_id)
+        try:
+            txt = await page.evaluate("() => (document.body && document.body.innerText || '').slice(0, 60000)")
+        except Exception:
+            txt = ""
+        return {"url": page.url, "text": txt}
     if action == "focused":
         return await broker.focused(task_id)
     if action == "describe_at":
@@ -968,11 +983,20 @@ async def agent_action(action: str, req: Request):
                     except Exception:
                         kind = ""
                     text = normalize_date_input(kind, text)
-                    try:
-                        await loc.fill(text, timeout=8000)
-                    except Exception:
+                    if body.get("expiry"):
+                        text = expiry_for_field(text, await _field_hint(loc))
+                    if body.get("keys"):
+                        # card fields (Adyen, Stripe…) format and validate on key events; fill() leaves them "incomplete"
                         await loc.click(timeout=5000)
-                        await page.keyboard.type(text, delay=15)
+                        await page.keyboard.press("Control+a")
+                        await page.keyboard.press("Backspace")
+                        await page.keyboard.type(text, delay=60)
+                    else:
+                        try:
+                            await loc.fill(text, timeout=8000)
+                        except Exception:
+                            await loc.click(timeout=5000)
+                            await page.keyboard.type(text, delay=15)
                     if body.get("submit"):
                         await loc.press("Enter", timeout=5000)
                         await broker.settle(page, 1500)
@@ -1101,11 +1125,24 @@ async def user_takeover(req: Request):
     if broker.mode == "user" and broker.takeover_task and broker.takeover_task != tid:
         # one takeover at a time: switching silently would resume the first task while the user is still in it
         raise HTTPException(409, f"你正在接管另一个任务（{broker.takeover_task}），请先交还它 (hand back the current task first)")
-    async with broker.task_lock(tid):  # waits for that task's in-flight action; other tasks keep running
-        broker.mode = "user"
-        broker.takeover_task = tid
+    # Pause the task first (its next action gets 423), then wait briefly for an action already in flight. A hung agent
+    # action (a click waiting on a page that never settles) used to hold the lock for minutes, so "Take over" seemed to do
+    # nothing and every key the user typed was refused with "take over first" (2026-10-05 decathlon.sg checkout).
+    broker.mode = "user"
+    broker.takeover_task = tid
+    lock = broker.task_lock(tid)
+    got = False
+    try:
+        await asyncio.wait_for(lock.acquire(), timeout=8)
+        got = True
+    except asyncio.TimeoutError:
+        print(f"[browser] takeover of {tid}: an agent action is still running; taking over anyway", flush=True)
+    try:
         await broker.page_for(tid)  # the page the user drives is always a registered task page
         broker.view_task = tid
+    finally:
+        if got:
+            lock.release()
     return await state()
 
 
@@ -1138,10 +1175,13 @@ async def _user_input(body: dict):
         page = await broker.page_for(broker.takeover_task or "default")
     kind = body.get("type")
     x, y = float(body.get("x", 0)), float(body.get("y", 0))
-    if kind == "click":
-        await page.mouse.click(x, y)
-    elif kind == "dblclick":
-        await page.mouse.dblclick(x, y)
+    if kind in ("click", "dblclick"):
+        try:
+            await (page.mouse.click(x, y) if kind == "click" else page.mouse.dblclick(x, y))
+        except Exception as e:
+            # the click itself closed the page (a sign-in popup's "Next" / "Allow" button): that is a successful click
+            if not page.is_closed() and "closed" not in str(e).lower():
+                raise HTTPException(409, f"点击失败 click failed: {str(e)[:150]}")
     elif kind == "wheel":
         await page.mouse.move(x, y)
         await page.mouse.wheel(float(body.get("dx", 0)), float(body.get("dy", 0)))
@@ -1168,13 +1208,41 @@ async def _user_input(body: dict):
         await page.reload()
     else:
         raise HTTPException(400, "unknown input type")
-    await asyncio.sleep(0.15)
+    if kind != "wheel":
+        await asyncio.sleep(0.15)
     return {"ok": True}
 
 
 @app.exception_handler(HTTPException)
 async def http_exc(req, exc: HTTPException):
     return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+
+
+async def _field_hint(loc) -> str:
+    try:
+        return await loc.evaluate("e => [e.placeholder, e.getAttribute('aria-label'), e.maxLength > 0 ? 'maxlength' + e.maxLength : '']"
+                                  ".filter(Boolean).join(' ')", timeout=3000)
+    except Exception:
+        return ""
+
+
+def expiry_for_field(value: str, hint: str) -> str:
+    """A card expiry from the vault ("12/2028", "12/28", "2028-12", "1228") in the form the box asks for: MM/YYYY when its
+    placeholder says YYYY (or it holds 7 characters), otherwise MM/YY."""
+    v = str(value or "").strip()
+    m = re.fullmatch(r"(\d{4})\s*[-/.]\s*(\d{1,2})", v) or None
+    if m:
+        mm, yy = m.group(2), m.group(1)
+    else:
+        m = re.fullmatch(r"(\d{1,2})\s*[-/.\s]?\s*(\d{2}|\d{4})", v)
+        if not m:
+            return v
+        mm, yy = m.group(1), m.group(2)
+    mm = mm.zfill(2)
+    yyyy = yy if len(yy) == 4 else "20" + yy
+    h = (hint or "").lower()
+    long = "yyyy" in h or "aaaa" in h or "jjjj" in h or re.search(r"maxlength(7|9)\b", h)
+    return f"{mm}/{yyyy}" if long else f"{mm}/{yyyy[2:]}"
 
 
 _DATE_KINDS = ("date", "time", "datetime-local", "month", "week")

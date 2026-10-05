@@ -515,7 +515,8 @@ LOCAL_TOOLS = [
         {"path": S, "values": {"type": "object"}, "output": {"type": "string", "description": "default: <name>-filled.pdf next to it"}},
         ["path", "values"]),
     _fn("memory_search", "搜索记忆 Search memory about the user (long-term facts, recent details and past tasks).", {"query": S}, ["query"]),
-    _fn("memory_remember", "记住用户明确要求记住的事实 Save a durable fact the user explicitly asked to remember. Not for profile "
+    _fn("memory_remember", "记住用户明确要求记住的事实 Save a durable fact the user explicitly asked to remember, or a site's form habit you just learned at checkout "
+        "(e.g. \"decathlon.sg accepts the phone number as 8 digits without +65\"). Not for profile "
         "fields (name, phone, email, address… → profile_suggest) and never for ID / membership / card numbers or passwords "
         "(those live in the Sentinel vault, which the user manages).",
         {"fact": S, "category": S, "entity": S}, ["fact"]),
@@ -830,8 +831,9 @@ class Runtime:
         if t and t["status"] not in TERMINAL:
             await self.set_status(task_id, "CANCELLED", finished_at=now_ts(), **({"error": reason} if reason else {}))
             await self.event(task_id, "cancelled", {"reason": reason} if reason else {})
-            if t["status"] == "WAITING_APPROVAL":
+            if t["status"] in ("WAITING_APPROVAL", "WAITING_EXTERNAL", "PAUSED"):
                 # don't leave an orphan approval behind: approving it later would run an action for a dead task
+                # (Sentinel also ends a takeover of this task's page)
                 try:
                     await self.sentinel("POST", "/internal/expire_approvals",
                                         {"task_id": task_id, "reason": reason or "任务已取消 (task cancelled)"}, timeout=15)
@@ -893,8 +895,63 @@ class Runtime:
             self.start(t["id"])
 
     # ================================================================ the loop
+    def _task_digest(self, task: dict) -> str:
+        """What an earlier task in this conversation actually did, for a follow-up message (2026-10-05: after a cancelled
+        decathlon.sg order test, "刚才这个操作…能否把这个订单取消" was taken to mean an Amazon order, because the cancelled
+        task had left no reply in the chat)."""
+        evs = self.store.events(task["id"])
+        sites, approvals, fills, last_wait = [], [], 0, ""
+        pending = {}
+        for e in evs:
+            d = e.get("data") or {}
+            if e["type"] == "tool_call":
+                a = d.get("args") or {}
+                if d.get("name") == "browser_navigate" and a.get("url"):
+                    dom = re.sub(r"^www\.", "", urlparse(str(a["url"])).netloc)
+                    if dom and dom not in sites:
+                        sites.append(dom)
+                if d.get("name") == "browser_fill_secret":
+                    fills += 1
+            elif e["type"] == "waiting":
+                w = d if isinstance(d, dict) else {}
+                summ = w.get("summary") or {}
+                el = next((v for k, v in (summ.get("fields") or []) if "Element" in k or "元素" in k), "")
+                if w.get("approval_id"):
+                    pending[w["approval_id"]] = el or summ.get("title") or w.get("tool", "")
+                last_wait = str(w.get("reason") or el or "")[:200]
+            elif e["type"] == "approval_resolved":
+                lab = pending.get(d.get("approval_id"), "")
+                if lab:
+                    approvals.append(f"{lab} → {d.get('decision')}")
+        steps = [f"{st.get('status')}: {st.get('description')}" for st in (task.get("plan") or {}).get("steps", [])][:8]
+        parts = [f"[Earlier task in this chat — status {task['status']}] {truncate(task['goal'], 300)}"]
+        if sites:
+            parts.append("Sites used: " + ", ".join(sites[:6]))
+        if steps:
+            parts.append("Plan: " + " | ".join(truncate(x, 120) for x in steps))
+        if approvals:
+            parts.append("Approvals: " + "; ".join(approvals[-8:]))
+        parts.append("Card details entered from the vault: " + ("yes" if fills else "no"))
+        if task["status"] != "COMPLETED" and last_wait:
+            parts.append("Stopped at: " + last_wait)
+        if task.get("result"):
+            parts.append("Result: " + truncate(task["result"], 600))
+        return "\n".join(parts)
+
     def _history(self, conv_id: str, exclude_task: str) -> tuple[list[dict], str]:
         msgs = [m for m in self.store.msgs(conv_id, 30) if m["task_id"] != exclude_task or m["role"] != "user"]
+        try:   # tasks that ended without a reply (cancelled, failed, still waiting) get a digest of what they did
+            answered = {m["task_id"] for m in msgs if m["role"] == "assistant" and m.get("task_id")}
+            tasks = {t["id"]: t for t in self.store.tasks(conv_id=conv_id, limit=10) if t["id"] != exclude_task}
+            out = []
+            for m in msgs:
+                out.append(m)
+                tid = m.get("task_id")
+                if m["role"] == "user" and tid in tasks and tid not in answered:
+                    out.append({"role": "assistant", "content": self._task_digest(tasks[tid]), "task_id": tid, "meta": {}})
+            msgs = out
+        except Exception:
+            pass
         hist, lines = [], []
         for m in msgs[-12:]:
             if m["role"] not in ("user", "assistant"):

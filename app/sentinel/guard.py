@@ -262,8 +262,59 @@ _MONEY_CLICK = re.compile(
 _MONEY_URL = re.compile(r"/(checkout|buy|payment|pay|billing|cart/checkout|order/confirm|subscribe|upgrade)\b", re.I)
 
 
+# Steps inside a checkout that only enter or pick details (2026-10-05 decathlon.sg: "Save Address" asked for money
+# approval twice, because any submit button on a /checkout page counted as paying).
+_CHECKOUT_DETAIL = re.compile(
+    r"^\s*(\+\s*)?(save|add|edit|change|update|use this|select|choose|confirm)( new| this| my)?\s*"
+    r"(address|delivery address|shipping address|billing address|contact( details)?|phone|details|store|pick-?up (point|store|location)|"
+    r"collection point|location|outlet)\s*$|^\s*apply( (voucher|coupon|promo( code)?|code))?\s*$|"
+    r"^\s*remove (voucher|coupon|promo( code)?|code)\s*$|"
+    r"^\s*(保存|添加|新增|修改|编辑|选择|确认)(收货|送货|配送|账单)?(地址|门店|自取点|取货点|联系方式)\s*$", re.I)
+_CART_EDIT = re.compile(r"^\s*(remove|delete|remove item|delete item|移除|删除|删掉)\s*$", re.I)
+
+# Going from the cart to the checkout page only opens the next page: nothing is paid or ordered yet (2026-10-05 decathlon.sg:
+# "Proceed to Checkout" asked for its own approval before the one purchase confirmation). The order itself is still
+# approved at "Place order / Pay", which purchase_confirm covers. "Buy now" (often one-click) and payment buttons stay money.
+_CHECKOUT_ENTER = re.compile(
+    r"^\s*((proceed|continue|go) to )?(secure )?(check ?out)( now| securely)?(\s*\(\d+\))?\s*$|"
+    r"^\s*(去|前往)?(结算|结账)(\s*\(\d+\))?\s*$", re.I)
+
+
+def checkout_enter_click(name: str) -> bool:
+    return bool(_CHECKOUT_ENTER.match(re.sub(r"\s+", " ", str(name or ""))))
+
+
+# "Next step" / "Continue to payment" between checkout pages (address → delivery → payment). Before any card detail has
+# been filled in this task they cannot pay for anything; policy lets them through then, and treats them as payment
+# clicks again once a card has been filled.
+_CHECKOUT_STEP = re.compile(
+    r"^\s*(next( step)?|continue|save and continue|save & continue|"
+    r"(continue|proceed|go) to (shipping|delivery|address|payment|billing|review|summary)( method| options| details)?|"
+    r"下一步|继续|继续付款|去付款页)\s*[»›>→]*\s*$", re.I)
+
+
+def checkout_step_click(name: str) -> bool:
+    return bool(_CHECKOUT_STEP.match(re.sub(r"\s+", " ", str(name or ""))))
+
+# Clicks that cancel / return / refund an existing order or booking: they cannot be taken back, so they are approved one by
+# one like payments, never skipped because the user's message contains "取消" (2026-10-05: a follow-up "能否把这个订单
+# 取消" made OMuse open Amazon and click "Request cancellation" on a different order than the one the user meant).
+_ORDER_CHANGE = re.compile(
+    r"request cancel(l)?ation|cancel(l)?ation|cancel (this |my |the )?(items?|selected( items)?|order|booking|reservation|ticket|"
+    r"subscription|plan|membership|request|delivery)|return (items?|order|this)|request (a )?(refund|return)|start (a )?return|refund|"
+    r"取消订单|取消预订|取消预约|申请取消|取消商品|取消所选|退货|退款|退订|申请退|"
+    r"キャンセル|返品|返金", re.I)
+
+
+def order_change_click(name: str) -> bool:
+    label = re.sub(r"\s+", " ", str(name or "")).strip()
+    return bool(label) and len(label) <= 80 and bool(_ORDER_CHANGE.search(label))
+
+
 def money_click(name: str, input_type: str = "", page_url: str = "") -> bool:
     label = str(name or "")
+    if _CHECKOUT_DETAIL.search(label.strip()) or checkout_enter_click(label):
+        return False
     if _MONEY_CLICK.search(label):
         return True
     # any submit button on a checkout / payment page
@@ -281,6 +332,8 @@ def click_is_risky(role: str, name: str, input_type: str = "") -> bool:
         # a whole product / listing card is one link: judge it by its first line, like a person reading the title
         label = label.strip().split("\n")[0][:80]
     if _CART_ADD.search(label) or _COOKIE_DECLINE.search(label):
+        return False
+    if _CHECKOUT_DETAIL.search(label.strip()) or checkout_enter_click(label):
         return False
     if (input_type or "").lower() == "submit":
         # a form that only shows data ("Display", "Show rates", "Calculate") submits nothing of the user's
@@ -356,3 +409,50 @@ def named_in_request(request: str, dom: str) -> bool:
     """The user's own request names this site ("在 FairPrice 网上超市（fairprice.com.sg）…")."""
     d = (dom or "").lower().removeprefix("www.")
     return bool(d) and len(d) > 4 and d in str(request or "").lower()
+
+
+
+_TOTAL_LINE = re.compile(r"(order total|grand total|total payable|amount payable|total to pay|total amount|\btotal\b|合计|总计|总价|应付|实付|合計)", re.I)
+_AMOUNT = re.compile(r"(?:S\$|SGD|US\$|USD|HK\$|HKD|RM|¥|￥|€|£|\$)\s?(\d{1,3}(?:[,\s]\d{3})*(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?)")
+
+
+def page_total(text: str) -> float | None:
+    """The order total a checkout page shows: the largest currency amount on a line that says total (or on the line
+    right after such a label). None when the page shows no total."""
+    lines = [x.strip() for x in str(text or "").splitlines() if x.strip()]
+    found: list[float] = []
+    for i, ln in enumerate(lines):
+        if not _TOTAL_LINE.search(ln) or re.search(r"sub-?total|小计|items? total", ln, re.I) and not re.search(r"grand|order total", ln, re.I):
+            continue
+        for cand in (ln, lines[i + 1] if i + 1 < len(lines) else ""):
+            for m in _AMOUNT.finditer(cand):
+                try:
+                    found.append(float(m.group(1).replace(",", "").replace(" ", "")))
+                except ValueError:
+                    pass
+            if found:
+                break
+    return max(found) if found else None
+
+
+# Which card detail a form box asks for, from its label / placeholder (2026-10-05 decathlon.sg: the card number, expiry and
+# CVC were all typed into the card-number box, because the other two boxes were not in the snapshot).
+_CARD_BOX = {
+    "number": re.compile(r"card ?number|card no|number on (the )?card|卡号|カード番号|^\s*number\s*$|1234 5678", re.I),
+    "expiry": re.compile(r"expir|valid (thru|until)|mm ?/ ?yy|有效期|到期|有効期限", re.I),
+    "cvc": re.compile(r"\bcv[cv2]\b|security code|card code|安全码|验证码|セキュリティコード", re.I),
+    "holder": re.compile(r"name on (the )?card|card ?holder|holder name|持卡人|名义|カード名義", re.I),
+}
+
+
+def card_box_mismatch(field: str, name: str) -> str:
+    """The card detail this box is for, when it is clearly a different one than `field` ("" when it fits or is unclear)."""
+    label = str(name or "")
+    if field not in _CARD_BOX or not label.strip():
+        return ""
+    if _CARD_BOX[field].search(label):
+        return ""
+    for kind, rx in _CARD_BOX.items():
+        if kind != field and rx.search(label):
+            return kind
+    return ""

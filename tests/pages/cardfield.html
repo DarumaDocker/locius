@@ -1,0 +1,8 @@
+<!doctype html><html><body><input id="v" data-ok="no">
+<script>
+const q = new URLSearchParams(location.search), v = document.getElementById('v');
+v.setAttribute('aria-label', q.get('f')); if (q.get('ph')) v.placeholder = q.get('ph');
+let keys = 0;  // like Adyen: only key-by-key typing counts
+v.addEventListener('keydown', () => keys++);
+v.addEventListener('input', () => { v.dataset.ok = keys >= v.value.replace(/\D/g, '').length && v.value.length > 1 ? 'yes:' + v.value : 'no'; });
+</script></body></html>

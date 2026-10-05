@@ -68,9 +68,28 @@
       for (const e of cells) { let a = e.parentElement, inner = false; for (let k = 0; a && k < 4; k++, a = a.parentElement) { if (cells.includes(a)) { inner = true; break; } } if (!inner) DAYS.add(e); }
     }
   } catch (e) {}
-  const isInteractive = el => { try { return el.matches(INTERACTIVE) || DAYS.has(el); } catch (e) { return false; } };
+  // Clickable text built from plain <div>/<span> with a click handler (2026-10-05: decathlon.sg checkout's "+ Add Address"
+  // had no ref, so the agent had to ask the user to take over): short text where the pointer cursor starts, with no
+  // interactive element inside or around it.
+  const POINTERS = new Set();
+  try {
+    const cands = deepAll('div,span,li,p,label').filter(e => !e.closest(INTERACTIVE)).slice(0, 6000);
+    for (const e of cands) {
+      if (POINTERS.size >= 60) break;
+      const t = (e.innerText || '').trim();
+      if (t.length < 2 || t.length > 40 || t.includes('\n')) continue;
+      const cs = getComputedStyle(e);
+      if (cs.cursor !== 'pointer') continue;
+      const par = e.parentElement;
+      if (par && getComputedStyle(par).cursor === 'pointer' && (par.innerText || '').trim() === t) continue;   // outermost of the same text
+      if (e.querySelector(INTERACTIVE) || !visible(e)) continue;
+      POINTERS.add(e);
+    }
+  } catch (e) {}
+  const isInteractive = el => { try { return el.matches(INTERACTIVE) || DAYS.has(el) || POINTERS.has(el); } catch (e) { return false; } };
   const roleOf = el => {
     if (DAYS.has(el)) return 'day';
+    if (POINTERS.has(el)) return 'button';
     const r = el.getAttribute('role');
     if (r) return r;
     const t = el.tagName;

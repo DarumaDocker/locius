@@ -66,6 +66,13 @@ with sync_playwright() as p:
     pg.wait_for_timeout(1500)
     st = state()
     check("Take over takes over the selected chat", st.get("mode") == "user" and st.get("takeover_task") == b, st)
+    # typing right after clicking "Take over" (focus still on the button) reaches the page (2026-10-05: keys vanished)
+    sent = []
+    pg.on("request", lambda r: sent.append(r.post_data or "") if r.url.endswith("/browser/input") else None)
+    pg.keyboard.type("ab")
+    pg.wait_for_timeout(1200)
+    check("keys typed after Take over are sent to the page", any('"text"' in x and "a" in x for x in sent),
+          (sent, pg.evaluate("document.activeElement && document.activeElement.className")))
     r = c.post(B + "/sentinel/api/browser/takeover", json={"task_id": a}, headers=H)
     check("taking over a second chat while one is taken over is refused", r.status_code >= 400 and "hand back" in r.text, (r.status_code, r.text[:200]))
     dis = pg.eval_on_selector_all(".breq button", "els => els.map(e => [e.textContent, e.disabled])")

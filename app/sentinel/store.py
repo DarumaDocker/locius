@@ -24,6 +24,9 @@ CREATE TABLE IF NOT EXISTS grants (
 CREATE TABLE IF NOT EXISTS task_ctx (
   task_id TEXT PRIMARY KEY, taint TEXT, injection TEXT, domains TEXT, updated_at REAL
 );
+CREATE TABLE IF NOT EXISTS purchases (
+    id TEXT PRIMARY KEY, task_id TEXT, domain TEXT, card_item TEXT, max_total REAL, currency TEXT, summary TEXT,
+    clicks_left INTEGER, fills_left INTEGER, created_at REAL, expires_at REAL, status TEXT);
 CREATE TABLE IF NOT EXISTS user_requests (
   task_id TEXT PRIMARY KEY, text TEXT, created_at REAL
 );
@@ -204,6 +207,36 @@ class Store:
         self.db.execute("INSERT OR REPLACE INTO task_ctx(task_id, taint, injection, domains, updated_at) VALUES (?,?,?,?,?)",
                         (task_id or "", ctx["taint"], dumps(ctx["injection"]), dumps(ctx["domains"]), now_ts()))
         return ctx
+
+    # ------------------------------------------------------------ one-card purchase confirmations
+    def add_purchase(self, task_id: str, domain: str, card_item: str, max_total: float, currency: str, summary: dict,
+                     ttl: float = 1800, clicks: int = 10, fills: int = 12) -> str:
+        pid = new_id("buy")
+        self.db.insert("purchases", {
+            "id": pid, "task_id": task_id or "", "domain": domain, "card_item": card_item or "", "max_total": float(max_total),
+            "currency": currency or "", "summary": dumps(summary or {}), "clicks_left": clicks, "fills_left": fills,
+            "created_at": now_ts(), "expires_at": now_ts() + ttl, "status": "active"})
+        return pid
+
+    def active_purchase(self, task_id: str, domain: str) -> dict | None:
+        if not task_id or not domain:
+            return None
+        rows = self.db.all("SELECT * FROM purchases WHERE task_id=? AND status='active' ORDER BY created_at DESC", (task_id,))
+        for r in rows:
+            if r["expires_at"] < now_ts():
+                continue
+            d = r["domain"]
+            if domain == d or domain.endswith("." + d) or d.endswith("." + domain):
+                r["summary"] = loads(r["summary"], {})
+                return r
+        return None
+
+    def use_purchase(self, pid: str, kind: str) -> None:
+        col = "fills_left" if kind == "fill" else "clicks_left"
+        self.db.execute(f"UPDATE purchases SET {col}={col}-1 WHERE id=?", (pid,))
+
+    def end_purchase(self, pid: str, status: str = "used") -> None:
+        self.db.execute("UPDATE purchases SET status=? WHERE id=?", (status, pid))
 
     # ------------------------------------------------------------ grants
     def add_grant(self, tool: str, scope: str, task_id: str | None, match: dict | None, ttl: float | None,
