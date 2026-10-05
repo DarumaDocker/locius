@@ -778,5 +778,14 @@ window.OMUSE_EN = {
 "🙋 {0} 个任务在等你接管，见下方列表，每个任务有自己的「接管」按钮": "🙋 {0} tasks are waiting for you to take over; each one in the list below has its own Take over button",
 "🖐 接管「{0}」": "🖐 Take over “{0}”",
 "↩ 交还「{0}」给 Agent": "↩ Hand “{0}” back to the agent",
-"任务标签页 task tabs": "Task tabs"
+"任务标签页 task tabs": "Task tabs",
+"💳 管理订阅 Manage subscription": "💳 Manage subscription",
+"在 Stripe 的页面上取消或续订这台 OMuse 的订阅。": "Cancel or renew the subscription for this OMuse on Stripe's page.",
+"打开订阅页面 Open subscription page": "Open subscription page",
+"订阅已取消。": "The subscription is cancelled.",
+"订阅已设为到期取消，{0} 结束。": "The subscription is set to cancel and ends on {0}.",
+"订阅已设为到期取消。": "The subscription is set to cancel at the end of the period.",
+"订阅生效中，{0} 续订。": "The subscription is active and renews on {0}.",
+"订阅生效中。": "The subscription is active.",
+"订阅状态：{0}": "Subscription status: {0}"
 };

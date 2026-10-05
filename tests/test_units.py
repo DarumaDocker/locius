@@ -1410,3 +1410,18 @@ def test_money_answers_without_calculate_are_checked():
     assert ungrounded_numbers([{"role": "user", "content": "东京天气"}], "最高 23.5 度", "东京天气") == []
     assert self_corrects("…实际折扣 10.5 超过 10？不对：封顶生效。等一下，这里需要修正")
     assert not self_corrects("顺序 B 更便宜，最终 S$90.25。")
+
+
+def test_subscription_needs_all_three_stripe_vars(monkeypatch):
+    from app.sentinel import billing
+    names = ("OMUSE_STRIPE_API_KEY", "OMUSE_STRIPE_CUSTOMER_ID", "OMUSE_STRIPE_SUBSCRIPTION_ID")
+    for n in names:
+        monkeypatch.delenv(n, raising=False)
+    assert billing.config() is None
+    for missing in names:                                             # any two of three: still off
+        for n in names:
+            monkeypatch.setenv(n, "" if n == missing else "x")
+        assert billing.config() is None, missing
+    for n, v in zip(names, ("sk_test_1 ", "cus_1", "sub_1")):
+        monkeypatch.setenv(n, v)
+    assert billing.config() == {"api_key": "sk_test_1", "customer": "cus_1", "subscription": "sub_1"}

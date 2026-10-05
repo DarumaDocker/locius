@@ -89,6 +89,7 @@ Docker reads the file when the container is created: after editing it, `docker r
 | `TZ` | Default timezone (a value saved in Settings wins) |
 | `TELEGRAM_BOT=0`, `VOICE_PORT=0` | Turn off the Telegram bot / the phone port |
 | `BROWSER_HEADLESS=1` | Run the browser headless instead of on the virtual display |
+| `OMUSE_STRIPE_API_KEY`, `OMUSE_STRIPE_CUSTOMER_ID`, `OMUSE_STRIPE_SUBSCRIPTION_ID` | Optional. With all three set, Settings ends with a "Manage subscription" section that opens the Stripe customer portal |
 
 Everything else (connections, vault, language, limits) is set in the web UI and stored in the volume.
 

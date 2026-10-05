@@ -1909,6 +1909,23 @@ async function viewSettings(root) {
     await api('settings', { method: 'PUT', body }); toast(T('已保存 Saved')); refreshModelChip();
     if (body.language && body.language !== LANG) { try { localStorage.setItem('omuse_lang', body.language); } catch (e) { /* ignore */ } location.reload(); }
   }) }, T('保存设置 Save settings'))));
+  // hosted installs only (the three OMUSE_STRIPE_* variables): the last section of Settings
+  const sub = await sapi('subscription').catch(() => null);
+  if (sub && sub.enabled) root.append(subscriptionCard(sub));
+}
+
+function subscriptionCard(sub) {
+  const day = sub.current_period_end ? new Date(sub.current_period_end * 1000).toLocaleDateString() : '';
+  const state = sub.error ? '' : !sub.status ? '' : sub.status === 'canceled' ? T('订阅已取消。')
+    : sub.cancel_at_period_end ? (day ? Tf("订阅已设为到期取消，{0} 结束。", day) : T('订阅已设为到期取消。'))
+    : ['active', 'trialing'].includes(sub.status) ? (day ? Tf("订阅生效中，{0} 续订。", day) : T('订阅生效中。'))
+    : Tf("订阅状态：{0}", sub.status);
+  return h('div', { class: 'card stack', id: 'subscription', style: 'margin-top:16px' }, h('h3', null, T('💳 管理订阅 Manage subscription')),
+    h('p', { class: 'sub' }, T('在 Stripe 的页面上取消或续订这台 OMuse 的订阅。')),
+    state ? h('p', { class: 'small', id: 'subscriptionState' }, state) : null,
+    h('div', { class: 'row' }, h('button', { class: 'btn', onclick: safe(async () => {
+      const r = await sapi('subscription/portal', { method: 'POST', body: {} }); location.href = r.url;
+    }) }, T('打开订阅页面 Open subscription page'))));
 }
 
 function langField(s, f) {
