@@ -1410,3 +1410,54 @@ def test_money_answers_without_calculate_are_checked():
     assert ungrounded_numbers([{"role": "user", "content": "东京天气"}], "最高 23.5 度", "东京天气") == []
     assert self_corrects("…实际折扣 10.5 超过 10？不对：封顶生效。等一下，这里需要修正")
     assert not self_corrects("顺序 B 更便宜，最终 S$90.25。")
+
+
+def test_order_changes_need_their_own_approval(store):
+    # 2026-10-05: "能否把这个订单给取消了？" -> OMuse clicked "Request cancellation" on an Amazon order, no approval
+    from app.sentinel.guard import order_change_click as oc
+    assert oc("Request cancellation") and oc("Cancel items") and oc("取消订单") and oc("Return items") and oc("申请退款")
+    assert not oc("Cancel") and not oc("取消") and not oc("Continue shopping")
+    store.add_grant("browser_click", "PERMANENT", None, {"destination": "amazon.sg"}, None)
+    store.set_user_request("tc", "能否把这个订单给取消了？帮忙把这处理一下")
+    page = {"url": "https://www.amazon.sg/progress-tracker/package/preship/cancel-items", "title": "Cancel items 503-4373109"}
+    btn = {"tag": "input", "role": "button", "name": "Request cancellation", "input_type": "submit", "in_form": True}
+    d = decide(store, "browser_click", {"ref": "e62"}, "tc", elem=btn, page=page)
+    assert d.decision == ASK and not d.grant_id, d
+
+
+def test_checkout_details_and_cart_edits_are_not_payments(store):
+    # 2026-10-05 decathlon.sg: "Save Address" asked for a money approval twice; "Remove" in the cart needed approval
+    from app.sentinel.guard import money_click as m
+    co = "https://www.decathlon.sg/checkout/48b560a0"
+    assert not m("Save Address", "submit", co) and not m("+ Add Address", "", co) and not m("Select store", "submit", co)
+    assert not m("Apply", "submit", co) and not m("保存地址", "submit", co)
+    assert m("Place Order", "submit", co) and m("Pay now", "submit", co) and m("Next Step", "submit", co)
+    rm = {"tag": "button", "role": "button", "name": "Remove", "input_type": "", "in_form": False}
+    assert decide(store, "browser_click", {"ref": "e20"}, "tr", elem=rm, page={"url": "https://www.decathlon.sg/cart"}).decision == ALLOW
+    assert decide(store, "browser_click", {"ref": "e20"}, "tr", elem=rm, page={"url": "https://mail.example/inbox"}).decision == ASK
+
+
+def test_followup_sees_what_a_cancelled_task_did(tmp_path):
+    # 2026-10-05: the decathlon.sg order test was cancelled at "pick a store"; the follow-up "刚才这个操作…能否取消"
+    # had no record of it and went to Amazon instead
+    from app.runtime.agent import Runtime
+    from app.runtime.store import RStore
+    st = RStore(str(tmp_path))
+    cid = st.create_conv("t") if hasattr(st, "create_conv") else "conv_1"
+    t1 = st.create_task("在 Decathlon 新加坡官网（decathlon.sg）真实下单买一件小东西", cid)
+    tid1 = t1 if isinstance(t1, str) else t1["id"]
+    st.add_msg(cid, "user", "在 Decathlon 新加坡官网（decathlon.sg）真实下单买一件小东西", task_id=tid1)
+    st.add_event(tid1, "tool_call", {"name": "browser_navigate", "args": {"url": "https://www.decathlon.sg/cart"}})
+    st.add_event(tid1, "waiting", {"type": "approval", "approval_id": "a1", "summary": {"fields": [["元素 Element", "button 「Proceed to Checkout」"]]}})
+    st.add_event(tid1, "approval_resolved", {"approval_id": "a1", "decision": "approved"})
+    st.add_event(tid1, "waiting", {"type": "takeover_requested", "reason": "请选择取货门店"})
+    st.update_task(tid1, status="CANCELLED")
+    t2 = st.create_task("刚才这个操作，能否把这个订单给取消了？", cid)
+    tid2 = t2 if isinstance(t2, str) else t2["id"]
+    st.add_msg(cid, "user", "刚才这个操作，能否把这个订单给取消了？", task_id=tid2)
+    rt = Runtime.__new__(Runtime)
+    rt.store = st
+    hist, txt = rt._history(cid, tid2)
+    blob = "\n".join(m["content"] for m in hist)
+    assert "decathlon.sg" in blob and "CANCELLED" in blob and "Proceed to Checkout" in blob and "选择取货门店" in blob
+    assert "Card details entered from the vault: no" in blob

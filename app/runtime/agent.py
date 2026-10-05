@@ -893,8 +893,63 @@ class Runtime:
             self.start(t["id"])
 
     # ================================================================ the loop
+    def _task_digest(self, task: dict) -> str:
+        """What an earlier task in this conversation actually did, for a follow-up message (2026-10-05: after a cancelled
+        decathlon.sg order test, "刚才这个操作…能否把这个订单取消" was taken to mean an Amazon order, because the cancelled
+        task had left no reply in the chat)."""
+        evs = self.store.events(task["id"])
+        sites, approvals, fills, last_wait = [], [], 0, ""
+        pending = {}
+        for e in evs:
+            d = e.get("data") or {}
+            if e["type"] == "tool_call":
+                a = d.get("args") or {}
+                if d.get("name") == "browser_navigate" and a.get("url"):
+                    dom = re.sub(r"^www\.", "", urlparse(str(a["url"])).netloc)
+                    if dom and dom not in sites:
+                        sites.append(dom)
+                if d.get("name") == "browser_fill_secret":
+                    fills += 1
+            elif e["type"] == "waiting":
+                w = d if isinstance(d, dict) else {}
+                summ = w.get("summary") or {}
+                el = next((v for k, v in (summ.get("fields") or []) if "Element" in k or "元素" in k), "")
+                if w.get("approval_id"):
+                    pending[w["approval_id"]] = el or summ.get("title") or w.get("tool", "")
+                last_wait = str(w.get("reason") or el or "")[:200]
+            elif e["type"] == "approval_resolved":
+                lab = pending.get(d.get("approval_id"), "")
+                if lab:
+                    approvals.append(f"{lab} → {d.get('decision')}")
+        steps = [f"{st.get('status')}: {st.get('description')}" for st in (task.get("plan") or {}).get("steps", [])][:8]
+        parts = [f"[Earlier task in this chat — status {task['status']}] {truncate(task['goal'], 300)}"]
+        if sites:
+            parts.append("Sites used: " + ", ".join(sites[:6]))
+        if steps:
+            parts.append("Plan: " + " | ".join(truncate(x, 120) for x in steps))
+        if approvals:
+            parts.append("Approvals: " + "; ".join(approvals[-8:]))
+        parts.append("Card details entered from the vault: " + ("yes" if fills else "no"))
+        if task["status"] != "COMPLETED" and last_wait:
+            parts.append("Stopped at: " + last_wait)
+        if task.get("result"):
+            parts.append("Result: " + truncate(task["result"], 600))
+        return "\n".join(parts)
+
     def _history(self, conv_id: str, exclude_task: str) -> tuple[list[dict], str]:
         msgs = [m for m in self.store.msgs(conv_id, 30) if m["task_id"] != exclude_task or m["role"] != "user"]
+        try:   # tasks that ended without a reply (cancelled, failed, still waiting) get a digest of what they did
+            answered = {m["task_id"] for m in msgs if m["role"] == "assistant" and m.get("task_id")}
+            tasks = {t["id"]: t for t in self.store.tasks(conv_id=conv_id, limit=10) if t["id"] != exclude_task}
+            out = []
+            for m in msgs:
+                out.append(m)
+                tid = m.get("task_id")
+                if m["role"] == "user" and tid in tasks and tid not in answered:
+                    out.append({"role": "assistant", "content": self._task_digest(tasks[tid]), "task_id": tid, "meta": {}})
+            msgs = out
+        except Exception:
+            pass
         hist, lines = [], []
         for m in msgs[-12:]:
             if m["role"] not in ("user", "assistant"):

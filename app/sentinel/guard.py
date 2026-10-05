@@ -262,8 +262,35 @@ _MONEY_CLICK = re.compile(
 _MONEY_URL = re.compile(r"/(checkout|buy|payment|pay|billing|cart/checkout|order/confirm|subscribe|upgrade)\b", re.I)
 
 
+# Steps inside a checkout that only enter or pick details (2026-10-05 decathlon.sg: "Save Address" asked for money
+# approval twice, because any submit button on a /checkout page counted as paying).
+_CHECKOUT_DETAIL = re.compile(
+    r"^\s*(\+\s*)?(save|add|edit|change|update|use this|select|choose|confirm)( new| this| my)?\s*"
+    r"(address|delivery address|shipping address|billing address|contact( details)?|phone|details|store|pick-?up (point|store|location)|"
+    r"collection point|location|outlet)\s*$|^\s*apply( (voucher|coupon|promo( code)?|code))?\s*$|"
+    r"^\s*remove (voucher|coupon|promo( code)?|code)\s*$|"
+    r"^\s*(保存|添加|新增|修改|编辑|选择|确认)(收货|送货|配送|账单)?(地址|门店|自取点|取货点|联系方式)\s*$", re.I)
+_CART_EDIT = re.compile(r"^\s*(remove|delete|remove item|delete item|移除|删除|删掉)\s*$", re.I)
+
+# Clicks that cancel / return / refund an existing order or booking: they cannot be taken back, so they are approved one by
+# one like payments, never skipped because the user's message contains "取消" (2026-10-05: a follow-up "能否把这个订单
+# 取消" made OMuse open Amazon and click "Request cancellation" on a different order than the one the user meant).
+_ORDER_CHANGE = re.compile(
+    r"request cancel(l)?ation|cancel(l)?ation|cancel (this |my |the )?(items?|selected( items)?|order|booking|reservation|ticket|"
+    r"subscription|plan|membership|request|delivery)|return (items?|order|this)|request (a )?(refund|return)|start (a )?return|refund|"
+    r"取消订单|取消预订|取消预约|申请取消|取消商品|取消所选|退货|退款|退订|申请退|"
+    r"キャンセル|返品|返金", re.I)
+
+
+def order_change_click(name: str) -> bool:
+    label = re.sub(r"\s+", " ", str(name or "")).strip()
+    return bool(label) and len(label) <= 80 and bool(_ORDER_CHANGE.search(label))
+
+
 def money_click(name: str, input_type: str = "", page_url: str = "") -> bool:
     label = str(name or "")
+    if _CHECKOUT_DETAIL.search(label.strip()):
+        return False
     if _MONEY_CLICK.search(label):
         return True
     # any submit button on a checkout / payment page
@@ -281,6 +308,8 @@ def click_is_risky(role: str, name: str, input_type: str = "") -> bool:
         # a whole product / listing card is one link: judge it by its first line, like a person reading the title
         label = label.strip().split("\n")[0][:80]
     if _CART_ADD.search(label) or _COOKIE_DECLINE.search(label):
+        return False
+    if _CHECKOUT_DETAIL.search(label.strip()):
         return False
     if (input_type or "").lower() == "submit":
         # a form that only shows data ("Display", "Show rates", "Calculate") submits nothing of the user's

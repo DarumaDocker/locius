@@ -1,6 +1,7 @@
 """Policy engine: ALLOW / DENY / ASK_USER for every proposed action."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from urllib.parse import unquote, urlparse
 
@@ -135,7 +136,12 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
         risk = _bump(risk, "high")
         reasons.append("无法确认这个位置上是什么元素 (can't tell what is at this position)")
     per_use = False
-    if tool in ("browser_click", "browser_click_at") and elem and guard.money_click(
+    if tool in ("browser_click", "browser_click_at") and elem and guard.order_change_click(elem.get("name", "")):
+        risk = _bump(risk, "high")
+        per_use = True
+        reasons.append(f"「{elem.get('name', '')}」会取消/退掉一个订单或预订，撤不回来：每次都要你单独批准，请先核对页面上的订单号 "
+                       f"(changes an order — approved one by one; check the order number on this page: {(page or {}).get('title', '')})")
+    if tool in ("browser_click", "browser_click_at") and elem and not per_use and guard.money_click(
             elem.get("name", ""), elem.get("input_type", ""), (page or {}).get("url", "")):
         risk = _bump(risk, "high")
         per_use = True
@@ -144,7 +150,9 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
     if tool in ("browser_click", "browser_click_at") and elem and not per_use:
         # a <button> reports type "submit" by default; outside a <form> it submits nothing (chat launchers, menus)
         itype = elem.get("input_type", "") if elem.get("in_form", True) else ""
-        if guard.click_is_risky(elem.get("role", ""), elem.get("name", ""), itype) and \
+        cart_edit = guard._CART_EDIT.search(str(elem.get("name", ""))) and \
+            re.search(r"/(cart|basket|bag|trolley)\b", str((page or {}).get("url", "")), re.I)
+        if not cart_edit and guard.click_is_risky(elem.get("role", ""), elem.get("name", ""), itype) and \
                 not guard.user_named_click(store.user_request(task_id), elem.get("name", "")):
             risk = _bump(risk, "high")
             reasons.append(f"点击的按钮「{elem.get('name', '')}」可能提交/购买/发送/删除 (consequential click)")
