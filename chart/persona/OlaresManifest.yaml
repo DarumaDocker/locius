@@ -71,11 +71,11 @@ spec:
 
     Runs on the local models served by your Olares by default — any OpenAI-compatible endpoint works. English and 中文 interface.
   upgradeDescription: |
+    0.2.60: A cut-off reply no longer ends a task; a new search can be typed into the same search box; shop search falls back to a site: web search
     0.2.59: Unsent drafts in a mail thread are clearly marked so they are never reported as sent replies
     0.2.58: Flight codes in travel answers are checked against sources; long file writes are split into parts; English prompts cleaned up
     0.2.57: Fewer needless approvals (read-only buttons like Display, searches on a site you named); after a suspected prompt injection, links carrying data need approval even on the same site
     0.2.56: One site search per turn, your own emails' dates beat web info, thorough 'what went wrong' sweeps, goals can be deleted
-    0.2.55: Payments are approved one by one: buttons that spend money (place order, checkout, pay, subscribe…) always ask and are never covered by a standing 'always allow' grant
   developer: Lucas Lu
   website: https://github.com/Drlucaslu/locius
   sourceCode: https://github.com/Drlucaslu/locius

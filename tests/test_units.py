@@ -1354,3 +1354,25 @@ def test_docker_gate_basic_auth():
     assert status("/internalx")[0] == 401
     with pytest.raises(ValueError):
         BasicAuthGate(inner, "omuse", "")
+
+
+def test_cut_off_final_detects_fragments():
+    from app.runtime.agent import cut_off_final
+    assert cut_off_final('Sheng Siong 搜索"gard')                       # 2026-10-05 S1-04
+    assert cut_off_final("x" * 300, "length")
+    assert cut_off_final("我继续查下一个商品", open_steps=2)
+    assert not cut_off_final("我继续查下一个商品", open_steps=0)
+    assert not cut_off_final("已完成，总价 S$42.10。")
+    assert not cut_off_final("## 结果\n\n| 店 | 价格 |\n|---|---|\n| A | S$1 |" + " " * 80)
+
+
+def test_retype_guard_allows_new_search_in_same_box():
+    from app.runtime.agent import retype_guard
+    tr = [{"role": "assistant", "tool_calls": [
+        {"id": "c1", "function": {"name": "browser_type", "arguments": json.dumps({"ref": "e2", "text": "Meiji Fresh Milk 2L", "submit": True})}},
+        {"id": "c2", "function": {"name": "browser_type", "arguments": json.dumps({"ref": "e2", "text": "Meiji milk", "submit": True})}}]}]
+    assert retype_guard(tr, {"id": "c2", "name": "browser_type", "args": {"ref": "e2", "text": "Meiji milk", "submit": True}}) is None
+    tr2 = [{"role": "assistant", "tool_calls": [
+        {"id": "c1", "function": {"name": "browser_type", "arguments": json.dumps({"ref": "e2", "text": "Lucas"})}},
+        {"id": "c2", "function": {"name": "browser_type", "arguments": json.dumps({"ref": "e2", "text": "Lu"})}}]}]
+    assert retype_guard(tr2, {"id": "c2", "name": "browser_type", "args": {"ref": "e2", "text": "Lu"}})

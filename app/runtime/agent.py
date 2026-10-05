@@ -98,6 +98,8 @@ def retype_guard(transcript: list[dict], call: dict) -> str | None:
         if nm == "browser_click" and a.get("submit"):
             return None
         if nm == "browser_type" and str(a.get("ref") or "") == ref:
+            if a.get("submit"):   # a search box: typing a new query after a submitted one is a new search
+                return None
             old = str(a.get("text") or "")
             if old and old != text:
                 return (f"ERROR: 没有执行 — 你刚才已经在 {ref} 里输入了「{old[:40]}」，再输入「{text[:40]}」会把它覆盖掉。"
@@ -107,6 +109,21 @@ def retype_guard(transcript: list[dict], call: dict) -> str | None:
                         "If you really want to replace it, call browser_type again with replace=true.")
             return None
     return None
+
+
+def cut_off_final(text: str, finish_reason: str | None = None, open_steps: int = 0) -> bool:
+    """A 'final answer' that is really a cut-off fragment (2026-10-05 S1-04: the whole answer was 'Sheng Siong 搜索"gard'
+    after 27 steps of price lookups). Such text must not end the task."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if finish_reason == "length":
+        return True
+    if len(t) >= 80:
+        return False
+    unbalanced = t.count('"') % 2 == 1 or t.count("「") > t.count("」") or t.count("“") > t.count("”") or t.count("(") > t.count(")")
+    ends = t[-1] in "。.!！?？)）」】”\"*|`~>:：…" or t.endswith("...")
+    return unbalanced or (not ends and open_steps > 0)
 
 
 def search_alternatives(q: str) -> list[str]:
@@ -1123,6 +1140,7 @@ class Runtime:
         gave_up = False    # set when the agent keeps going round in circles: it must answer now, without tools
         searched: dict[str, str] = {}   # normalised browser_search query -> first call id (whole task)
         nudged = False
+        cut_nudged = False
         numbers_checked = False
         ctx_retries = 0
         while True:
@@ -1273,6 +1291,18 @@ class Runtime:
                         "already have enough." + ("\n" + dead if dead else ""))})
                 continue
             final = resp["content"]
+            open_steps = sum(1 for st in (t["plan"] or {}).get("steps", []) if st.get("status") in ("pending", "running"))
+            if final and not cut_nudged and not force_final and steps < max_steps - 1 \
+                    and cut_off_final(final, resp.get("finish_reason"), open_steps):
+                cut_nudged = True
+                await self.event(task_id, "cut_off_answer", {"text": truncate(final, 200)})
+                transcript.append({"role": "assistant", "content": final})
+                transcript.append({"role": "user", "content": prompts.L(
+                    agent_lang(s), "（系统）你刚才的回复被截断了，只有半句话。任务还没完成的话就继续用工具做完；"
+                                   "已经做完了就把完整的最终回答重新写一遍（包括前面查到的所有结果）。",
+                    "(System) Your last reply was cut off mid-sentence. If the task is not finished, keep going with tools; "
+                    "if it is, write the complete final answer again (including everything you found).")})
+                continue
             if not final and not nudged:
                 nudged = True
                 transcript.append({"role": "user", "content": prompts.L(
