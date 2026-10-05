@@ -344,6 +344,15 @@ async def internal_expire_approvals(req: Request):
         store.audit("sentinel", "approval.expire", task_id=tid, resource=ap["tool"], risk=ap["risk"], decision=DENY,
                     result="expired", detail={"approval_id": ap["id"], "reason": reason})
         n += 1
+    # a cancelled task can't use the browser any more: end a takeover of its page, or the browser view stays in
+    # "you are in control" with nothing to hand back to (2026-10-05)
+    try:
+        bst = await actions.broker("GET", "/state", timeout=5)
+        if bst.get("mode") == "user" and bst.get("takeover_task") == tid:
+            await actions.broker("POST", "/user/release", {}, timeout=10)
+            store.audit("sentinel", "browser.release", task_id=tid, result="success", detail={"reason": "task ended"})
+    except Exception:
+        pass
     return {"expired": n}
 
 

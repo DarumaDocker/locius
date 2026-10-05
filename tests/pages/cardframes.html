@@ -1,0 +1,12 @@
+<!doctype html><html><head><title>Pay</title></head><body>
+<h1>Payment</h1><p>Order total S$6.80</p>
+<!-- trackers / captcha frames first, like a real checkout -->
+<iframe src="about:blank"></iframe><iframe src="about:blank"></iframe><iframe src="about:blank"></iframe>
+<iframe srcdoc="<p>ads</p>"></iframe><iframe srcdoc="<p>chat</p>"></iframe><iframe src="about:blank"></iframe>
+<iframe src="about:blank"></iframe><iframe srcdoc="<p>captcha</p>"></iframe>
+<label>Name on card <input id="holder" aria-label="Name on card"></label>
+<iframe id="n" src="cardfield.html?f=Card%20number"></iframe>
+<iframe id="e" src="cardfield.html?f=Expiry%20date&ph=MM/YY"></iframe>
+<iframe id="c" src="cardfield.html?f=Security%20code"></iframe>
+<button onclick="document.getElementById('r').textContent=[...document.querySelectorAll('iframe[src^=cardfield]')].map(f=>f.contentDocument.getElementById('v').dataset.ok).join(',')">Pay</button>
+<p id="r"></p></body></html>

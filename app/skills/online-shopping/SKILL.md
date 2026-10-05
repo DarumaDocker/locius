@@ -48,12 +48,17 @@ description: 网购：搜索商品、用视觉挑选、加入购物车（不结�
      common format (Singapore: "88478582", "8847 8582", "+65 88478582"; a separate country-code box → "+65" there and 8 digits
      in the number box). Once a format is accepted, memory_remember "<site> accepts the phone number as …".
    - Go through checkout up to the page that shows the final total (items + shipping + tax) and the delivery address.
+     "Proceed to checkout", "Next step" and "Continue to payment" only move between pages and need no approval; do not
+     stop to ask the user about them.
    - Then call **purchase_confirm ONCE**: site, items (name, qty, price as shown), shipping, total, currency, delivery
      ("Home delivery to <address>, <ETA>"), card_item_id (vault_list → the card the user keeps for shopping). The user
      approves this one card; after that, the card fills (browser_fill_secret, one call per field) and the Place order / Pay
      click on that site go through without more approvals for 30 minutes, as long as the page total stays within it.
    - If the total, the item, the card or the site changes, call purchase_confirm again. A card form inside a payment
-     iframe: snapshot shows its fields with refs like f1e3 — fill those.
+     iframe: snapshot shows its fields with refs like f1e3 — fill those. Payment pages (Adyen, Stripe) put EACH card box in
+     its own iframe: the number in one (e.g. f9e1), the expiry in the next (f10e1), the CVC in another (f11e1). Fill each
+     detail into its own box — never two details into one box; if a box is missing, browser_snapshot again or
+     browser_find("Expiry date") before asking the user to take over.
    - After the order: read the confirmation page and report the order number, items, total and delivery date.
 9. **Final answer**: product title, price, seller/rating, link, and "added to cart ✓ (not checked out)"; mention anything uncertain.
 

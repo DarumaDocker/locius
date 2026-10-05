@@ -820,6 +820,7 @@ async function viewBrowser(root) {
     S.browserSel = tid || null;
     st = await sapi('browser/takeover', { method: 'POST', body: { task_id: tid } });
     toast(Tf("你已接管「{0}」的浏览器，这个任务已暂停", nameOf(tid)));
+    if (!isTouch()) trap.focus({ preventScroll: true });   // typing goes to the page right away (focus was on the button)
     refresh(true);
   };
   let urlDirty = false;
@@ -835,28 +836,42 @@ async function viewBrowser(root) {
   let st = {};
   // Inputs are sent strictly one after another (typing fast used to arrive out of order: "test" -> "tste").
   // Characters typed while a request is in flight are merged into the next "text" event.
-  let queue = Promise.resolve(), buf = null, refreshTimer = null;
-  const send = async ev => {
-    try { await sapi('browser/input', { method: 'POST', body: ev }); } catch (e) { toast(e.message, true); }
+  // Scrolling makes dozens of wheel events a second: they are merged while one is on its way, and anything still queued
+  // is dropped once the takeover ended (2026-10-05: ~150 queued wheel events kept the user's clicks and keys waiting for
+  // seconds, then all failed with "take over first" after the hand-back).
+  let queue = Promise.resolve(), buf = null, wheel = null, refreshTimer = null, gen = 0;
+  const send = async (ev, g) => {
+    if (g !== gen || st.mode !== 'user') return;
+    try { await sapi('browser/input', { method: 'POST', body: ev }); }
+    catch (e) { if (/409|take over first|接管/.test(e.message)) { gen++; buf = wheel = null; refresh(true); } toast(e.message, true); }
     clearTimeout(refreshTimer); refreshTimer = setTimeout(() => refresh(true), 250);
   };
   function input(ev) {
     if (st.mode !== 'user') { toast(T('请先点击「接管 Take over」')); return queue; }
+    const g = gen;
+    if (ev.type === 'wheel') {
+      if (wheel) { wheel.dx += ev.dx; wheel.dy += ev.dy; wheel.x = ev.x; wheel.y = ev.y; return queue; }
+      const mine = wheel = { ...ev };
+      buf = null;
+      queue = queue.then(() => { if (wheel === mine) wheel = null; return send(mine, g); });
+      return queue;
+    }
+    wheel = null;
     if (ev.type === 'text') {
       if (!ev.text) return queue;
       if (!buf) {   // open a text batch at this point of the queue; later characters join it until it is sent
         const mine = buf = { text: '' };
-        queue = queue.then(() => { if (buf === mine) buf = null; return mine.text ? send({ type: 'text', text: mine.text }) : null; });
+        queue = queue.then(() => { if (buf === mine) buf = null; return mine.text ? send({ type: 'text', text: mine.text }, g) : null; });
       }
       buf.text += ev.text;
       return queue;
     }
     buf = null;     // characters typed after this key must be sent after it
-    queue = queue.then(() => send(ev));
+    queue = queue.then(() => send(ev, g));
     return queue;
   }
   takeBtn.onclick = safe(() => takeOver(S.browserSel));
-  relBtn.onclick = safe(async () => { const was = st.takeover_task; await sapi('browser/release', { method: 'POST', body: {} }); toast(Tf("已交还「{0}」，这个任务继续执行", nameOf(was))); refresh(true); });
+  relBtn.onclick = safe(async () => { const was = st.takeover_task; gen++; buf = wheel = null; await sapi('browser/release', { method: 'POST', body: {} }); toast(Tf("已交还「{0}」，这个任务继续执行", nameOf(was))); refresh(true); });
   const kbdState = () => {
     const on = document.activeElement === trap;
     wrap.classList.toggle('kbd-on', on && st.mode === 'user');
@@ -886,7 +901,9 @@ async function viewBrowser(root) {
     if (S.view !== 'browser') { document.removeEventListener('keydown', docKeys); return; }
     if (st.mode !== 'user' || e.isComposing || e.ctrlKey || e.metaKey || e.altKey) return;
     const ae = document.activeElement;
-    if (ae && ae !== document.body && ae !== trap) return;   // user is typing in the URL bar / text box etc.
+    // the user is typing in the URL bar / text box etc. (a focused button, e.g. "Take over" just clicked, does not count:
+    // keys typed then used to vanish)
+    if (ae && ae !== trap && (/^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName) || ae.isContentEditable)) return;
     if (ae === trap) return;
     trap.focus({ preventScroll: true });
     if (e.key.length === 1) { e.preventDefault(); input({ type: 'text', text: e.key }); }
@@ -894,7 +911,11 @@ async function viewBrowser(root) {
   };
   if (S.browserKeys) document.removeEventListener('keydown', S.browserKeys);
   S.browserKeys = docKeys; document.addEventListener('keydown', docKeys);
-  trap.addEventListener('input', () => { if (st.mode === 'user' && trap.value) { input({ type: 'text', text: trap.value }); trap.value = ''; } });
+  // Chinese / Japanese input methods: send the committed text once composition ends, not the pinyin letters in between
+  let composing = false;
+  trap.addEventListener('compositionstart', () => { composing = true; });
+  trap.addEventListener('compositionend', () => { composing = false; if (st.mode === 'user' && trap.value) { input({ type: 'text', text: trap.value }); trap.value = ''; } });
+  trap.addEventListener('input', e => { if (composing || e.isComposing) return; if (st.mode === 'user' && trap.value) { input({ type: 'text', text: trap.value }); trap.value = ''; } });
   let busy = false;
   async function refresh(force) {
     if (busy && !force) return; busy = true;

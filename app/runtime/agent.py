@@ -831,8 +831,9 @@ class Runtime:
         if t and t["status"] not in TERMINAL:
             await self.set_status(task_id, "CANCELLED", finished_at=now_ts(), **({"error": reason} if reason else {}))
             await self.event(task_id, "cancelled", {"reason": reason} if reason else {})
-            if t["status"] == "WAITING_APPROVAL":
+            if t["status"] in ("WAITING_APPROVAL", "WAITING_EXTERNAL", "PAUSED"):
                 # don't leave an orphan approval behind: approving it later would run an action for a dead task
+                # (Sentinel also ends a takeover of this task's page)
                 try:
                     await self.sentinel("POST", "/internal/expire_approvals",
                                         {"task_id": task_id, "reason": reason or "任务已取消 (task cancelled)"}, timeout=15)

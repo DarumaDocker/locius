@@ -568,7 +568,8 @@ async def _browser(store, tool: str, args: dict, task_id: str) -> dict:
         val = vault.value(store, str(args.get("item_id", "")), str(args.get("field", "")))
         if not val:
             raise ActionError("保险箱里没有这个内容 (vault value missing)", status="denied")
-        snap = await broker("POST", "/agent/type", {"task_id": task_id, "ref": args.get("ref", ""), "text": val}, timeout=90.0)
+        snap = await broker("POST", "/agent/type", {"task_id": task_id, "ref": args.get("ref", ""), "text": val, "keys": True,
+                                                     "expiry": str(args.get("field", "")) == "expiry"}, timeout=90.0)
         vault.mark_used(store, str(args.get("item_id", "")))
         vault.note_fill(task_id, snap.get("url", ""))
         out = vault.scrub(store, _snap_envelope(store, task_id, snap))

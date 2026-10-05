@@ -210,7 +210,7 @@ class Store:
 
     # ------------------------------------------------------------ one-card purchase confirmations
     def add_purchase(self, task_id: str, domain: str, card_item: str, max_total: float, currency: str, summary: dict,
-                     ttl: float = 1800, clicks: int = 10, fills: int = 6) -> str:
+                     ttl: float = 1800, clicks: int = 10, fills: int = 12) -> str:
         pid = new_id("buy")
         self.db.insert("purchases", {
             "id": pid, "task_id": task_id or "", "domain": domain, "card_item": card_item or "", "max_total": float(max_total),

@@ -123,7 +123,7 @@ def test_policy_grants(store):
 
 def test_policy_browser(store):
     page = {"url": "https://shop.com/cart", "title": "Cart"}
-    assert decide(store, "browser_click", {"ref": "e1"}, "t", elem={"name": "Checkout", "role": "button"}, page=page).decision == ASK
+    assert decide(store, "browser_click", {"ref": "e1"}, "t", elem={"name": "Buy now", "role": "button"}, page=page).decision == ASK
     assert decide(store, "browser_click", {"ref": "e1"}, "t", elem={"name": "Details", "role": "link"}, page=page).decision == ALLOW
     assert decide(store, "browser_type", {"ref": "e2", "text": "x"}, "t", elem={"input_type": "password"}, page=page).decision == DENY
     assert decide(store, "browser_type", {"ref": "e2", "text": "shoes", "submit": True}, "t",
@@ -1278,7 +1278,7 @@ def test_money_clicks_are_per_use():
     # 2026-10-04: a permanent click grant on amazon.sg let "Place your order" through
     from app.sentinel.guard import money_click as m
     assert m("Place your order", "submit", "https://www.amazon.sg/checkout/p/p-251")
-    assert m("Proceed to checkout", "submit", "https://www.amazon.sg/cart")
+    assert not m("Proceed to checkout", "submit", "https://www.amazon.sg/cart")
     assert m("Buy Now") and m("立即购买") and m("确认支付") and m("Subscribe")
     assert m("Continue", "submit", "https://shop.example/checkout/payment")
     assert not m("Add to Cart", "submit", "https://www.amazon.sg/dp/B0X")
@@ -1489,3 +1489,44 @@ def test_one_card_purchase_confirmation(store, monkeypatch):
     assert decide(store, "browser_click", {"ref": "e3"}, "tp", elem=cancel, page=page).decision == ASK    # never covered
     assert guard.page_total("Items total S$9.00\nDelivery S$4.99\nGrand Total S$13.99") == 13.99
     assert guard.page_total("no money here") is None
+
+
+def test_going_to_checkout_is_not_a_payment(store):
+    # 2026-10-05 decathlon.sg (Lucas): "Proceed to Checkout" and the "Next Step" buttons between checkout pages asked for
+    # their own approvals before the one purchase confirmation
+    from app.sentinel import guard
+    cart = {"url": "https://www.decathlon.sg/cart", "title": "My Cart", "text": ""}
+    co = {"url": "https://www.decathlon.sg/checkout/abc", "title": "Checkout", "text": ""}
+    for name in ("Proceed to Checkout", "Checkout", "Check out (1)", "去结算", "结算(2)", "Go to checkout"):
+        b = {"tag": "button", "role": "button", "name": name, "input_type": "submit", "in_form": True}
+        assert decide(store, "browser_click", {"ref": "e1"}, "tc", elem=b, page=cart).decision == ALLOW, name
+    for name in ("Buy now", "Place Order", "Pay now", "Proceed to payment and place order", "Checkout and pay"):
+        assert guard.money_click(name, "submit", cart["url"]), name
+    nxt = {"tag": "button", "role": "button", "name": "Next Step", "input_type": "submit", "in_form": True}
+    cont = dict(nxt, name="Continue to payment")
+    assert decide(store, "browser_click", {"ref": "e2"}, "tc", elem=nxt, page=co).decision == ALLOW
+    assert decide(store, "browser_click", {"ref": "e2"}, "tc", elem=cont, page=co).decision == ALLOW
+    # once a card detail has been filled, the same buttons can pay: approval (or a purchase confirmation) again
+    store.audit("sentinel", "browser_fill_secret", task_id="tc", resource="browser", result="success")
+    assert decide(store, "browser_click", {"ref": "e2"}, "tc", elem=nxt, page=co).decision == ASK
+
+
+def test_card_details_go_into_their_own_boxes(store, monkeypatch):
+    # 2026-10-05 decathlon.sg: card number, expiry and CVC were all typed into Adyen's card-number box
+    from app.sentinel import guard, vault
+    from app.browser.main import expiry_for_field as ex
+    assert guard.card_box_mismatch("expiry", "Card number") == "number"
+    assert guard.card_box_mismatch("cvc", "Card number 1234 5678 9012 3456") == "number"
+    assert guard.card_box_mismatch("number", "Card number") == "" and guard.card_box_mismatch("expiry", "Expiry date MM/YY") == ""
+    assert guard.card_box_mismatch("cvc", "Security code 3 digits") == "" and guard.card_box_mismatch("number", "") == ""
+    monkeypatch.setattr(vault, "item", lambda st, iid: {"id": iid, "label": "Visa", "fields": ["number", "expiry", "cvc", "holder"],
+                                                       "masked": "•••• 4242"})
+    page = {"url": "https://www.decathlon.sg/checkout/x", "title": "Checkout", "text": ""}
+    box = {"tag": "input", "role": "textbox", "name": "Card number", "input_type": "text", "in_form": True}
+    d = decide(store, "browser_fill_secret", {"ref": "f7e1", "item_id": "v1", "field": "expiry"}, "tw", elem=box, page=page)
+    assert d.decision == DENY and "iframe" in d.reason
+    store.add_purchase("tw", "decathlon.sg", "v1", 6.8, "SGD", {})
+    for f, name in (("holder", "Name on card"), ("number", "Card number"), ("expiry", "Expiry date"), ("cvc", "Security code")) * 2:
+        b = dict(box, name=name)
+        assert decide(store, "browser_fill_secret", {"ref": "f8e1", "item_id": "v1", "field": f}, "tw", elem=b, page=page).decision == ALLOW
+    assert ex("12/2028", "MM/YY") == "12/28" and ex("2028-12", "") == "12/28" and ex("12/28", "MM/YYYY") == "12/2028"

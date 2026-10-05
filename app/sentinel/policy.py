@@ -158,7 +158,9 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
         per_use = True
         reasons.append(f"「{elem.get('name', '')}」会取消/退掉一个订单或预订，撤不回来：每次都要你单独批准，请先核对页面上的订单号 "
                        f"(changes an order — approved one by one; check the order number on this page: {(page or {}).get('title', '')})")
-    if tool in ("browser_click", "browser_click_at") and elem and not per_use and guard.money_click(
+    checkout_step = tool in ("browser_click", "browser_click_at") and elem and not per_use and \
+        guard.checkout_step_click(elem.get("name", "")) and store.count_done(task_id, ("browser_fill_secret",)) == 0
+    if tool in ("browser_click", "browser_click_at") and elem and not per_use and not checkout_step and guard.money_click(
             elem.get("name", ""), elem.get("input_type", ""), (page or {}).get("url", "")):
         risk = _bump(risk, "high")
         per_use = True
@@ -174,7 +176,7 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
                 store.use_purchase(purchase["id"], "click")
                 return Decision(ALLOW, "high", f"已在购买确认 {purchase['id']} 中批准 (covered by the purchase you confirmed)",
                                 dest, grant_id=purchase["id"])
-    if tool in ("browser_click", "browser_click_at") and elem and not per_use:
+    if tool in ("browser_click", "browser_click_at") and elem and not per_use and not checkout_step:
         # a <button> reports type "submit" by default; outside a <form> it submits nothing (chat launchers, menus)
         itype = elem.get("input_type", "") if elem.get("in_form", True) else ""
         cart_edit = guard._CART_EDIT.search(str(elem.get("name", ""))) and \
@@ -196,6 +198,12 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
             reasons.append("本任务读取过机密数据，正在把较长文本输入网页 (possible data egress)")
         elif not is_search:
             risk = _bump(risk, "medium")
+    if tool == "browser_fill_secret" and elem:
+        other = guard.card_box_mismatch(str(args.get("field", "")), " ".join(str(elem.get(k) or "") for k in ("name", "placeholder")))
+        if other:
+            return Decision(DENY, "high", f"这个输入框「{elem.get('name', '')}」是填 {other} 的，不是 {args.get('field')}；请在快照里找对应的输入框"
+                                          f"（银行卡的每一栏常在各自的 iframe 里，如 f8e1、f9e1）(this box is for the card {other}, "
+                                          f"not the {args.get('field')} — find the right box; card fields often sit in separate iframes)")
     if tool == "browser_fill_secret" and purchase and purchase["fills_left"] > 0 and purchase["card_item"] \
             and purchase["card_item"] == str(args.get("item_id", "")):
         from app.sentinel import vault as _v
