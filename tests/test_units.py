@@ -1425,3 +1425,14 @@ def test_subscription_needs_all_three_stripe_vars(monkeypatch):
     for n, v in zip(names, ("sk_test_1 ", "cus_1", "sub_1")):
         monkeypatch.setenv(n, v)
     assert billing.config() == {"api_key": "sk_test_1", "customer": "cus_1", "subscription": "sub_1"}
+
+
+def test_model_defaults_from_env():
+    # planner / vision / speech-to-text defaults come from the environment; a saved setting still wins
+    import subprocess, sys
+    code = ("import tempfile; from app.runtime.store import RStore; st = RStore(tempfile.mkdtemp()); s = st.settings();"
+            "print(s['planner_model'], s['vision_model'], s['stt_model'] or '-');"
+            "print(st.set_settings({'vision_model': 'saved-v'})['vision_model'])")
+    env = {**os.environ, "OMUSE_PLANNER_MODEL": "plan-1", "OMUSE_VISION_MODEL": " vis-1 ", "OMUSE_STT_MODEL": ""}
+    out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, check=True).stdout.split("\n")
+    assert out[0] == "plan-1 vis-1 -" and out[1] == "saved-v", out
