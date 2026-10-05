@@ -1399,3 +1399,14 @@ def test_rescue_final_uses_notes_without_tools():
     assert "6.70" in out
     msgs, tools, kw = a.llm.calls[0]
     assert tools is None and "6.70" in msgs[1]["content"]
+
+
+def test_money_answers_without_calculate_are_checked():
+    from app.runtime.agent import ungrounded_numbers, self_corrects
+    goal = "一件商品 S$120。店铺券 9 折最多减 S$10 满 S$100；平台券满 S$120 减 S$15；银行卡返 5%。怎么用最便宜？最终花多少？"
+    tr = [{"role": "user", "content": goal}, {"role": "assistant", "content": "算一下"}]
+    assert "89.78" in ungrounded_numbers(tr, "最终花 S$89.78", goal)
+    assert ungrounded_numbers(tr, "最终花 S$120", goal) == []                       # in the request
+    assert ungrounded_numbers([{"role": "user", "content": "东京天气"}], "最高 23.5 度", "东京天气") == []
+    assert self_corrects("…实际折扣 10.5 超过 10？不对：封顶生效。等一下，这里需要修正")
+    assert not self_corrects("顺序 B 更便宜，最终 S$90.25。")

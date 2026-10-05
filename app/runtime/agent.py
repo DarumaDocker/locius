@@ -1322,6 +1322,16 @@ class Runtime:
                 numbers_checked = True
                 bad = ungrounded_numbers(transcript, final, t["goal"])
                 codes = ungrounded_codes(transcript, final, t["goal"])
+                if self_corrects(final) and not bad:
+                    await self.event(task_id, "number_check", {"self_correction": True})
+                    transcript.append({"role": "assistant", "content": final})
+                    transcript.append({"role": "user", "content": prompts.L(
+                        agent_lang(s),
+                        "（系统）你的回答中途改口了（例如「等一下，这里需要修正」）。用 calculate 把所有数字重新算一遍，"
+                        "然后只写最终正确的版本：不要保留错误的版本，也不要提到这次更正。",
+                        "(System) Your answer changes its mind half-way (\"wait, this needs correcting\"). Recompute every figure "
+                        "with calculate, then write only the final correct version: drop the wrong one and don't mention the fix.")})
+                    continue
                 if codes and not bad:
                     # 2026-10-04 V8-05: a return flight "SQ 637 11:30" that no email mentioned
                     await self.event(task_id, "number_check", {"unsupported_codes": codes[:10]})
@@ -2795,6 +2805,16 @@ def _num(tok: str, wan: str | None) -> float:
     return v * 10000 if wan else v
 
 
+_MONEY_GOAL = re.compile(r"算|计算|多少钱|总价|合计|总共|一共|花多少|最便宜|划算|到手价|每人|cheapest|total|how much|calculate|per person", re.I)
+_CURRENCY = re.compile(r"S\$|SGD|US\$|USD|JPY|¥|円|日元|新元|美元|€|£|\$\d")
+_SELF_FIX = re.compile(r"等一下|等等，|不对[：:，,。]|需要修正|我算错|算错了|更正一下|\bwait,|\bcorrection:|\bactually, that'?s wrong", re.I)
+
+
+def self_corrects(final: str) -> bool:
+    """The answer changes its mind half-way ("……10.5 超过 10？不对……等一下，这里需要修正") — the user gets two results."""
+    return bool(_SELF_FIX.search(str(final or "")))
+
+
 def ungrounded_numbers(transcript: list[dict], final: str, goal: str = "") -> list[str]:
     """Figures in a computed answer that no tool result (or the request itself) contains — the model made them up.
     Only for tasks that used calculate / data_query since the last user turn; years, dates, times and small whole
@@ -2807,7 +2827,8 @@ def ungrounded_numbers(transcript: list[dict], final: str, goal: str = "") -> li
             break
         run.append(m)
     used = {((c.get("function") or {}).get("name")) for m in run for c in (m.get("tool_calls") or [])}
-    if not used & CALC_TOOLS:
+    if not used & CALC_TOOLS and not (_MONEY_GOAL.search(str(goal or "")) and _CURRENCY.search(str(goal or "") + str(final or ""))):
+        # 2026-10-05 S3-09: a voucher-stacking sum done in the head (S$89.78 instead of S$90.25), no calculate at all
         return []
     src_text = str(goal or "") + "\n" + "\n".join(str(m.get("content") or "") for m in transcript
                                                  if m.get("role") in ("tool", "user", "system"))

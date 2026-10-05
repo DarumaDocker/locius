@@ -12,6 +12,9 @@ description: 网购：搜索商品、用视觉挑选、加入购物车（不结�
    down): read 3–4 search URLs per browser_read call, and as soon as you have an item's best match and price, write it down
    with update_plan(note=…) or files_write — older results are compressed out of your context. Never search an item again
    that is already in your notes; when the list is done, answer from the notes.
+   **Match the list exactly** (2026-10-05 S3-06: "Meiji milk 2L" was priced with a smaller pack, "Nescafe Gold 200g" at
+   S$2.49, and qty 2 became 1): the product you pick must have the listed size / weight / pack count; note its title,
+   size and price as shown on the page; multiply by the qty column; totals with calculate. No matching size → say so.
    **A shop's own search finds nothing, or the shop blocks you** (Cloudflare "You have been blocked", robot check): do not
    conclude the product is not sold there. Search the web once — browser_search("<product> site:<shop domain>", e.g.
    "Dyson V15 Detect site:courts.com.sg") — and browser_read the product page it returns. Still nothing → say "not
