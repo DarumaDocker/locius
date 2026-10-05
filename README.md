@@ -93,6 +93,19 @@ Docker reads the file when the container is created: after editing it, `docker r
 
 Everything else (connections, vault, language, limits) is set in the web UI and stored in the volume.
 
+### Deploy on Fly.io
+
+`fly.toml` and `Dockerfile.fly` run the same container on [Fly.io](https://fly.io): one always-on machine with one volume for all state, HTTPS from Fly.
+
+```bash
+fly launch --no-deploy --copy-config        # once: creates the app (choose a name and region)
+fly volumes create omuse_data --size 10     # once
+fly secrets set OMUSE_PASSWORD='choose-a-long-password' OMUSE_MODEL_API_KEY=sk-...
+fly deploy
+```
+
+Then open `https://<app>.fly.dev` and sign in as `omuse`. The model endpoint and the other variables from the table above go in `[env]` in `fly.toml` (secrets with `fly secrets set`). Keep it at one machine: the state is on the volume.
+
 ### Development
 
 ```bash

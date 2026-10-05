@@ -1,0 +1,23 @@
+# OMuse on Fly.io (see fly.toml): `fly deploy`. Same image as ./Dockerfile with one difference: it starts as root,
+# because Fly mounts the data volume owned by root. The entrypoint hands /omuse to pwuser and drops privileges
+# before any service starts.
+FROM mcr.microsoft.com/playwright/python:v1.56.0-noble
+
+RUN apt-get update && apt-get install -y --no-install-recommends tini tzdata curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/omuse
+COPY requirements.txt requirements-browser.txt ./
+RUN pip install --no-cache-dir --break-system-packages -r requirements.txt -r requirements-browser.txt playwright==1.56.0
+
+COPY app ./app
+COPY deploy/docker ./deploy/docker
+
+ENV TZ=UTC \
+    OMUSE_DATA=/omuse \
+    OMUSE_MODEL_URL=https://api.openai.com/v1 \
+    OMUSE_MODEL=gpt-4.1 \
+    VOICE_PORT=8083
+
+EXPOSE 8080 8083
+ENTRYPOINT ["tini", "--", "/opt/omuse/deploy/docker/entrypoint.sh"]
