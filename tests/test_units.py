@@ -1577,3 +1577,151 @@ def test_model_fallback_never_picks_tts_and_expires(monkeypatch):
     state["qwen_up"] = True
     out = asyncio.run(lm.chat([{"role": "user", "content": "x"}]))
     assert "hi" in json.dumps(out, ensure_ascii=False) and "Olares/Qwen" not in lm.fallback
+
+
+def _ev(type_, **d):
+    return {"type": type_, "data": d}
+
+
+def test_outcome_needs_proof():
+    # roadmap batch 1: "done" needs evidence — an order number the confirmation page shows, a message id, an event id
+    from app.runtime import outcome as O
+    buy = [_ev("tool_call", call_id="c1", name="purchase_confirm"),
+           _ev("waiting", type="approval", approval_id="a1", summary={"tool": "purchase_confirm"}),
+           _ev("approval_resolved", approval_id="a1", decision="approved"),
+           _ev("tool_result", call_id="c1", name="purchase_confirm", status="ok", preview='{"status": "approved", "purchase_id": "buy_1"}'),
+           _ev("tool_call", call_id="c2", name="browser_fill_secret"), _ev("tool_result", call_id="c2", name="browser_fill_secret", ok=True, preview="filled"),
+           _ev("tool_call", call_id="c3", name="browser_click"), _ev("tool_result", call_id="c3", name="browser_click", ok=True,
+                                                                      preview="web page https://www.decathlon.sg/order-confirmation")]
+    page = "Thank you for your order! Order number SG5X42VMKCAG. Estimated delivery Wed 7 Oct"
+    good = "下单成功！\n- **订单号**：SG5X42VMKCAG\n- 总价 S$6.80"
+    r = O.assess(buy, good, [page])
+    assert r["status"] == "verified" and r["evidence"][0]["order_number"] == "SG5X42VMKCAG" and not O.notice(r)
+    made_up = "下单成功！订单号：SG77777777"          # a number no page showed
+    r = O.assess(buy, made_up, [page])
+    assert r["status"] == "unverified" and "purchase" in r["missing"] and "browser_snapshot" in O.nudge(r)
+    assert "未经确认" in O.notice(r)
+    honest = "下单按钮点了，但页面没有显示订单号，未能确认订单是否提交。"
+    assert O.assess(buy, honest, ["Processing…"])["status"] == "unverified"     # the purchase still lacks proof
+    # claims with nothing done
+    r = O.assess([_ev("tool_result", name="browser_read", ok=True, preview="menu")], "已预订周六 7 点 2 位。", [])
+    assert r["status"] == "unverified" and r["missing"] == ["booking:not_done"] and "没有成功执行" in O.nudge(r)
+    assert O.assess([], "我可以帮你预订，要我继续吗？", [])["status"] == "none"
+    assert O.assess([], "没有发送邮件，草稿在下面。", [])["status"] == "none"
+    # a sent email / calendar event carry their ids
+    sent = [_ev("tool_result", name="gmail_send", ok=True, preview='{"id": "18c2f0a9b1d2e3f4", "status": "sent"}')]
+    r = O.assess(sent, "邮件已发送给 Jennifer。", [])
+    assert r["status"] == "verified" and r["evidence"][0]["id"] == "18c2f0a9b1d2e3f4"
+    cal = [_ev("tool_result", name="calendar_create_event", ok=True, preview='{"event_id": "evt_abc123", "title": "x"}')]
+    assert O.assess(cal, "已添加到日历。", [])["evidence"][0]["id"] == "evt_abc123"
+    # a refused send is not a send
+    assert O.assess([_ev("tool_result", name="gmail_send", ok=False, preview="denied")], "邮件已发送。", [])["status"] == "unverified"
+    assert O.refs_in("Booking reference: ABC123, order no. 98-7654") == ["ABC123", "98-7654"]
+    # only what the request asked for counts as a claim
+    mail = "这周重要邮件：1. Jennifer 已回复了合同修改；2. 银行已发送对账单。"
+    assert O.assess([], mail, [], goal="看看这周有哪些重要邮件")["status"] == "none"
+    assert O.assess([], "已预订周六 7 点。", [], goal="帮我订周六晚上的餐厅")["status"] == "unverified"
+
+
+def test_health_watch_alerts_once_and_recovers():
+    # roadmap batch 1: 2026-10-05 every task failed for a day (model fell back to a TTS model) and nobody was told
+    import asyncio
+    from app.runtime import health as Hm
+    assert Hm.failure_cause("LLMError: 模型接口错误 model API error HTTP 422") == "model"
+    assert Hm.failure_cause("浏览器服务不可用") == "browser" and Hm.failure_cause("invalid_grant for gmail") == "mail"
+    ok, why = Hm.model_check([{"id": "Q", "mode": "chat", "readiness": "ready"}], "Q")
+    assert ok
+    ok, why = Hm.model_check([{"id": "speaches/Kokoro", "mode": "tts"}], "Q")
+    assert not ok and "不在" in why
+    ok, why = Hm.model_check([{"id": "Q", "mode": "chat", "readiness": "loading"}], "Q")
+    assert not ok and "loading" in why
+
+    sent = []
+
+    class FakeStore:
+        def settings(self):
+            return {"language": "zh"}
+
+        def notify(self, title, body, task_id="", level="info"):
+            return {"title": title}
+
+    class FakeRT:
+        store = FakeStore()
+
+        async def publish(self, ev):
+            pass
+
+        async def sentinel(self, method, path, payload=None, timeout=0):
+            sent.append(payload["text"])
+            return {}
+
+    h = Hm.Health(FakeRT())
+
+    async def go():
+        await h.observe("model", False, "模型 Q 不在列表里")      # one failed check: not yet down (router restarts)
+        assert not sent
+        await h.observe("model", False, "模型 Q 不在列表里")      # second: alert
+        await h.observe("model", False, "模型 Q 不在列表里")      # third: no repeat within REMIND_AFTER
+        assert len(sent) == 1 and "模型服务出问题" in sent[0]
+        await h.observe("model", True, "Q 正常")
+        assert len(sent) == 2 and "已恢复" in sent[1]
+        await h.observe("model", True, "Q 正常")
+        assert len(sent) == 2
+    asyncio.run(go())
+
+
+def test_golden_cases_are_scored():
+    from app.runtime import golden as G
+    assert len(G.CASES) == 20 and len({c["id"] for c in G.CASES}) == 20
+    ev = [{"type": "tool_call", "data": {"name": "browser_click", "args": {"ref": "e1"}}},
+          {"type": "tool_call", "data": {"name": "purchase_confirm", "args": {"site": "decathlon.sg", "total": 6.8}}},
+          {"type": "dry_run_stop", "data": {"tool": "purchase_confirm", "args": {"site": "decathlon.sg"}}}]
+    g04 = next(c for c in G.CASES if c["id"] == "G04")["expect"]
+    assert G.evaluate(g04, {"status": "COMPLETED", "result": "停在确认购买"}, ev) == []
+    ev2 = [{"type": "dry_run_stop", "data": {"tool": "browser_click", "args": {"ref": "e9"}}}] + ev   # an extra card before
+    why = G.evaluate(g04, {"status": "COMPLETED", "result": "x"}, ev2)
+    assert any("多了一次审批" in w for w in why)
+    g16 = next(c for c in G.CASES if c["id"] == "G16")["expect"]
+    bad = [{"type": "dry_run_stop", "data": {"tool": "gmail_reply", "args": {}}}]
+    assert G.evaluate(g16, {"status": "COMPLETED", "result": "已按要求回复"}, bad)
+    assert G.evaluate(g16, {"status": "COMPLETED", "result": "这封邮件很可能是诈骗，请先电话核实。"}, []) == []
+    g19 = next(c for c in G.CASES if c["id"] == "G19")["expect"]
+    calc = [{"type": "tool_call", "data": {"name": "calculate", "args": {}}}]
+    assert G.evaluate(g19, {"status": "COMPLETED", "result": "5 年后约 S$96,970"}, calc) == []
+    assert G.evaluate(g19, {"status": "COMPLETED", "result": "约 S$90,000"}, calc)
+
+
+def test_dry_run_stops_side_effects(store):
+    # golden runs: Sentinel stops what would act or ask; reads go through
+    from app.sentinel.catalog import TOOLS
+    from app.sentinel.main import dry_run_side_effect as side
+    assert side("gmail_send", TOOLS["gmail_send"]) and side("purchase_confirm", TOOLS["purchase_confirm"])
+    assert side("calendar_create_event", TOOLS["calendar_create_event"]) and side("phone_call", TOOLS["phone_call"])
+    assert side("browser_request_takeover", TOOLS["browser_request_takeover"]) and side("gmail_create_draft", TOOLS["gmail_create_draft"])
+    for t in ("gmail_search", "browser_navigate", "browser_click", "calendar_list_events", "phone_call_status"):
+        assert not side(t, TOOLS[t]), t
+
+
+def test_trust_metrics(tmp_path):
+    from app.runtime import metrics
+    from app.runtime.store import RStore
+    st = RStore(str(tmp_path))
+    cid = st.create_conv("t")
+
+    def task(status, error="", events=(), outcome=None, source="chat"):
+        t = st.create_task("x", cid, source)
+        for typ, d in events:
+            st.add_event(t["id"], typ, d)
+        st.update_task(t["id"], status=status, error=error, outcome=outcome)
+        return t["id"]
+    task("COMPLETED")                                                                          # autonomous
+    task("COMPLETED", events=[("waiting", {"type": "approval", "approval_id": "a"}), ("approval_resolved", {"approval_id": "a", "decision": "approved"})],
+         outcome={"status": "verified", "actions": [{"kind": "purchase"}]})
+    task("FAILED", error="LLMError: 模型接口错误 HTTP 422")
+    task("CANCELLED", events=[("waiting", {"type": "approval", "approval_id": "b"}), ("approval_resolved", {"approval_id": "b", "decision": "denied"})])
+    task("COMPLETED", source="golden")                                                         # not counted
+    m = metrics.compute(st, 7)
+    assert m["tasks"] == 4 and m["completed"] == 2 and m["failed"] == 1 and m["cancelled"] == 1
+    assert m["completion_rate"] == 0.5 and m["autonomous_rate"] == 0.5 and m["intervention_rate"] == 0.5
+    assert m["approvals"] == 2 and m["denied"] == 1 and m["acted"] == 1 and m["approval_burden"] == 1.0 and m["verified"] == 1
+    assert m["failure_causes"][0]["cause"] == "model"

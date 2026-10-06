@@ -45,6 +45,8 @@ async def lifespan(app):
     rt = Runtime(DATA, publish)
     sched = Scheduler(rt)
     sched.start()
+    rt.health.start()
+    rt.golden.start()
     await rt.recover()
     yield
 
@@ -457,6 +459,61 @@ async def memory_run(rid: int):
     if not r:
         raise HTTPException(404, "not found")
     return r
+
+
+# ------------------------------------------------------------------ trust: metrics, health, golden runs, outcomes
+@app.get("/api/metrics")
+async def api_metrics(days: int = 7):
+    from app.runtime import metrics
+    days = max(1, min(int(days), 90))
+    off = float(rt.store.settings().get("tz_offset_hours") or 8)
+    m = await asyncio.to_thread(metrics.compute, rt.store, days, None, off)
+    runs = rt.golden.runs(6)
+    return {"metrics": m, "health": rt.health.status(), "golden": {"running": rt.golden.running, "runs": runs}}
+
+
+@app.get("/api/health/status")
+async def api_health():
+    return rt.health.status()
+
+
+@app.post("/api/health/check")
+async def api_health_check():
+    res = await rt.health.run_checks()
+    for comp, (ok, detail) in res.items():
+        await rt.health.observe(comp, ok, detail)
+    return rt.health.status()
+
+
+@app.get("/api/golden/runs")
+async def golden_runs(limit: int = 10):
+    from app.runtime.golden import CASES
+    return {"running": rt.golden.running, "runs": rt.golden.runs(min(limit, 50)),
+            "cases": [{"id": c["id"], "title": c["title"], "prompt": c["prompt"]} for c in CASES]}
+
+
+@app.post("/api/golden/run")
+async def golden_run(req: Request):
+    b = await req.json() if (req.headers.get("content-length") or "0") != "0" else {}
+    if rt.golden.running:
+        raise HTTPException(409, "黄金测试已在运行 (already running)")
+    only = [str(x) for x in (b.get("only") or [])] or None
+    asyncio.create_task(rt.golden.run("manual", only))
+    await asyncio.sleep(0.2)
+    return {"ok": True, "run_id": rt.golden.running}
+
+
+@app.post("/api/tasks/{tid}/outcome")
+async def task_outcome(tid: str):
+    """Re-assess an older task's outcome from what it did (the tool results kept in its transcript)."""
+    from app.runtime import outcome
+    t = rt.store.task(tid)
+    if not t:
+        raise HTTPException(404, "no such task")
+    texts = [str(m.get("content") or "") for m in (t.get("transcript") or []) if m.get("role") == "tool"]
+    oc = outcome.assess(rt.store.events(tid), str(t.get("result") or ""), texts, t.get("goal") or "")
+    rt.store.update_task(tid, outcome=oc)
+    return {"task_id": tid, "outcome": oc}
 
 
 # ------------------------------------------------------------------ notifications

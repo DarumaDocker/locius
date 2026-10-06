@@ -91,6 +91,25 @@ async def chat(req: Request):
     last_tool = tools_done[-1]["content"] if tools_done else ""
     allu = "\n".join(str(m["content"]) for m in msgs if m["role"] == "user")
     tnames = [t["function"]["name"] for t in (b.get("tools") or [])]
+    if "FAKECLAIM" in goal:   # says it sent an email without sending anything (outcome check, roadmap batch 1)
+        if "（系统）你的回答说已经" in allu or "(System) Your answer says you" in allu:
+            return reply("我还没有发送邮件：这个任务里没有执行发送，下面是准备好的草稿内容。")
+        return reply("好的，邮件已发送给 Jennifer。")
+    if "Kiprun 跑步袜 Run 100" in goal:   # golden G12: a price watch (a local tool the dry run stops)
+        if n == 0:
+            return reply("", [tc("watch_create", {"url": "https://www.decathlon.sg/p/kiprun-run-100", "mode": "price_below",
+                                                   "threshold": 3, "keyword": "Kiprun", "current_price": 3.9})])
+        return reply("准备好了降价提醒：价格低于 S$3 时通知你（演练模式，未实际创建）。")
+    if "按月复利" in goal:   # golden G19
+        if n == 0:
+            return reply("", [tc("calculate", {"expression": "1500*((1+0.03/12)**60-1)/(0.03/12)"})])
+        num = re.findall(r"\d[\d,]*\.?\d*", last_tool)
+        return reply(f"5 年后大约有 S${num[-1] if num else '?'}。")
+    if "新加坡 10 月的天气" in goal:   # golden G20: asks for a takeover, which a dry run stops (no pop-up for the user)
+        if n == 0:
+            return reply("", [tc("browser_request_takeover", {"reason": "请帮我通过验证"})])
+        return reply("10 月是西南季风转东北季风的过渡期，午后多雷阵雨。来源：https://www.weather.gov.sg/climate-climate-of-singapore/ ，"
+                     "https://en.wikipedia.org/wiki/Climate_of_Singapore")
     if "ZHANSWER" in goal:   # a model that answers in Chinese although the setting is English
         last = next((str(m["content"]) for m in reversed(msgs)
                      if not str(m["content"]).startswith(("(System) Status", "（系统）当前状态"))), "")

@@ -591,6 +591,12 @@ async def act(req: Request):
         store.audit("sentinel", tool, task_id=task_id, resource=t["connector"], risk=d.risk, decision=DENY,
                     result="denied", detail=detail)
         return {"status": "denied", "reason": d.reason}
+    if b.get("dry_run") and (d.decision == ASK or dry_run_side_effect(tool, t)):
+        # golden (test) run: stop where a real run would act or ask — nothing is sent, bought or written, no card
+        store.audit("sentinel", tool, task_id=task_id, resource=t["connector"], risk=d.risk, decision=DENY,
+                    result="dry_run", detail={**detail, "would": d.decision})
+        what = "需要你批准" if d.decision == ASK else "会真正执行"
+        return {"status": "denied", "dry_run": True, "reason": f"{TOOLS[tool].get('title') or tool}：{what}（{d.reason[:120]}）"}
     if d.decision == ASK and b.get("no_ask"):
         store.audit("sentinel", tool, task_id=task_id, resource=t["connector"], risk=d.risk, decision=DENY,
                     result="denied", detail={**detail, "why": "needs approval but caller is a sub-agent"})
@@ -618,6 +624,30 @@ async def act(req: Request):
         return {"status": "approval_required", "approval_id": ap["id"], "summary": summary, "reason": d.reason}
     # ALLOW
     return await _run(tool, args, task_id, d.risk, detail, decision=ALLOW)
+
+
+DRY_RUN_CAPS = {"send", "write", "draft", "organize", "upload", "notify", "call"}
+DRY_RUN_TOOLS = {"purchase_confirm", "browser_fill_secret", "browser_request_takeover"}
+
+
+def dry_run_side_effect(tool: str, t: dict) -> bool:
+    """A call a golden (test) run must not make even when policy would allow it."""
+    if tool in DRY_RUN_TOOLS:
+        return True
+    if tool in ("phone_call_status", "phone_hangup"):
+        return False
+    if str(t.get("connector", "")).startswith("mcp:"):
+        return t.get("capability") != "read"
+    return t.get("capability") in DRY_RUN_CAPS
+
+
+@app.post("/internal/user_request", dependencies=[Depends(runtime_auth)])
+async def internal_user_request(req: Request):
+    """Tasks the runtime starts itself (golden runs) record the request text the way the front door does for chats."""
+    b = await req.json()
+    if b.get("task_id") and isinstance(b.get("text"), str):
+        store.set_user_request(str(b["task_id"]), b["text"][:4000])
+    return {"ok": True}
 
 
 async def _run(tool: str, args: dict, task_id: str, risk: str, detail: dict, decision: str) -> dict:

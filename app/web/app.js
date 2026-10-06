@@ -115,7 +115,7 @@ const S = {
 const VIEWS = [
   ['chat', '💬', T('对话'), 'Chat'], ['tasks', '🗂', T('任务'), 'Tasks'], ['browser', '🌐', T('浏览器'), 'Browser'],
   ['schedules', '⚡', T('自动化'), 'Automations'], ['connections', '🔌', T('连接'), 'Connections'], ['memory', '🧠', T('记忆'), 'Memory'],
-  ['activity', '📜', T('活动审计'), 'Audit'], ['settings', '⚙️', T('设置'), 'Settings'],
+  ['trust', '📈', T('可信度'), 'Trust'], ['activity', '📜', T('活动审计'), 'Audit'], ['settings', '⚙️', T('设置'), 'Settings'],
 ];
 
 function renderNav() {
@@ -142,7 +142,7 @@ function route() {
   renderNav();
   const view = $('#view'); view.innerHTML = '';
   ({ chat: viewChat, tasks: viewTasks, browser: viewBrowser, schedules: viewSchedules, connections: viewConnections,
-     memory: viewMemory, activity: viewActivity, settings: viewSettings })[S.view](view);
+     memory: viewMemory, trust: viewTrust, activity: viewActivity, settings: viewSettings })[S.view](view);
 }
 
 // ================================================================== CHAT
@@ -640,6 +640,7 @@ async function renderTaskDetail(box, id) {
       h('dt', null, T('来源 Source')), h('dd', null, t.source === 'schedule' ? T('⏰ 定时任务 schedule') : T('💬 对话 chat')),
       h('dt', null, T('创建 Created')), h('dd', null, fmtTime(t.created_at)),
       h('dt', null, T('步数 Steps')), h('dd', null, t.steps || 0),
+      t.outcome && t.outcome.status !== 'none' ? [h('dt', null, T('结果证据 Evidence')), h('dd', null, outcomeBadge(t.outcome))] : null,
       t.waiting ? [h('dt', null, T('等待 Waiting')), h('dd', null, t.waiting.type === 'approval' ? '🛡 ' + B((t.waiting.summary || {}).title || T('审批')) : '🖐 ' + (t.waiting.reason || t.waiting.type))] : null),
     h('div', { class: 'row' },
       t.status === 'WAITING_APPROVAL' && t.waiting ? h('button', { class: 'btn approve small', onclick: () => openApproval(t.waiting.approval_id) }, T('🛡 去审批')) : null,
@@ -652,6 +653,73 @@ async function renderTaskDetail(box, id) {
     t.result ? h('div', null, h('b', null, T('结果 Result')), mdEl(t.result)) : null,
     t.error ? h('p', { style: 'color:var(--danger)' }, t.error) : null,
     h('div', null, h('b', null, T('执行过程 Timeline')), tl)));
+}
+
+// Proof that a task which changed something really finished (order number, message id …) — app/runtime/outcome.py
+function outcomeBadge(o) {
+  const ev = (o.evidence || []).map(e => e.order_number ? Tf("订单号 {0}", e.order_number) : e.reference ? Tf("预订号 {0}", e.reference)
+    : e.id ? `${e.kind} ${e.id}` : e.kind).join('，');
+  return o.status === 'verified'
+    ? h('span', { class: 'chip ok' }, T('✓ 已核实 verified') + (ev ? ' · ' + ev : ''))
+    : h('span', { class: 'chip bad', title: (o.missing || []).join(', ') }, T('⚠ 未确认 not confirmed'));
+}
+
+// ================================================================== TRUST (metrics, health, golden runs)
+async function viewTrust(root) {
+  S.trustDays = S.trustDays || 7;
+  const r = await api('metrics?days=' + S.trustDays);
+  const m = r.metrics, hs = r.health || {}, g = r.golden || {};
+  const pct = x => x == null ? '—' : Math.round(x * 100) + '%';
+  const kpi = (label, value, note, cls) => h('div', { class: 'kpi' + (cls ? ' ' + cls : '') }, h('div', { class: 'kpi-v' }, value),
+    h('div', { class: 'kpi-l' }, label), note ? h('div', { class: 'kpi-n' }, note) : null);
+  const days = h('div', { class: 'filters' }, [7, 30].map(d => h('button', { class: S.trustDays === d ? 'on' : '', onclick: () => { S.trustDays = d; route(); } },
+    Tf("最近 {0} 天", d))));
+  const checkBtn = h('button', { class: 'btn small', onclick: safe(async () => { await api('health/check', { method: 'POST', body: {} }); route(); }) }, T('立即检查 Check now'));
+  const runBtn = h('button', { class: 'btn small primary', disabled: !!g.running, onclick: safe(async () => {
+    await api('golden/run', { method: 'POST', body: {} }); toast(T('黄金测试已开始，大约需要 30–60 分钟，完成后会通知你')); route(); }) },
+    g.running ? T('黄金测试运行中…') : T('▶ 运行黄金测试 Run golden tasks'));
+  // health
+  const comps = Object.entries(hs.components || {});
+  const names = { model: T('模型服务'), browser: T('浏览器'), sentinel: T('安全网关 Sentinel'), tasks: T('任务执行') };
+  const health = h('div', { class: 'card stack' }, h('h3', null, T('🩺 运行状态 Health')),
+    comps.length ? h('div', { class: 'stack' }, comps.map(([k, c]) => h('div', { class: 'row' },
+      h('span', { class: 'chip ' + (c.ok ? 'ok' : 'bad') }, c.ok ? '✓' : '✕'), h('b', null, names[k] || k),
+      h('span', { class: 'small muted', style: 'flex:1' }, c.detail || ''), c.down ? h('span', { class: 'small' }, Tf("自 {0}", fmtTime(c.since))) : null)))
+      : h('p', { class: 'small muted' }, T('启动后约 1 分钟完成第一次检查。')),
+    (hs.alerts || []).length ? h('details', null, h('summary', { class: 'small' }, Tf("最近告警 {0} 条", hs.alerts.length)),
+      hs.alerts.slice().reverse().map(a => h('div', { class: 'small' }, `${fmtTime(a.ts)} ${a.title} — ${a.body.split('\n')[0]}`))) : null,
+    h('div', { class: 'row' }, checkBtn));
+  // metrics
+  const tiles = h('div', { class: 'kpis' },
+    kpi(T('完成率'), pct(m.completion_rate), Tf("{0}/{1} 个任务完成", m.completed, m.finished)),
+    kpi(T('自主完成率'), pct(m.autonomous_rate), T('完成且不需要你批准、接管或回答')),
+    kpi(T('需要你介入'), pct(m.intervention_rate), Tf("审批 {0} 次 · 接管 {1} 次", m.approvals, m.takeovers)),
+    kpi(T('每个结果的审批次数'), m.approval_burden == null ? '—' : m.approval_burden.toFixed(1), Tf("{0} 个任务改变了外部世界", m.acted)),
+    kpi(T('有证据 / 未确认'), `${m.verified} / ${m.unverified}`, T('订单号、邮件 ID 等证据'), m.unverified ? 'warn' : ''),
+    kpi(T('失败'), m.failed, Tf("取消 {0}", m.cancelled), m.failed ? 'warn' : ''));
+  const maxDay = Math.max(1, ...m.per_day.map(d => d.total));
+  const perDay = h('div', { class: 'card stack' }, h('h3', null, T('📅 每天的任务')),
+    h('div', { class: 'tablewrap' }, h('table', { class: 'data' },
+      h('thead', null, h('tr', null, [T('日期'), T('总数'), T('完成'), T('失败'), T('取消'), ''].map(x => h('th', null, x)))),
+      h('tbody', null, m.per_day.slice().reverse().map(d => h('tr', null, h('td', { class: 'mono' }, d.day), h('td', null, d.total),
+        h('td', null, d.completed), h('td', { style: d.failed ? 'color:var(--danger)' : '' }, d.failed), h('td', null, d.cancelled),
+        h('td', { style: 'width:40%' }, h('div', { class: 'bar' }, h('span', { class: 'ok', style: `width:${100 * d.completed / maxDay}%` }),
+          h('span', { class: 'bad', style: `width:${100 * d.failed / maxDay}%` })))))))),
+    m.failure_causes.length ? h('div', { class: 'small' }, T('失败原因：'), m.failure_causes.map(c => `${c.label} ${c.count}`).join(' · ')) : null,
+    m.top_errors.length ? h('details', null, h('summary', { class: 'small' }, T('最常见的错误')),
+      m.top_errors.map(e => h('div', { class: 'small mono' }, `${e.count}× ${e.error}`))) : null);
+  // golden runs
+  const last = (g.runs || [])[0];
+  const golden = h('div', { class: 'card stack' }, h('h3', null, T('🧪 黄金测试任务 Golden tasks')),
+    h('p', { class: 'sub' }, T('20 个日常任务，每周日凌晨 3 点自动演练一次：真实读邮件、浏览网页，但在发送、下单、改日历、打电话之前停下，不打扰你。')),
+    h('div', { class: 'row' }, runBtn),
+    (g.runs || []).length ? h('div', { class: 'small' }, g.runs.map(x => `${fmtTime(x.started_at)} ${x.version || ''}：${x.passed}/${x.total}` + (x.status === 'running' ? T('（运行中）') : '')).join('  ·  ')) : null,
+    last ? h('div', { class: 'tablewrap' }, h('table', { class: 'data' },
+      h('thead', null, h('tr', null, ['', T('任务'), T('用时'), T('没通过的原因')].map(x => h('th', null, x)))),
+      h('tbody', null, (last.results || []).map(x => h('tr', null, h('td', null, x.passed ? '✅' : '❌'),
+        h('td', null, x.task_id ? h('a', { href: '#tasks/' + x.task_id }, `${x.id} ${x.title}`) : `${x.id} ${x.title}`),
+        h('td', { class: 'mono' }, x.seconds != null ? x.seconds + 's' : ''), h('td', { class: 'small' }, (x.why || []).join('；'))))))) : null);
+  root.append(h('div', { class: 'stack' }, h('div', { class: 'row' }, days), tiles, h('div', { class: 'grid2' }, health, golden), perDay));
 }
 
 // ================================================================== APPROVALS

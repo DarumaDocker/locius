@@ -160,6 +160,8 @@ class RStore:
         tcols = {r["name"] for r in self.db.all("PRAGMA table_info(tasks)")}
         if "attachments" not in tcols:
             self.db.execute("ALTER TABLE tasks ADD COLUMN attachments TEXT DEFAULT ''")
+        if "outcome" not in tcols:   # proof that a consequential task really finished (app/runtime/outcome.py)
+            self.db.execute("ALTER TABLE tasks ADD COLUMN outcome TEXT DEFAULT ''")
         fcols = {r["name"] for r in self.db.all("PRAGMA table_info(facts)")}
         for col, ddl in (("tier", "TEXT DEFAULT 'long'"), ("uses", "INTEGER DEFAULT 0"), ("last_used", "REAL"),
                          ("expires_at", "REAL"), ("history", "TEXT DEFAULT ''")):
@@ -235,17 +237,18 @@ class RStore:
         for k, d in (("plan", {}), ("transcript", []), ("pending", None), ("waiting", None)):
             r[k] = loads(r[k], d)
         r["attachments"] = loads(r.get("attachments") or "", []) or []
+        r["outcome"] = loads(r.get("outcome") or "", None)
         return r
 
     def update_task(self, tid: str, **kw):
         data = {}
         for k, v in kw.items():
-            data[k] = dumps(v) if k in ("plan", "transcript", "pending", "waiting") else v
+            data[k] = dumps(v) if k in ("plan", "transcript", "pending", "waiting", "outcome") else v
         data["updated_at"] = now_ts()
         self.db.update("tasks", "id", tid, data)
 
     def tasks(self, status: str | None = None, limit=100, conv_id: str | None = None) -> list[dict]:
-        q = "SELECT id, conv_id, goal, status, plan, result, error, source, schedule_id, parent_id, steps, waiting, created_at, updated_at, finished_at FROM tasks WHERE parent_id=''"
+        q = "SELECT id, conv_id, goal, status, plan, result, error, source, schedule_id, parent_id, steps, waiting, created_at, updated_at, finished_at, outcome FROM tasks WHERE parent_id=''"
         p: list = []
         if status:
             q += " AND status IN (%s)" % ",".join("?" for _ in status.split(","))
@@ -259,6 +262,7 @@ class RStore:
         for r in rows:
             r["plan"] = loads(r["plan"], {})
             r["waiting"] = loads(r["waiting"], None)
+            r["outcome"] = loads(r.get("outcome") or "", None)
         return rows
 
     # ------------------------------------------------------------ events

@@ -21,7 +21,7 @@ import httpx
 
 from app.common.util import dumps, new_id, now_ts, truncate
 from app.runtime import attachments as AT
-from app.runtime import prompts
+from app.runtime import outcome, prompts
 from app.runtime.llm import LLM, LLMContextError, LLMError, extract_json, strip_tool_markup
 from app.runtime.store import RStore
 
@@ -579,6 +579,10 @@ LOCAL_TOOLS = [
     _fn("load_skill", "加载技能说明 Load a skill's detailed instructions by name.", {"name": S}, ["name"]),
 ]
 LOCAL_NAMES = {t["function"]["name"] for t in LOCAL_TOOLS}
+# local tools that change something lasting: a golden (test) run stops at them instead of running them
+DRY_RUN_LOCAL = {"memory_remember", "memory_forget", "profile_suggest", "schedule_create", "trigger_create", "watch_create",
+                 "goal_create", "goal_update", "goal_delete", "schedule_delete", "schedule_state_set", "notify_user",
+                 "files_write", "make_pdf", "make_docx", "make_xlsx", "pdf_form_fill"}
 
 # step budget: keep the last steps for producing / sending what the user asked for
 BUDGET_RESERVE = 5
@@ -712,6 +716,11 @@ class Runtime:
         self.pause_flags: set[str] = set()
         self._catalog_cache = (0.0, None)
         self.evidence: dict[str, list[dict]] = {}   # task_id -> pages/emails actually read (for present_choices)
+        self._tool_texts: dict[str, list[str]] = {}   # task_id -> full tool results, newest last (outcome evidence)
+        from app.runtime.golden import Golden
+        from app.runtime.health import Health
+        self.health = Health(self)
+        self.golden = Golden(self)
         os.makedirs(WORKSPACE, exist_ok=True)
 
     # ================================================================ sentinel client
@@ -742,6 +751,19 @@ class Runtime:
         self._catalog_cache = (time.time(), cat)
         return cat
 
+    async def _dry_run_stop(self, task_id: str, name: str, args: dict, why: str) -> str:
+        """Golden (test) runs stop where a real run would change something or need the user; the stop is the result."""
+        await self.event(task_id, "dry_run_stop", {"tool": name, "args": _preview_args(args), "why": truncate(why, 200)})
+        return ("（演练模式）到这一步会真正执行操作或需要用户批准，演练到此为止，没有执行：" + (why or name) +
+                "。不要重试这一步，也不要换别的方法绕过；直接写最终回答，说明准备怎么做、做到了哪一步。"
+                " (Dry run: this step would act for real or need the user's approval, so it was not run. Do not retry it or "
+                "work around it; write the final answer saying what you would do and how far you got.)")
+
+    def _note_tool_text(self, task_id: str, content) -> None:
+        log = self._tool_texts.setdefault(task_id, [])
+        log.append(str(content)[:20000])
+        del log[:-40]
+
     # ================================================================ events
     async def event(self, task_id: str, type_: str, data: dict):
         ev = self.store.add_event(task_id, type_, data)
@@ -752,6 +774,11 @@ class Runtime:
         t = self.store.task(task_id)
         await self.publish({"kind": "task_update", "task": self.task_brief(t)})
         await self.audit("runtime", "task.status", task_id, result=status, detail={"status": status, **{k: v for k, v in kw.items() if k in ("error",)}})
+        if status in TERMINAL:
+            try:
+                await self.health.on_task_finished(t)
+            except Exception as e:
+                print(f"[health] {e!r}", flush=True)
         if status in TERMINAL:   # let the browser recycle this task's page later (best effort, never blocks)
             async def _release():
                 try:
@@ -763,7 +790,7 @@ class Runtime:
     @staticmethod
     def task_brief(t: dict) -> dict:
         return {k: t.get(k) for k in ("id", "conv_id", "goal", "status", "plan", "result", "error", "source", "schedule_id",
-                                       "parent_id", "steps", "waiting", "created_at", "updated_at", "finished_at")}
+                                       "parent_id", "steps", "waiting", "created_at", "updated_at", "finished_at", "outcome")}
 
     # ================================================================ public entry points
     async def submit(self, conv_id: str, goal: str, source="chat", schedule_id="", attachments: list | None = None) -> dict:
@@ -804,6 +831,7 @@ class Runtime:
             t = self.store.task(task_id)
             if not t or t["status"] in ("COMPLETED", "FAILED", "CANCELLED"):
                 self.evidence.pop(task_id, None)
+                self._tool_texts.pop(task_id, None)
 
     async def _warn_unattended(self, t: dict, what: tuple[str, str], detail: str):
         """A scheduled / triggered run went wrong while nobody was watching: tell the user (app + Telegram).
@@ -1172,6 +1200,7 @@ class Runtime:
             first = pend["calls"][0]
             transcript.append({"role": "tool", "tool_call_id": first["id"],
                                "content": self._format_external(first["name"], resolved.get("result") or {})})
+            self._note_tool_text(task_id, transcript[-1]["content"])
             await self.event(task_id, "tool_result", {"call_id": first["id"], "name": first["name"],
                                                       "status": (resolved.get("result") or {}).get("status", resolved.get("decision")),
                                                       "preview": truncate(transcript[-1]["content"], 800)})
@@ -1199,6 +1228,7 @@ class Runtime:
         nudged = False
         cut_nudged = False
         numbers_checked = False
+        outcome_checked = False
         ctx_retries = 0
         while True:
             if task_id in self.cancel_flags:
@@ -1416,9 +1446,24 @@ class Runtime:
                         "inputs — then write the complete final answer again using only figures the tools produced. Start "
                         "straight with the content: don't mention this check or say \"here is the complete answer\".")})
                     continue
+            if final and not outcome_checked and not force_final and not timed_out and steps < max_steps - 1:
+                outcome_checked = True
+                oc = outcome.assess(self.store.events(task_id), final, self._tool_texts.get(task_id), t["goal"])
+                hint = outcome.nudge(oc, zh=agent_lang(s) != "en")
+                if hint:
+                    # 2026-10-06 (roadmap batch 1): "done" needs proof — an order number the confirmation page shows,
+                    # or no claim at all
+                    await self.event(task_id, "outcome_check", {"status": oc["status"], "missing": oc["missing"]})
+                    transcript.append({"role": "assistant", "content": final})
+                    transcript.append({"role": "user", "content": hint})
+                    continue
             final = merge_stranded_answer(transcript, final)
             if agent_lang(s) == "en" and prompts.cjk_share(final) > 0.5 and not prompts.wants_cjk_output(t["goal"]):
                 final = await self._rewrite_in_english(task_id, transcript, final)
+            oc = outcome.assess(self.store.events(task_id), final, self._tool_texts.get(task_id), t["goal"])
+            final += outcome.notice(oc, zh=agent_lang(s) != "en")
+            self.store.update_task(task_id, outcome=oc)
+            await self.event(task_id, "outcome", oc)
             transcript.append({"role": "assistant", "content": final})
             plan = t["plan"]
             for st in plan.get("steps", []):
@@ -1944,6 +1989,10 @@ class Runtime:
                        "in the chat) and write the final answer.")
             ok = False
             call["_refused"] = True
+        elif name in DRY_RUN_LOCAL and t.get("source") == "golden":
+            content = await self._dry_run_stop(task_id, name, args, "")
+            ok = False
+            call["_refused"] = True
         elif name in LOCAL_NAMES:
             try:
                 content = await self._local(t, name, args)
@@ -1974,9 +2023,13 @@ class Runtime:
         elif name in ext_names:
             try:
                 res = await self.sentinel("POST", "/internal/act", {"task_id": task_id, "call_id": call["id"], "tool": name,
-                                                                    "args": args, "no_ask": sub})
+                                                                    "args": args, "no_ask": sub,
+                                                                    "dry_run": t.get("source") == "golden"})
             except Exception as e:
                 res = {"status": "error", "error": f"Sentinel 不可用: {e}"}
+            if res.get("dry_run"):
+                res = {"status": "denied", "reason": await self._dry_run_stop(task_id, name, args, res.get("reason", ""))}
+                call["_refused"] = True
             st = res.get("status")
             if st == "approval_required" and not sub:
                 raise Suspend("WAITING_APPROVAL", {"type": "approval", "approval_id": res.get("approval_id"),
@@ -2038,6 +2091,7 @@ class Runtime:
             if len(ids) < 50000:
                 ids.update(re.findall(r"(?:[a-z]\d+:)?[A-Za-z0-9_\-]{8,}", str(content)))
         transcript.append({"role": "tool", "tool_call_id": call["id"], "content": content})
+        self._note_tool_text(task_id, content)
         await self.event(task_id, "tool_result", {"call_id": call["id"], "name": name, "ok": ok, "sub": sub,
                                                   "preview": truncate(content, 800)})
         return ok
