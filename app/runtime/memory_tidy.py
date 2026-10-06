@@ -35,7 +35,7 @@ Return ONLY JSON with these optional lists (use ids exactly as given, never inve
 Rules:
 - merge: facts that say the same thing or are clearly about one subject and read better as one sentence. Keep every detail.
 - rewrite: only when the text is messy (logs, tool output, very long). Never change meaning and never add details or examples.
-- demote (long → recent): process notes, task logs, one-off bookings/orders/dates, things that are no longer true, facts about web pages rather than the user.
+- demote (long → recent): process notes, task logs, one-off bookings/orders/dates, things that are no longer true, facts about web pages rather than the user (but how a website works FOR the user — guest checkout, phone format, delivery option — is durable: keep it).
 - promote (recent → long): stable preferences, people, companies, habits that will matter for months.
 - profile: a fixed personal detail of the user that belongs in their profile (name, phone, email, address, company, title, birthday, nationality). These are only suggested; the user confirms.
 - Never output ID / passport / membership / card numbers, passwords or codes.
@@ -245,6 +245,8 @@ def apply(store, p: dict) -> dict:
             upd["tier"] = "long"
         if cat:
             upd["category"] = cat
+        if any((x.get("status") or "active") == "active" for x in [k] + others):
+            upd["status"] = "active"
         if text and text != k["fact"]:
             upd["fact"] = text
         store.update_fact(keep, **upd)

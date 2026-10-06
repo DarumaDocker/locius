@@ -71,11 +71,11 @@ spec:
 
     Runs on the local models served by your Olares by default — any OpenAI-compatible endpoint works. English and 中文 interface.
   upgradeDescription: |
+    0.2.69: Personal context v1: memory in 7 domains, only the facts a request needs go into each task (no repeated questions), site habits shown when a site opens, learned habits wait for your OK, Memory page by domain with a try-it preview; mailbox health check; pages still 'Loading…' get a few more seconds
     0.2.68: Golden runs score unnecessary approvals; price/quantity filter boxes no longer ask for approval; failure causes split into timeout / step limit / failing sources; golden tasks hidden from the task list; a card is filled only after the one purchase confirmation
     0.2.67: Trust page: task completion and approval metrics, health alerts on Telegram, proof required before saying an order or email is done, 20 weekly golden test tasks (dry run)
     0.2.66: Never falls back to a speech or audio model when the chat model is briefly missing; a stand-in model is used for 5 minutes at most
     0.2.65: Going to checkout and moving between checkout steps no longer asks for approval; the one purchase confirmation covers the order. Browser takeover no longer waits on a stuck agent action; typing works right after taking over, including Chinese input methods; scrolling no longer delays clicks and keys; card number, expiry and CVC boxes in separate payment iframes are all found and typed key by key
-    0.2.64: One approval for a whole purchase: confirm item, total, card and delivery once, then checkout, card fill and place-order go through (30 min, same site, total checked); learned form habits such as phone formats are remembered
   developer: Lucas Lu
   website: https://github.com/Drlucaslu/locius
   sourceCode: https://github.com/Drlucaslu/locius

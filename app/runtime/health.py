@@ -19,11 +19,12 @@ import httpx
 
 CHECK_EVERY = 120
 DOWN_AFTER = 2            # consecutive failed checks
+MAIL_EVERY = 2            # mailboxes are checked every other round (≤ 8 min to an alert)
 REMIND_AFTER = 6 * 3600
 STREAK = 3                # failed tasks with the same cause …
 STREAK_WINDOW = 3600      # … within this many seconds
 
-LABELS = {"model": ("模型服务", "model service"), "browser": ("浏览器", "browser"), "sentinel": ("安全网关 Sentinel", "Sentinel"),
+LABELS = {"mail": ("邮箱", "mailbox"), "model": ("模型服务", "model service"), "browser": ("浏览器", "browser"), "sentinel": ("安全网关 Sentinel", "Sentinel"),
           "tasks": ("任务执行", "task runs")}
 CAUSES = {"model": "模型", "browser": "浏览器", "mail": "邮箱", "sentinel": "Sentinel", "timeout": "超时",
           "step_limit": "步数用完", "gave_up": "来源反复失败", "other": "其他"}
@@ -100,9 +101,30 @@ class Health:
             return False, f"浏览器服务不可用：{str(st.get('error') or '')[:120]}"
         return True, "浏览器正常"
 
+    async def check_mail(self) -> tuple[bool, str] | None:
+        """None = no mailbox connected (nothing to watch)."""
+        try:
+            r = await self.rt.sentinel("GET", "/internal/mail_check", timeout=90)
+        except Exception as e:
+            if "Connect" in type(e).__name__:
+                return None          # Sentinel itself is down: the sentinel check reports that
+            return False, f"邮箱检查没有完成：{type(e).__name__}"
+        accs = r.get("accounts") or []
+        if not accs:
+            return None
+        bad = [a for a in accs if not a.get("ok")]
+        if bad:
+            return False, "；".join(f"{a.get('email')} 连不上（{str(a.get('error') or '')[:100]}）" for a in bad[:3])
+        return True, f"{len(accs)} 个邮箱正常"
+
     async def run_checks(self) -> dict:
         out = {}
         out["model"] = await self.check_model()
+        self._round = getattr(self, "_round", 0) + 1
+        if MAIL_EVERY <= 1 or self._round % MAIL_EVERY == 1:   # IMAP sign-ins are slower: every other round
+            m = await self.check_mail()
+            if m is not None:
+                out["mail"] = m
         b_ok, b_detail = await self.check_browser()
         if not b_ok and "Sentinel" in b_detail:
             out["sentinel"] = (False, b_detail)

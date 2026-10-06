@@ -356,6 +356,20 @@ async def internal_expire_approvals(req: Request):
     return {"expired": n}
 
 
+@app.get("/internal/mail_check", dependencies=[Depends(runtime_auth)])
+async def internal_mail_check():
+    """Health check for the connected mailboxes (runtime health watch): sign in to each one and list the inbox."""
+    out = []
+    for acc in mailboxes.ready_accounts(store):
+        try:
+            g = actions.gmail_client(store, acc["id"])
+            await asyncio.wait_for(asyncio.to_thread(g.test), timeout=40)
+            out.append({"email": acc.get("email", ""), "ok": True})
+        except Exception as e:
+            out.append({"email": acc.get("email", ""), "ok": False, "error": f"{type(e).__name__}: {str(e)[:160]}"})
+    return {"accounts": out}
+
+
 @app.get("/internal/browser_state", dependencies=[Depends(runtime_auth)])
 async def internal_browser_state():
     try:

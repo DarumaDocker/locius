@@ -590,6 +590,9 @@ function evLine(e) {
       (d.facts || []).length ? T('🧠 记住了：') + d.facts.join(T('；')) : '',
       (d.recent || []).length ? ' ' + T('⏳ 近期记忆：') + d.recent.join(T('；')) : '',
       (d.profile_suggestions || []).length ? ' ' + T('📝 档案修改待你确认（记忆页）：') + d.profile_suggestions.join(T('；')) : ''].join('').trim()); break;
+    case 'context_used': body = h('details', null, h('summary', null, Tf("🧠 带上了 {0} 条相关记忆", (d.facts || []).length)),
+      h('ul', { class: 'small' }, (d.facts || []).map(f => h('li', null, f.fact, f.status === 'pending' ? T('（未确认）') : '', h('span', { class: 'faint' }, f.why ? ' — ' + f.why : ''))))); break;
+    case 'context_site': body = h('span', null, Tf("🧠 记得在 {0} 的习惯：{1}", d.site, (d.facts || []).join(T('；')))); break;
     case 'profile_read': body = h('span', { class: 'muted' }, Tf("🪪 读取档案：{0}", (d.fields || []).join(', ') || T('全部'))); break;
     case 'replanning': body = h('span', { style: 'color:var(--warn)' }, T('🔄 重新规划 Re-plan')); break;
     case 'chart': body = h('span', null, Tf("📊 图表：{0}", (d.title || d.path || ''))); break;
@@ -1771,9 +1774,68 @@ const CAT_LABEL = { preference: T('偏好'), person: T('人物'), company: T('�
 async function viewMemory(root) {
   const [r, v] = await Promise.all([api('memory'), sapi('vault').catch(() => ({ items: [], kinds: {}, field_labels: {} }))]);
   root.append(
-    h('div', { class: 'grid2' }, memProfileCard(r), h('div', { class: 'stack' }, memPendingCard(r), memTidyCard(r))),
-    h('div', { class: 'grid2', style: 'margin-top:16px' }, memFactsCard(r), memRecentCard(r)),
-    h('div', { class: 'grid2', style: 'margin-top:16px' }, memVaultCard(v), memEpisodesCard(r)));
+    h('div', { class: 'grid2' }, memProfileCard(r), h('div', { class: 'stack' }, memLearnedCard(r), memPendingCard(r), memTidyCard(r))),
+    h('div', { style: 'margin-top:16px' }, memFactsCard(r)),
+    h('div', { class: 'grid2', style: 'margin-top:16px' }, memTryCard(r), memEntitiesCard(r)),
+    h('div', { class: 'grid2', style: 'margin-top:16px' }, memRecentCard(r), memVaultCard(v)),
+    h('div', { style: 'margin-top:16px' }, memEpisodesCard(r)));
+}
+
+const domLabel = (r, k) => { const d = (r.domains || []).find(x => x.key === k); return d ? (LANG === 'en' ? d.en : d.zh) : (k || ''); };
+
+function memDomainSelect(r, value, onchange) {
+  const sel = h('select', { 'aria-label': T('域 Domain'), style: 'width:auto;flex:0 0 auto;padding:2px 6px;font-size:12px' },
+    (r.domains || []).map(d => h('option', { value: d.key }, LANG === 'en' ? d.en : d.zh)));
+  sel.value = value || 'work';
+  if (onchange) sel.onchange = () => onchange(sel.value);
+  return sel;
+}
+
+function memLearnedCard(r) {
+  const list = (r.facts || []).filter(f => f.status === 'pending');
+  const go = (f, body) => safe(async () => { await api('memory/' + f.id, { method: body ? 'PUT' : 'DELETE', body }); route(); });
+  return h('div', { class: 'card stack' },
+    h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, T('🌱 OMuse 学到的，待你确认 Learned')), list.length ? h('span', { class: 'chip bad' }, String(list.length)) : h('span', { class: 'chip ok' }, T('无 None'))),
+    h('p', { class: 'sub' }, T('任务中 OMuse 自己发现的习惯（比如某个网站电话要填 8 位）。确认之前也会用，但会标明「未确认」。')),
+    list.length ? list.map(f => h('div', { class: 'row', style: 'border-bottom:1px solid var(--line-2);padding-bottom:6px;align-items:flex-start' },
+      h('div', { style: 'flex:1;min-width:0' }, f.fact, h('div', { class: 'small muted' }, domLabel(r, f.domain))),
+      h('button', { class: 'btn approve small', onclick: go(f, { status: 'active' }) }, T('✓ 对 Confirm')),
+      h('button', { class: 'btn danger small', onclick: go(f, null) }, T('✕ 不对 Forget')))) : h('div', { class: 'muted small' }, T('暂无')));
+}
+
+function memTryCard(r) {
+  const inp = h('input', { type: 'text', placeholder: T('输入一个请求，例如：帮我在迪卡侬买双跑鞋') });
+  const out = h('div', { class: 'stack' });
+  const run = safe(async () => {
+    if (!inp.value.trim()) return;
+    const x = await api('context/preview?q=' + encodeURIComponent(inp.value));
+    out.replaceChildren(...(x.facts.length ? x.facts.map(f => h('div', { class: 'small', style: 'border-bottom:1px solid var(--line-2);padding:4px 0' },
+      h('span', { class: 'chip', style: 'margin-right:6px' }, domLabel(r, f.domain)), f.fact,
+      f.status === 'pending' ? h('span', { class: 'muted' }, T('（未确认）')) : null,
+      h('div', { class: 'faint' }, f.why || ''))) : [h('div', { class: 'muted small' }, T('记忆里没有和这个请求相关的内容。'))]));
+  });
+  inp.onkeydown = (e) => { if (e.key === 'Enter') run(); };
+  return h('div', { class: 'card stack' }, h('h3', null, T('🔎 试一试：这个请求会用到哪些记忆 Try it')),
+    h('p', { class: 'sub' }, T('每个任务开始时，OMuse 只带上和这个请求相关的几条记忆（尺码、舱位、口味、网站习惯…），不用你再说一遍。')),
+    h('div', { class: 'row' }, inp, h('button', { class: 'btn primary', onclick: run }, T('看看 Preview'))), out);
+}
+
+function memEntitiesCard(r) {
+  const ents = r.entities || [];
+  const edit = (e) => safe(async () => {
+    const al = prompt(Tf("「{0}」的别名，用逗号分隔（例如：迪卡侬, Decathlon）", e.name), ((e.attrs || {}).aliases || []).join(', '));
+    if (al === null) return;
+    let rel = e.relation || '';
+    if (e.type === 'person') { const x = prompt(Tf("「{0}」和你的关系（例如：同事、太太、旅伴；可留空）", e.name), rel); if (x !== null) rel = x; }
+    await api('entities/' + e.id, { method: 'PUT', body: { aliases: al, relation: rel } }); route();
+  });
+  const groups = ['person', 'place', 'account', 'site'].map(k => [k, ents.filter(e => e.type === k)]).filter(([, l]) => l.length);
+  return h('div', { class: 'card stack' }, h('h3', null, T('👥 人物、地点、账户、网站 Entities')),
+    h('p', { class: 'sub' }, T('记忆里提到的人和地方。加上别名或关系后（如「太太」「迪卡侬」），你换个说法 OMuse 也能对上。')),
+    groups.length ? groups.map(([k, l]) => h('div', { class: 'stack', style: 'gap:4px' }, h('b', { class: 'small' }, domLabel(r, k)),
+      h('div', { class: 'row', style: 'flex-wrap:wrap;gap:6px' }, l.map(e => h('button', { class: 'chip', style: 'cursor:pointer', onclick: edit(e), title: T('点击编辑别名 / 关系') },
+        e.name + (e.relation ? ` · ${e.relation}` : '') + (((e.attrs || {}).aliases || []).length ? ` (${e.attrs.aliases.join(', ')})` : '')))))) :
+      h('div', { class: 'muted small' }, T('暂无')));
 }
 
 function memProfileCard(r) {
@@ -1858,7 +1920,7 @@ function memPlanView(rep) {
     h('div', { class: 'small muted' }, Tf("过期清理：记忆 {0} 条，经历 {1} 条", (L.prune_facts || []).length, L.prune_episodes || 0)));
 }
 
-function memFactRow(f, recent) {
+function memFactRow(f, recent, r) {
   const edit = safe(async () => {
     const t = prompt(T('修改这条记忆'), f.fact); if (t === null || !t.trim()) return;
     await api('memory/' + f.id, { method: 'PUT', body: { fact: t } }); route();
@@ -1866,8 +1928,10 @@ function memFactRow(f, recent) {
   const move = safe(async () => { await api('memory/' + f.id, { method: 'PUT', body: { tier: recent ? 'long' : 'recent' } }); route(); });
   const del = safe(async () => { await api('memory/' + f.id, { method: 'DELETE' }); route(); });
   const left = recent && f.expires_at ? Math.max(0, Math.ceil((f.expires_at * 1000 - Date.now()) / 86400000)) : null;
-  return h('tr', null, h('td', null, f.fact, f.history ? h('div', { class: 'small faint', title: f.history }, T('（有修改记录）')) : null),
-    h('td', { class: 'small' }, CAT_LABEL[f.category] || f.category || ''),
+  const dom = r ? memDomainSelect(r, f.domain, safe(async (v) => { await api('memory/' + f.id, { method: 'PUT', body: { domain: v } }); toast(T('已改 Saved')); })) : (CAT_LABEL[f.category] || f.category || '');
+  return h('tr', null, h('td', null, f.fact, f.status === 'pending' ? h('span', { class: 'chip bad', style: 'margin-left:6px' }, T('待确认')) : null,
+      f.history ? h('div', { class: 'small faint', title: f.history }, T('（有修改记录）')) : null),
+    h('td', { class: 'small' }, dom),
     h('td', { class: 'small muted', style: 'white-space:nowrap' }, recent ? Tf("{0} 天后过期", left ?? '?') : String(f.uses || 0)),
     h('td', { class: 'row', style: 'gap:4px;flex-wrap:nowrap;white-space:nowrap' },
       h('button', { class: 'btn small', onclick: edit }, T('改')),
@@ -1876,14 +1940,24 @@ function memFactRow(f, recent) {
 }
 
 function memFactsCard(r) {
-  const inp = h('input', { type: 'text', placeholder: T('例如：我偏好直飞航班；John Smith 是 Acme 的 CFO') });
-  const cat = h('select', { 'aria-label': T('类别'), style: 'width:auto;flex:0 0 auto' }, MEM_CATS.map(c => h('option', { value: c }, CAT_LABEL[c])));
+  const inp = h('input', { type: 'text', placeholder: T('例如：我穿 43 码运动鞋；订餐厅优先湘菜；James Zhan 是我的合作伙伴') });
+  const dom = memDomainSelect(r, 'preference');
+  const body = h('tbody');
+  const counts = {}; for (const f of r.facts) counts[f.domain || 'work'] = (counts[f.domain || 'work'] || 0) + 1;
+  let cur = S.memDomain || '';
+  const chips = h('div', { class: 'row', style: 'flex-wrap:wrap;gap:6px' });
+  const draw = () => {
+    chips.replaceChildren(...[['', T('全部 All'), r.facts.length], ...(r.domains || []).map(d => [d.key, LANG === 'en' ? d.en : d.zh, counts[d.key] || 0])]
+      .map(([k, label, n]) => h('button', { class: 'chip' + (k === cur ? ' ok' : ''), style: 'cursor:pointer', onclick: () => { cur = k; S.memDomain = k; draw(); } }, `${label} ${n}`)));
+    body.replaceChildren(...r.facts.filter(f => !cur || (f.domain || 'work') === cur).map(f => memFactRow(f, false, r)));
+  };
+  draw();
   return h('div', { class: 'card stack' }, h('h3', null, Tf("🧠 长期记忆 Long-term（{0}）", r.facts.length)),
-    h('p', { class: 'sub' }, T('偏好、人物、公司、项目、习惯。Agent 只从你自己说的话里提取，不会从邮件或网页里学习；需要时按相关度取用，不会每次全部带上。')),
-    h('div', { class: 'row' }, inp, cat, h('button', { class: 'btn primary', onclick: safe(async () => { await api('memory', { method: 'POST', body: { fact: inp.value, category: cat.value } }); route(); }) }, T('记住 Remember'))),
+    h('p', { class: 'sub' }, T('按 7 个域整理：人物与关系、偏好、地点、账户与会员、网站习惯、默认规则、工作与其他。域可以直接改；每个任务只取相关的几条。')),
+    h('div', { class: 'row' }, inp, dom, h('button', { class: 'btn primary', onclick: safe(async () => { await api('memory', { method: 'POST', body: { fact: inp.value, domain: dom.value } }); route(); }) }, T('记住 Remember'))),
+    chips,
     r.facts.length ? h('div', { class: 'tablewrap' }, h('table', { class: 'data memtable' },
-      h('thead', null, h('tr', null, [T('事实 Fact'), T('类别'), T('用过'), ''].map(x => h('th', null, x)))),
-      h('tbody', null, r.facts.map(f => memFactRow(f, false))))) : h('div', { class: 'muted small' }, T('还没有记忆。')));
+      h('thead', null, h('tr', null, [T('事实 Fact'), T('域'), T('用过'), ''].map(x => h('th', null, x)))), body)) : h('div', { class: 'muted small' }, T('还没有记忆。')));
 }
 
 function memRecentCard(r) {

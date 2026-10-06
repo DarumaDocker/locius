@@ -1768,3 +1768,158 @@ def test_card_fill_needs_the_purchase_confirmed_first(store, monkeypatch):
                                                        "masked": "E••••12", "domains": []})
     pp = dict(box, name="Passport number")
     assert decide(store, "browser_fill_secret", {"ref": "e4", "item_id": "p1", "field": "number"}, "tk2", elem=pp, page=page).decision == ASK
+
+
+# ---------------------------------------------------------------- batch 2: personal context
+def _ctx_facts():
+    from tests.fixtures.memory_like import FACTS
+    from app.runtime import context as C
+    out = [{"id": f"f{i}", "category": c, "entity": e, "fact": t, "uses": 0, "status": "active"} for i, (c, e, t) in enumerate(FACTS)]
+    for f in out:
+        f["domain"] = C.domain_of(f["fact"], f["category"], f["entity"])
+    return out
+
+
+def test_memory_is_sorted_into_domains():
+    from app.runtime.context import domain_of
+    assert domain_of("decathlon.sg 网站支持访客结账，电话号码填 8 位，不要 +65。") == "site"
+    assert domain_of("我身高177，体重76公斤，运动鞋43码。", "preference") == "preference"
+    assert domain_of("用户要求：以后每次说「准备出差」，按固定流程执行") == "rule"
+    assert domain_of("The user prefers the assistant to execute tasks autonomously.", "preference") == "rule"
+    assert domain_of("The user travels with LU A and LU B.", "person") == "person"
+    assert domain_of("The user works at BEC Lab, located at 20 Anson Rd.", "company") == "place"
+    assert domain_of("The user manages the email account lucas@example.io.", "company") == "account"
+    assert domain_of("我美国手机号码是 +1-669-000-0000", "preference") == "account"
+    assert domain_of("The user prefers sending emails from their example.io address.", "preference") == "preference"
+    assert domain_of("The user is working on the Olares One PCBA project.", "project") == "work"
+    assert domain_of("anything", "site") == "site"        # a domain the user picked stays
+
+
+def test_context_picks_what_the_request_needs():
+    import re
+    from tests.fixtures.ctx_requests import REQUESTS
+    from app.runtime import context as C
+    facts = _ctx_facts()
+    for pid, req, rx in REQUESTS:
+        sel = C.select(req, facts)
+        assert any(re.search(rx, f["fact"], re.I) for f in sel), (pid, [f["fact"][:40] for f in sel])
+        assert len(sel) <= 12
+    shoes = " | ".join(f["fact"] for f in C.select(REQUESTS[0][1], facts))
+    assert "decathlon.sg" in shoes and "43" in shoes          # the shop's habits + the size
+    assert "metal pens" not in shoes and "phone cases" not in shoes and "business class" not in shoes
+    # a rule with a trigger phrase only when the user says it
+    assert not any("准备出差" in f["fact"] for f in C.select("帮我订下个月去东京的机票", facts))
+    assert C.select("准备出差，下周去东京", facts)[0]["fact"].startswith("用户要求")
+    txt = C.render(C.select(REQUESTS[0][1], facts))
+    assert "[网站习惯 Site habits]" in txt and "[偏好 Preferences]" in txt
+
+
+def test_context_aliases_and_relations(tmp_path):
+    from app.runtime.store import RStore
+    from app.runtime import context as C
+    st = RStore(str(tmp_path))
+    st.add_fact("Mei collects jazz vinyl records.", "person", "Mei")
+    st.add_fact("The user likes jazz.", "preference")
+    e = next(x for x in st.entities() if x["name"] == "Mei")
+    assert e["type"] == "person"
+    assert not any("Mei" in f["fact"] for f in C.select("帮我给太太挑个生日礼物", st.facts(), st.entities()))
+    st.update_entity(e["id"], aliases=["梅梅"], relation="太太")
+    sel = C.select("帮我给太太挑个生日礼物", st.facts(), st.entities())
+    assert sel and "Mei" in sel[0]["fact"] and "提到" in sel[0]["why"]
+    assert st.entities()[0]["relation"] == "太太"
+
+
+def test_learned_facts_wait_for_the_user(tmp_path):
+    import asyncio
+    from app.runtime.agent import Runtime
+
+    async def pub(_):
+        pass
+    rt = Runtime(str(tmp_path), pub)
+    st = rt.store
+    t = {"id": "t1", "goal": "在 decathlon.sg 买一双袜子"}
+    out = asyncio.run(rt._local(t, "memory_remember", {"fact": "decathlon.sg asks for the phone as 8 digits without +65.", "domain": "site"}))
+    f = st.search_facts("decathlon phone", 5)[0]
+    assert f["status"] == "pending" and f["domain"] == "site" and "确认" in out
+    t2 = {"id": "t2", "goal": "记住：我订酒店只要安静的精品酒店"}
+    asyncio.run(rt._local(t2, "memory_remember", {"fact": "The user wants quiet boutique hotels."}))
+    g = next(x for x in st.facts() if "boutique" in x["fact"])
+    assert g["status"] == "active" and g["domain"] == "preference"
+    # the user confirms on the Memory page
+    st.update_fact(f["id"], status="active")
+    assert st.fact(f["id"])["status"] == "active"
+    # pending facts are still used, marked
+    st.update_fact(f["id"], status="pending")
+    sel = rt._facts_for("帮我在迪卡侬买双袜子", "", "t9")
+    assert any(x["id"] == f["id"] and x["status"] == "pending" for x in sel)
+    from app.runtime import prompts
+    assert "unconfirmed" in prompts.facts_text(sel)
+
+
+def test_old_memory_gets_domains_and_chinese_search(tmp_path):
+    import sqlite3
+    from app.runtime.store import RStore
+    st = RStore(str(tmp_path))
+    st.add_fact("我身高177，体重76公斤，鞋子42码，运动鞋43码。", "preference")
+    st.db.execute("UPDATE facts SET domain=''")
+    st2 = RStore(str(tmp_path))            # restart: older facts are sorted
+    assert st2.facts()[0]["domain"] == "preference"
+    hits = st2.search_facts("我平时穿多大码的鞋", 5)
+    assert hits and "43" in hits[0]["fact"]
+
+
+def test_site_habits_show_up_when_the_site_opens(tmp_path):
+    import asyncio
+    from app.runtime import context as C
+    from app.runtime.agent import Runtime
+    assert C.site_name("https://www.decathlon.sg/p/123") == "decathlon"
+    assert C.site_name("https://www.amazon.com.sg/x") == "amazon"
+    assert C.site_name("https://shop.test/") == "shop"
+
+    async def pub(_):
+        pass
+    rt = Runtime(str(tmp_path), pub)
+    rt.store.add_fact("decathlon.sg 支持访客结账；电话填 8 位，不要 +65。", "other")
+    rt.store.add_fact("The user likes jazz.", "preference")
+    note = asyncio.run(rt._site_note("t1", "https://www.decathlon.sg/checkout"))
+    assert "8 位" in note and "jazz" not in note
+    assert asyncio.run(rt._site_note("t1", "https://www.decathlon.sg/cart")) == ""      # once per task
+    assert asyncio.run(rt._site_note("t1", "https://www.ikea.com/sg")) == ""
+
+
+def test_context_golden_cases_are_scored():
+    from app.runtime.golden import CTX_CASES, evaluate_ctx
+    case = next(c for c in CTX_CASES if c["id"] == "P01")
+    ev_ok = [{"type": "tool_call", "data": {"name": "browser_click", "args": {"ref": "e1"}}}]
+    r = evaluate_ctx(case, {"status": "COMPLETED", "result": "按你的 43 码选了 Kiprun KS900，已加入购物车。"}, ev_ok)
+    assert r["used"] and not r["asked"] and not r["why"]
+    r = evaluate_ctx(case, {"status": "COMPLETED", "result": "找到 3 双跑鞋。请问你穿多大的尺码？"}, ev_ok)
+    assert r["asked"] and not r["used"]
+    assert len(CTX_CASES) == 10
+
+
+def test_mailbox_health_check():
+    # batch 1 acceptance: a mailbox that stops signing in raises an alert within 10 minutes (checked every other round)
+    import asyncio
+    from app.runtime import health as Hm
+
+    class FakeRt:
+        def __init__(self):
+            self.mail = {"accounts": [{"email": "a@x.com", "ok": True}]}
+
+        async def sentinel(self, method, path, payload=None, timeout=0):
+            if path == "/internal/mail_check":
+                return self.mail
+            if path == "/internal/browser_state":
+                return {"mode": "local"}
+            return {}
+
+    h = Hm.Health.__new__(Hm.Health)
+    h.rt = FakeRt(); h.state = {}; h.recent = []
+    assert asyncio.run(h.check_mail()) == (True, "1 个邮箱正常")
+    h.rt.mail = {"accounts": [{"email": "a@x.com", "ok": False, "error": "AUTHENTICATIONFAILED"}]}
+    ok, why = asyncio.run(h.check_mail())
+    assert not ok and "a@x.com" in why and "AUTHENTICATIONFAILED" in why
+    h.rt.mail = {"accounts": []}
+    assert asyncio.run(h.check_mail()) is None          # nothing connected: nothing to watch
+    assert Hm.MAIL_EVERY * Hm.DOWN_AFTER * Hm.CHECK_EVERY <= 600

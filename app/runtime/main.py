@@ -365,7 +365,9 @@ async def memory():
     runs = [{"id": r["id"], "ts": r["ts"], "kind": r["kind"], "lines": (r["report"] or {}).get("lines") or [],
              "errors": (r["report"] or {}).get("errors") or [], "applied": (r["report"] or {}).get("applied")}
             for r in st.memory_runs(10)]
+    from app.runtime.context import DOMAINS
     return {"facts": st.facts(), "recent": st.facts(1000, tier="recent"), "episodes": st.episodes(50),
+            "domains": [{"key": k, "zh": zh, "en": en} for k, zh, en in DOMAINS], "entities": st.entities(),
             "profile": st.profile(), "profile_fields": [{"key": k, "zh": zh, "en": en} for k, zh, en in PROFILE_FIELDS],
             "pending": st.profile_pending(), "runs": runs, "job": MT.job_state(),
             "needs_first_review": MT.needs_first_review(st),
@@ -380,7 +382,8 @@ async def add_memory(req: Request):
     if looks_sensitive(fact):
         raise HTTPException(400, "证件号、卡号和密码请放进保险箱 (ID / card numbers and passwords belong in the vault)")
     r = rt.store.add_fact(fact, str(b.get("category") or "preference"), str(b.get("entity") or ""),
-                          source="user-ui", confidence=1.0, tier="recent" if b.get("tier") == "recent" else "long")
+                          source="user-ui", confidence=1.0, tier="recent" if b.get("tier") == "recent" else "long",
+                          domain=str(b.get("domain") or ""))
     if not r:
         raise HTTPException(400, "empty fact")
     await rt.audit("user", "memory.add", detail={"fact": r["fact"]})
@@ -400,11 +403,51 @@ async def edit_memory(fid: str, req: Request):
         kw["tier"] = b["tier"]
     if isinstance(b.get("category"), str):
         kw["category"] = b["category"][:30]
+    if isinstance(b.get("domain"), str):
+        kw["domain"] = b["domain"]
+    if b.get("status") in ("active", "pending"):
+        kw["status"] = b["status"]       # "active" = the user confirmed something OMuse learned
+    if isinstance(b.get("entity"), str):
+        kw["entity"] = b["entity"].strip()[:60]
     r = rt.store.update_fact(fid, **kw)
     if not r:
         raise HTTPException(404, "not found")
     await rt.audit("user", "memory.edit", resource=fid, detail={k: v for k, v in kw.items()})
     return r
+
+
+@app.get("/api/context/preview")
+async def context_preview(q: str = "", mode: str = "v1"):
+    """What OMuse would know going into a request (Memory page → "试一试"; also used by the batch 2 tests)."""
+    from app.runtime import context
+    if mode == "legacy":
+        facts = rt._facts_legacy(q)
+    else:
+        facts = context.select(q, rt.store.facts(500), rt.store.entities(), limit=12)
+    return {"mode": mode, "facts": [{"id": f["id"], "fact": f["fact"], "domain": f.get("domain"), "status": f.get("status"),
+                                     "why": f.get("why", ""), "score": f.get("score")} for f in facts]}
+
+
+@app.put("/api/entities/{eid}")
+async def edit_entity(eid: str, req: Request):
+    b = await req.json()
+    al = b.get("aliases")
+    if isinstance(al, str):
+        al = [x for x in re.split(r"[,，、;；]", al)]
+    r = rt.store.update_entity(eid, aliases=al if isinstance(al, list) else None,
+                               relation=b.get("relation") if isinstance(b.get("relation"), str) else None,
+                               kind=b.get("type"))
+    if not r:
+        raise HTTPException(404, "not found")
+    await rt.audit("user", "memory.entity", resource=eid, detail={k: b.get(k) for k in ("aliases", "relation", "type")})
+    await rt.publish({"kind": "memory_update"})
+    return r
+
+
+@app.delete("/api/entities/{eid}")
+async def del_entity(eid: str):
+    rt.store.delete_entity(eid)
+    return {"ok": True}
 
 
 @app.delete("/api/memory/{fid}")
@@ -487,9 +530,10 @@ async def api_health_check():
 
 @app.get("/api/golden/runs")
 async def golden_runs(limit: int = 10):
-    from app.runtime.golden import CASES
+    from app.runtime.golden import CASES, CTX_CASES
     return {"running": rt.golden.running, "runs": rt.golden.runs(min(limit, 50)),
-            "cases": [{"id": c["id"], "title": c["title"], "prompt": c["prompt"]} for c in CASES]}
+            "cases": [{"id": c["id"], "title": c["title"], "prompt": c["prompt"]} for c in CASES],
+            "context_cases": [{"id": c["id"], "title": c["title"], "prompt": c["prompt"]} for c in CTX_CASES]}
 
 
 @app.post("/api/golden/run")
@@ -498,7 +542,9 @@ async def golden_run(req: Request):
     if rt.golden.running:
         raise HTTPException(409, "黄金测试已在运行 (already running)")
     only = [str(x) for x in (b.get("only") or [])] or None
-    asyncio.create_task(rt.golden.run("manual", only))
+    suite = "context" if b.get("suite") == "context" else ""
+    ctx = "legacy" if b.get("context") == "legacy" else ""
+    asyncio.create_task(rt.golden.run("manual", only, suite, ctx))
     await asyncio.sleep(0.2)
     return {"ok": True, "run_id": rt.golden.running}
 

@@ -445,6 +445,14 @@ async def chat(req: Request):
         if not b.get("tools"):
             return reply(f"LOOP SUMMARY after {n} tool calls: feed read, email not sent.")
         return reply("", [tc("browser_navigate", {"url": PAGE.rsplit('/', 1)[0] + "/feed.xml"})])
+    if "SITECHECK" in goal:      # batch 2: what OMuse learned about a site shows up when it opens
+        if n == 0:
+            return reply("", [tc("browser_navigate", {"url": PAGE})])
+        return reply(f"Opened. {last_tool[:200]}")
+    if "LEARNSITE" in goal:      # batch 2: a habit learned by OMuse itself
+        if n == 0:
+            return reply("", [tc("memory_remember", {"fact": "shop.test allows guest checkout; the phone goes in as 8 digits.", "domain": "site"})])
+        return reply(f"Learned. {last_tool[:200]}")
     if "SEND" in goal:
         if n == 0:
             return reply("I'll send it.", [tc("gmail_send", {"to": "john@example.com", "subject": "Tuesday", "body": "Tuesday 3pm works."})])
@@ -600,7 +608,8 @@ async def calls_for(marker: str):
         ms = b.get("messages") or []
         if any(marker in str(m.get("content")) for m in ms if m.get("role") == "user") and ms and ms[0].get("role") == "system" \
                 and "planning module" not in str(ms[0].get("content")):
-            out.append({"system": ms[0]["content"], "last": str(ms[-1].get("content")), "n": len(ms)})
+            out.append({"system": ms[0]["content"], "last": str(ms[-1].get("content")), "n": len(ms),
+                        "tools": "\n".join(str(m.get("content")) for m in ms if m.get("role") == "tool")})
     return out
 
 

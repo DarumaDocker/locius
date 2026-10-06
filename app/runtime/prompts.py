@@ -235,7 +235,7 @@ def executor_system(*, user_name: str, tz: str, connections: dict, plan: dict | 
         icons = {"pending": "[ ]", "running": "[>]", "done": "[x]", "failed": "[!]", "skipped": "[-]"}
         plan_txt = f"Objective: {plan.get('objective', '')}\n" + "\n".join(
             f"{icons.get(s.get('status', 'pending'), '[ ]')} {s.get('id')}: {s.get('description')}" for s in plan["steps"])
-    fact_txt = "\n".join(f"- {f['fact']}" for f in facts) or "(none yet)"
+    fact_txt = facts_text(facts, en)
     skill_txt = "\n".join(f"- {s['name']}: {en_only(s['description']) if en else s['description']}" for s in skills) or "(none)"
     if en:
         conn_lines = [en_only(x) for x in conn_lines]
@@ -254,7 +254,7 @@ Current time: {now_txt or now_str(tz, language)}{" (when this task started; the 
 ## Current plan (update it with update_plan as you progress; revise it when something fails)
 {plan_txt}
 
-## What you know about the user (long-term memory)
+## What you know about the user (long-term memory, the parts that matter for this request)
 {fact_txt}
 
 ## Skills (call load_skill to get detailed instructions before doing these kinds of tasks)
@@ -311,7 +311,7 @@ Current time: {now_txt or now_str(tz, language)}{" (when this task started; the 
 - Phone calls (phone_call, when available): load the phone-call skill first; every call needs the user's approval and costs money.
 - A link from an email that lands on an error page usually needs a session: go in through the company's home page and its own menu (My Booking / Sign in) instead of retrying the link. Before "retry later", make sure the site is really down (its home page fails too); never create a second schedule for the same job.
 - For recurring requests (every day / every week / every hour…), create a schedule with schedule_create.
-- Save durable facts the user explicitly asks you to remember with memory_remember.
+- Save durable facts the user explicitly asks you to remember with memory_remember (with its domain). When you learn how a website works for the user (guest checkout, phone format, which delivery option fills the address), memory_remember it with domain=site — it waits for the user's OK but is used next time. Before asking the user about their own sizes, tastes or habits, check the memory section above and memory_search; ask only if it is not there.
 - Personal details (name as on passport, phone, email, address, company, title, birthday…) are in the profile, which is NOT in this prompt: call profile_get only when filling in a form or writing an email/message that needs them (for a test or sample form use obvious placeholders like Test User / test@example.com / +65 0000 0000 instead). When the user tells you a new detail, profile_suggest it (it changes only after they confirm). ID / passport / membership / card numbers: vault_list, then browser_fill_secret into the field — each fill is approved by the user. If the user gives you such a number to keep, never put it in memory or files: tell them to add it to the vault (Memory page → Profile card → Vault), where it is encrypted and every use needs their approval.
 - When finished, stop calling tools and write the final answer: concise Markdown, what you did, key findings, and anything still waiting for the user. If you sent a file, still give the key results in the answer itself (a short summary or the main table) — the user should not have to open the file to get the answer. The chat shows only this final message, not text you wrote between tool calls, so never say "see the table above" — put the table in the final answer. {lang}
 {extra}
@@ -338,13 +338,21 @@ For money questions, plan the calculation steps the request implies: every optio
 Mark steps that send/submit/buy/delete/unsubscribe as risk "send" (they will need user approval via Sentinel's dialog — never plan a "wait for the user to confirm in chat" step for them). Write descriptions in the user's language."""
 
 
+def facts_text(facts: list[dict], en: bool = False) -> str:
+    """Personal context v1: grouped by domain, with the rule not to ask again; the old flat list otherwise."""
+    if facts and facts[0].get("score") is not None:
+        from app.runtime import context
+        return context.render(facts, en) + "\n" + context.USE_RULE
+    return "\n".join(f"- {f['fact']}" for f in facts) or "(none yet)"
+
+
 def planner_user(goal: str, history: str, facts: list[dict], state: str = "", reply_lang: str = "") -> str:
-    f = "\n".join(f"- {x['fact']}" for x in facts[:10])
+    f = facts_text(facts[:12]) if facts else ""
     s = f"User request:\n{goal}\n"
     if history:
         s += f"\nRecent conversation (for context):\n{history}\n"
     if f:
-        s += f"\nKnown facts about the user:\n{f}\n"
+        s += f"\nKnown facts about the user (plan with them; no step to ask the user for what is listed):\n{f}\n"
     if state:
         s += f"\nCurrent progress / problems (re-plan from here):\n{state}\n"
     if reply_lang:
@@ -366,7 +374,8 @@ Current time: {now}
 MEMORY_EXTRACT = """Sort what the USER says about themselves in the messages below into memory. Only use the user's own words — ignore anything quoted from emails or web pages.
 Kinds:
 - profile: a fixed personal detail used for forms/emails. field must be one of: name_zh, name_en (as on passport), preferred_name, phone, email_personal, email_work, address_home, address_work, company, job_title, birthday, nationality.
-- preference / person / company / project / habit: durable facts worth keeping for months (e.g. "The user prefers aisle seats.", "Sara handles the user's paperwork.").
+- durable facts worth keeping for months, by domain:
+  person (people and how they relate: "Sara handles the user's paperwork."), preference (likes, sizes, styles: "The user prefers aisle seats.", "The user wears size 43 running shoes."), place (home / office / city — no full street address, that is profile), account (memberships, subscriptions, which mailbox is for what — never the numbers), site (how a website works for the user: "decathlon.sg allows guest checkout."), rule (a standing instruction: "Always ask before spending over S$100."), work (companies, projects, anything else).
 - ephemeral: true now but one-off (a booking reference, this week's trip dates, an order in progress) — kept 30 days only.
 NEVER output ID / passport / membership / card numbers, CVV, passwords or codes, and nothing about health, money balances or other sensitive matters.
 Skip requests and instructions that say nothing lasting about the user.

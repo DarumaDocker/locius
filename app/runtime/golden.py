@@ -97,6 +97,72 @@ CASES = [
 ]
 
 
+# Personal context A/B (roadmap batch 2): 10 everyday requests whose answer depends on what the user told OMuse before
+# (the user's own long-term memory). "use" = the known preference shows up in what OMuse did or answered; "ask" = OMuse
+# asked the user for something memory already had (a repeat question). Run with context "legacy" (old selection) and
+# "v1" (personal context) and compare the number of repeat questions.
+CTX_CASES = [
+    {"id": "P01", "title": "跑鞋尺码", "lane": 0,
+     "prompt": "帮我在迪卡侬挑一双适合日常跑步的跑鞋，选好尺码加入购物车就行，先不用下单。",
+     "use": r"\b43\b|43 ?码|EU ?43", "ask": r"尺码|码数|鞋码|几码|多大|\bsize\b"},
+    {"id": "P02", "title": "手机壳型号", "lane": 1,
+     "prompt": "帮我网上挑一个好看的手机壳，给我 3 个候选，先不用下单。",
+     "use": r"17 ?Pro ?Max", "ask": r"型号|哪款手机|什么手机|哪个手机|which (phone|model)|phone model"},
+    {"id": "P03", "title": "机票舱位", "lane": 0,
+     "prompt": "帮我找下个月从新加坡飞东京的机票，给我两三个选择，先不要订。",
+     "use": r"商务舱|business", "ask": r"舱位|经济舱还是|商务舱还是|cabin|几位|几个人|多少人|how many (people|passengers)|直飞还是"},
+    {"id": "P04", "title": "酒店风格", "lane": 1,
+     "prompt": "帮我在东京找一家酒店，下个月住 3 晚，给几个选项，先不要订。",
+     "use": r"精品|boutique|安静|quiet", "ask": r"风格|类型|什么样的酒店|几位|几个人|多少人|几间|偏好|prefer"},
+    {"id": "P05", "title": "徒步强度", "lane": 0,
+     "prompt": "帮我找个这周末在新加坡的徒步路线。",
+     "use": r"中低|中等|轻松|适中|moderate|easy|3 ?[-–~至到] ?5 ?(小时|h)", "ask": r"强度|难度|多长时间|几个小时|多久|difficulty|how long"},
+    {"id": "P06", "title": "餐厅口味", "lane": 1,
+     "prompt": "这周六晚上想出去吃饭，帮我找两家餐厅看看有没有空位，先别订。",
+     "use": r"湘|湖南|Hunan|日本|日料|Japanese|XIANGXI", "ask": r"菜系|口味|想吃什么|什么菜|cuisine|哪种菜"},
+    {"id": "P07", "title": "T 恤尺码", "lane": 0,
+     "prompt": "帮我在迪卡侬买一件运动T恤，挑合适的尺码加入购物车，先不用下单。",
+     "use": r"\b(L|XL)\b|177|76 ?(公斤|kg)", "ask": r"尺码|身高|体重|多大|\bsize\b|几码"},
+    {"id": "P08", "title": "发件邮箱", "lane": 1,
+     "prompt": "给 James 写封邮件约他下周二下午开会，先存草稿就行。",
+     "use": r"bytetradelab", "ask": r"哪个邮箱|用哪个|从哪个|which (account|mailbox|email)"},
+    {"id": "P09", "title": "报告格式", "lane": 1,
+     "prompt": "帮我整理一份本周 AI 和机器人领域的新闻简报。",
+     "use": r"\.pdf|PDF", "ask": r"PDF|格式|format|中文还是英文|什么语言|哪种语言"},
+    {"id": "P10", "title": "送笔偏好", "lane": 0,
+     "prompt": "帮我挑一支笔送朋友，给我 3 个推荐。",
+     "use": r"金属|metal", "ask": r"预算之外.*风格|什么风格|材质|喜欢什么|什么样的笔|what (kind|style)"},
+]
+
+_Q_END = re.compile(r"[?？]\s*$")
+
+
+def _questions(answer: str, events: list[dict]) -> list[str]:
+    """What OMuse asked the user: question sentences in its answer and clarify cards."""
+    qs = [q.strip() for q in re.split(r"(?<=[?？])|\n", answer or "") if _Q_END.search(q.strip())]
+    for c in _calls(events):
+        if c.get("name") == "present_choices" and (c.get("args") or {}).get("kind") == "clarify":
+            qs.append(json.dumps(c.get("args"), ensure_ascii=False))
+    return qs
+
+
+def evaluate_ctx(case: dict, task: dict, events: list[dict]) -> dict:
+    answer = str(task.get("result") or "")
+    blob = answer + "\n" + "\n".join(json.dumps(c.get("args"), ensure_ascii=False) for c in _calls(events)) \
+        + "\n" + "\n".join(json.dumps(s.get("args"), ensure_ascii=False) for s in _stops(events))
+    asked = [q for q in _questions(answer, events) if re.search(case["ask"], q, re.I)]
+    used = bool(re.search(case["use"], blob, re.I))
+    why = []
+    if task.get("status") == "FAILED":
+        why.append(f"失败：{str(task.get('error') or '')[:80]}")
+    if asked:
+        why.append("重复问了已知偏好：" + asked[0][:120])
+    if not used:
+        why.append("没有用上已知偏好 /" + case["use"] + "/")
+    ctx = next((e["data"] for e in events if e.get("type") == "context_used"), {}) or {}
+    return {"asked": bool(asked), "used": used, "why": why,
+            "context": [f.get("fact", "")[:80] for f in (ctx.get("facts") or [])]}
+
 def _calls(events: list[dict]) -> list[dict]:
     return [e["data"] for e in events if e.get("type") == "tool_call"]
 
@@ -187,8 +253,10 @@ class Golden:
              run.get("passed", 0), run.get("total", 0), dumps(run.get("results", []))))
 
     # ------------------------------------------------------------ one case
-    async def _submit(self, conv_id: str, prompt: str) -> str:
+    async def _submit(self, conv_id: str, prompt: str, ctx: str = "") -> str:
         t = self.rt.store.create_task(prompt, conv_id, "golden")
+        if ctx == "legacy":
+            self.rt.ctx_mode[t["id"]] = "legacy"
         self.rt.store.add_msg(conv_id, "user", prompt, task_id=t["id"])
         try:   # Sentinel keeps the user's own words (policy reads them, e.g. a site named in the request)
             await self.rt.sentinel("POST", "/internal/user_request", {"task_id": t["id"], "text": prompt}, timeout=10)
@@ -215,12 +283,19 @@ class Golden:
             if time.time() - t0 > CASE_TIMEOUT:
                 await self.rt.cancel(tid, "黄金测试超时 (golden run timeout)")
 
-    async def run_case(self, case: dict, version: str) -> dict:
+    async def run_case(self, case: dict, version: str, ctx: str = "") -> dict:
         t0 = time.time()
         cid = self.rt.store.create_conv(f"[黄金测试] {case['id']} {case['title']}", kind="golden")
-        tid = await self._submit(cid, case["prompt"])
+        tid = await self._submit(cid, case["prompt"], ctx)
         t = await self._wait(tid)
+        self.rt.ctx_mode.pop(tid, None)
         ev = self.rt.store.events(tid)
+        if "use" in case:          # personal-context case
+            r = evaluate_ctx(case, t, ev)
+            return {"id": case["id"], "title": case["title"], "task_id": tid, "status": t.get("status"),
+                    "passed": not r["why"], "why": r["why"], "asked": r["asked"], "used": r["used"],
+                    "context": r["context"], "seconds": round(time.time() - t0), "steps": t.get("steps"),
+                    "stops": [s.get("tool") for s in _stops(ev)], "answer": str(t.get("result") or "")[:300]}
         why = evaluate(case["expect"], t, ev)
         follow = None
         if case.get("followup"):
@@ -238,11 +313,15 @@ class Golden:
                 "answer": str(t.get("result") or "")[:300]}
 
     # ------------------------------------------------------------ a whole run
-    async def run(self, trigger: str = "manual", only: list[str] | None = None) -> dict:
+    async def run(self, trigger: str = "manual", only: list[str] | None = None, suite: str = "",
+                  ctx: str = "") -> dict:
         if self.running:
             raise RuntimeError("黄金测试已在运行 (a golden run is already running)")
         from app.common.util import VERSION
-        cases = [c for c in CASES if not only or c["id"] in only]
+        pool = CTX_CASES if suite == "context" else CASES
+        cases = [c for c in pool if not only or c["id"] in only]
+        if suite == "context":
+            trigger = f"{trigger}:context-{ctx or 'v1'}"
         run = {"id": new_id("gold"), "started_at": now_ts(), "status": "running", "trigger": trigger, "version": VERSION,
                "total": len(cases), "passed": 0, "results": []}
         self.running = run["id"]
@@ -255,7 +334,7 @@ class Golden:
             async def lane(cs):
                 for c in cs:
                     try:
-                        res = await self.run_case(c, VERSION)
+                        res = await self.run_case(c, VERSION, ctx)
                     except Exception as e:
                         res = {"id": c["id"], "title": c["title"], "passed": False, "why": [f"运行出错 {e!r}"[:200]]}
                     run["results"].append(res)
@@ -277,9 +356,15 @@ class Golden:
     async def _report(self, run: dict):
         failed = [r for r in run["results"] if not r["passed"]]
         title = f"🧪 黄金测试 {run['passed']}/{run['total']} 通过（{run.get('version', '')}）"
+        if "context-" in str(run.get("trigger") or ""):
+            res = run["results"]
+            title = (f"🧪 个人上下文测试（{run['trigger'].split('context-')[-1]}，{run.get('version', '')}）："
+                     f"重复提问 {sum(1 for r in res if r.get('asked'))}/{len(res)}，用上已知偏好 "
+                     f"{sum(1 for r in res if r.get('used'))}/{len(res)}")
         lines = [f"✗ {r['id']} {r['title']}：{'；'.join(r['why'][:2])}" for r in failed[:8]]
         body = "\n".join(lines) or "全部通过。"
-        prev = next((r for r in self.runs(5) if r["id"] != run["id"] and r["status"] == "done"), None)
+        prev = next((r for r in self.runs(10) if r["id"] != run["id"] and r["status"] == "done"
+                     and ("context-" in str(r.get("trigger") or "")) == ("context-" in str(run.get("trigger") or ""))), None)
         if prev:
             body += f"\n上次：{prev['passed']}/{prev['total']}（{prev.get('version', '')}）"
         try:

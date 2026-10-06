@@ -518,8 +518,10 @@ LOCAL_TOOLS = [
     _fn("memory_remember", "记住用户明确要求记住的事实 Save a durable fact the user explicitly asked to remember, or a site's form habit you just learned at checkout "
         "(e.g. \"decathlon.sg accepts the phone number as 8 digits without +65\"). Not for profile "
         "fields (name, phone, email, address… → profile_suggest) and never for ID / membership / card numbers or passwords "
-        "(those live in the Sentinel vault, which the user manages).",
-        {"fact": S, "category": S, "entity": S}, ["fact"]),
+        "(those live in the Sentinel vault, which the user manages). domain: person | preference | place | account | site "
+        "(how a website works for the user) | rule (a standing instruction) | work. Something you learned yourself (not "
+        "said by the user) is kept as 'to confirm' until the user OKs it on the Memory page — it is still used meanwhile.",
+        {"fact": S, "category": S, "entity": S, "domain": S}, ["fact"]),
     _fn("profile_get", "读取用户档案 Read the user's profile (name as on passport, phone, emails, addresses, company, title, "
         "birthday, nationality…). Call it ONLY when filling in a form or writing an email/message that needs these details; "
         "use just the fields you need.", {"fields": {"type": "array", "items": S, "description": "optional: only these fields"}}),
@@ -716,6 +718,8 @@ class Runtime:
         self.pause_flags: set[str] = set()
         self._catalog_cache = (0.0, None)
         self.evidence: dict[str, list[dict]] = {}   # task_id -> pages/emails actually read (for present_choices)
+        self.ctx_mode: dict[str, str] = {}          # task_id -> "legacy" (golden A/B of personal context)
+        self.site_noted: dict[str, set] = {}        # task_id -> sites whose remembered habits were shown
         self._tool_texts: dict[str, list[str]] = {}   # task_id -> full tool results, newest last (outcome evidence)
         from app.runtime.golden import Golden
         from app.runtime.health import Health
@@ -1010,10 +1014,52 @@ class Runtime:
                 out.append({"name": name, "description": m.group(1).strip() if m else "", "path": p})
         return out
 
-    def _facts_for(self, goal: str) -> list[dict]:
-        """Long-term facts for this task: the ones related to the goal, then the most used preferences / people.
-        Recent one-off details and the profile are not included (memory_search / profile_get fetch them on demand)."""
-        found = self.store.search_facts(goal, 10)
+    def _facts_for(self, goal: str, history_txt: str = "", task_id: str = "") -> list[dict]:
+        """Long-term facts for this task (personal context v1, app/runtime/context.py): the ones that matter for what
+        is asked — sizes for clothes, cabin class for flights, the site's checkout habits for that shop — grouped by
+        domain. Recent one-off details and the profile are not included (memory_search / profile_get fetch them).
+        A golden A/B run can ask for the old selection with ctx_mode[task_id] = "legacy"."""
+        if self.ctx_mode.get(task_id) == "legacy":
+            return self._facts_legacy(goal)
+        from app.runtime import context
+        users = [ln[6:] for ln in (history_txt or "").splitlines() if ln.startswith("user: ")][-3:]
+        try:
+            out = context.select(goal, self.store.facts(500), self.store.entities(), limit=12, context="\n".join(users))
+        except Exception as e:
+            print(f"[context] {e!r}", flush=True)
+            return self._facts_legacy(goal)
+        try:
+            if (self.store.task(task_id) or {}).get("source") != "golden":
+                self.store.mark_used([f["id"] for f in out][:12])
+        except Exception:
+            pass
+        return out
+
+    async def _site_note(self, task_id: str, url: str) -> str:
+        """The first time a task lands on a site, what OMuse already learned about it (guest checkout, phone format …)."""
+        from app.runtime import context
+        name = context.site_name(url)
+        seen = self.site_noted.setdefault(task_id, set())
+        if not name or name in seen:
+            return ""
+        seen.add(name)
+        try:
+            found = context.site_facts(url, self.store.facts(500))
+        except Exception:
+            return ""
+        if not found:
+            return ""
+        try:
+            self.store.mark_used([f["id"] for f in found])
+        except Exception:
+            pass
+        lines = [f"- {f['fact']}" + (" (unconfirmed)" if f.get("status") == "pending" else "") for f in found]
+        await self.event(task_id, "context_site", {"site": name, "facts": [truncate(f["fact"], 160) for f in found]})
+        return (f"[记忆：你以前在 {name} 学到的 — what you learned about this site before; follow it]\n" + "\n".join(lines))
+
+    def _facts_legacy(self, goal: str) -> list[dict]:
+        """The selection before batch 2 (kept for the A/B comparison)."""
+        found = self.store.search_facts(goal, 10, fuzzy=False)
         prefs = sorted((f for f in self.store.facts(300) if f["category"] in ("preference", "person", "habit")),
                        key=lambda f: (-(f.get("uses") or 0), -(f.get("last_verified") or 0)))[:10]
         seen, out = set(), []
@@ -1021,12 +1067,7 @@ class Runtime:
             if f["id"] not in seen:
                 seen.add(f["id"])
                 out.append(f)
-        out = out[:15]
-        try:
-            self.store.mark_used([f["id"] for f in found if f["id"] in seen][:10])
-        except Exception:
-            pass
-        return out
+        return out[:15]
 
     @staticmethod
     def reply_lang(task: dict, settings: dict) -> str:
@@ -1140,8 +1181,12 @@ class Runtime:
             return
         s = self.store.settings()
         catalog = await self.catalog(force=True)
-        facts = self._facts_for(t["goal"])
         history, history_txt = self._history(t["conv_id"], task_id)
+        facts = self._facts_for(t["goal"], history_txt, task_id)
+        if facts and facts[0].get("score") is not None and not t["transcript"]:
+            await self.event(task_id, "context_used", {"facts": [{"id": f["id"], "fact": truncate(f["fact"], 160),
+                                                                  "domain": f.get("domain"), "why": f.get("why"),
+                                                                  "status": f.get("status")} for f in facts]})
 
         if t["status"] in ("CREATED", "PLANNING") and not t["plan"].get("steps") and not t["transcript"]:
             await self.set_status(task_id, "PLANNING")
@@ -2069,6 +2114,9 @@ class Runtime:
                         seen_h.add(str(r0.get("url") or ""))
                 if hint:
                     content = hint + "\n" + content
+                note = await self._site_note(task_id, str(r0.get("url") or args.get("url") or ""))
+                if note:
+                    content = note + "\n" + content
             if st == "ok" and name != "browser_locate":
                 self._remember(task_id, name, res.get("result"))
             blk = (res.get("result") or {}).get("blocked") if st == "ok" and isinstance(res.get("result"), dict) else None
@@ -2530,7 +2578,8 @@ class Runtime:
         if name == "memory_search":
             rows = self.store.search_facts(str(a.get("query", "")), 15, tier=None)
             eps = [e for e in self.store.episodes(200) if any(w in e["summary"] for w in str(a.get("query", "")).split() if len(w) > 1)][:5]
-            out = [f"[{r['id']}]{' (recent)' if r.get('tier') == 'recent' else ''} {r['fact']}" for r in rows]
+            out = [f"[{r['id']}]{' (recent)' if r.get('tier') == 'recent' else ''}{' (unconfirmed)' if r.get('status') == 'pending' else ''}"
+                   f" ({r.get('domain') or ''}) {r['fact']}" for r in rows]
             out += [f"(episode {time.strftime('%Y-%m-%d', time.localtime(e['ts']))}) {truncate(e['summary'], 300)}" for e in eps]
             return "\n".join(out) or "没有相关记忆 no memories found"
         if name == "profile_get":
@@ -2567,9 +2616,15 @@ class Runtime:
             if looks_sensitive(str(a.get("fact", ""))):
                 return ("ERROR: 证件号、会员号、卡号和密码不存进记忆 — ID / membership / card numbers and passwords are not kept in "
                         "memory. Tell the user to add it to the vault (Memory page → Vault (记忆 → 保险箱)); you can then fill it with browser_fill_secret.")
+            asked = bool(_REMEMBER_ASK.search(str((t or {}).get("goal") or "") if isinstance(t, dict) else ""))
             r = self.store.add_fact(str(a["fact"]), str(a.get("category") or "other"), str(a.get("entity") or ""),
-                                    source=f"user-request:{tid}", confidence=0.95)
+                                    source=f"user-request:{tid}" if asked else f"learned:{tid}",
+                                    confidence=0.95 if asked else 0.8, domain=str(a.get("domain") or ""),
+                                    status="active" if asked else "pending")
             await self.publish({"kind": "memory_update"})
+            if r and r.get("status") == "pending":
+                return (f"已记下，等用户在「记忆」页确认 — saved as 'to confirm' (used meanwhile): {r['fact']} "
+                        f"[{r.get('domain')}]")
             return f"已记住 remembered: {r}" if r else "ERROR: empty fact"
         if name == "memory_forget":
             self.store.delete_fact(str(a["id"]))
@@ -2860,9 +2915,13 @@ class Runtime:
             if not fact or len(fact) > 300 or looks_sensitive(fact):
                 continue
             tier = "recent" if kind == "ephemeral" else "long"
+            from app.runtime.context import DOMAIN_KEYS
             cat = kind if kind in ("preference", "person", "company", "project", "habit") else "other"
+            dom = kind if kind in DOMAIN_KEYS else ("work" if kind in ("company", "project") else "")
+            # the user's own words are kept as they are; a habit OMuse inferred waits for the user's OK
             res = self.store.add_fact(fact, cat, str(f.get("entity") or ""), source=f"extracted:{task_id}",
-                                      confidence=0.7, tier=tier)
+                                      confidence=0.7, tier=tier, domain=dom,
+                                      status="pending" if kind == "habit" else "active")
             if res and not res.get("duplicate"):
                 (recent if tier == "recent" else added).append(res["fact"])
         if added or recent or suggested:
@@ -2871,6 +2930,9 @@ class Runtime:
                              detail={"facts": added, "recent": recent, "profile_suggestions": suggested})
             await self.publish({"kind": "memory_update"})
         return {"facts": added, "recent": recent, "profile_suggestions": suggested}
+
+
+_REMEMBER_ASK = re.compile(r"记住|记下|记得|记一下|以后|下次|从现在起|\b(remember|from now on|next time|always|note that)\b", re.I)
 
 
 _POINTS_BACK = re.compile(r"\babove\b|\bpreceding\b|\bearlier (table|summary|message)\b|上面|上方|如上|上述|前面(的|那)", re.I)

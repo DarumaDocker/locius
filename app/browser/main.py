@@ -57,6 +57,8 @@ def format_feed(feed: dict, url: str) -> str:
     return "\n".join(out)
 
 
+_LOADING = re.compile(r"^\s*(?:\[e\d+\]\s*)?(?:\w+\s+\")?(?:Loading(?:\.{1,3}|…)?|加载中(?:\.{1,3}|…)?|正在加载(?:\.{1,3}|…)?)\"?\s*$", re.M | re.I)
+
 class Broker:
     def __init__(self):
         self.pw = None
@@ -303,6 +305,22 @@ class Broker:
         await asyncio.sleep(ms / 1000)
 
     async def snapshot(self, task_id: str, max_chars=12000, near: bool = False) -> dict:
+        """The page as text. A list still showing "Loading..." gets up to ~8 s more (2026-10-06 golden G04: decathlon.sg's
+        search results were still loading, the agent re-opened the URL five times and gave up)."""
+        snap = await self._snapshot_once(task_id, max_chars, near)
+        for _ in range(2):
+            if snap.get("feed") or not _LOADING.search(snap.get("snapshot") or ""):
+                break
+            page = await self.page_for(task_id)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=3000)
+            except Exception:
+                pass
+            await asyncio.sleep(1.0)
+            snap = await self._snapshot_once(task_id, max_chars, near)
+        return snap
+
+    async def _snapshot_once(self, task_id: str, max_chars=12000, near: bool = False) -> dict:
         page = await self.page_for(task_id)
         await self.settle(page, 200)
         try:
