@@ -194,17 +194,43 @@ def translate_query(query: str, today: date | None = None) -> dict:
     today = today or date.today()
     folders: list[str] = []
     notes: list[str] = []
-    text: list[tuple[str, str, bool]] = []
+    text: list[tuple[str, str, bool, int]] = []
     items: list[str] = []          # each item is a complete IMAP search key
     pending_or = False
+    # OR-grouping for non-ASCII terms: the server only takes ASCII keys, so Chinese words are filtered locally.
+    # Terms that share a group id are OR-ed by local_match; terms in different groups are AND-ed. Without this,
+    # ("笔试" OR "在线测评") was filtered as "笔试" AND "在线测评" and matched almost nothing (2026-10-05 colleague bug).
+    text_gid = 0
+    last_text_gid: int | None = None
+    last_added_text = False
+    in_brace = False
+    brace_gid: int | None = None
 
     def push(crit: str):
-        nonlocal pending_or
+        nonlocal pending_or, last_added_text
         if pending_or and items:
             items[-1] = f"OR {items[-1]} {crit}"
             pending_or = False
         else:
             items.append(crit)
+        last_added_text = False
+
+    def add_text(key: str, val: str, neg: bool):
+        nonlocal text_gid, last_text_gid, last_added_text, pending_or, brace_gid
+        if in_brace:                                    # inside { … }: one OR group (allocated on first member)
+            if brace_gid is None:
+                text_gid += 1
+                brace_gid = text_gid
+            gid = brace_gid
+        elif pending_or and last_added_text and last_text_gid is not None:  # "a OR b" between two non-ASCII terms
+            gid = last_text_gid
+        else:
+            text_gid += 1
+            gid = text_gid
+        text.append((key, val, neg, gid))
+        last_text_gid = gid
+        last_added_text = True
+        pending_or = False
 
     toks = _tokens(query or "")
     i = 0
@@ -214,6 +240,8 @@ def translate_query(query: str, today: date | None = None) -> dict:
         i += 1
         if t == "{":
             group = []
+            in_brace = True
+            brace_gid = None
             continue
         if t == "}":
             if group:
@@ -222,6 +250,8 @@ def translate_query(query: str, today: date | None = None) -> dict:
                     crit = f"OR {crit} {g}"
                 push(crit)
             group = None
+            in_brace = False
+            brace_gid = None
             continue
         if t in ("(", ")", "AND"):
             continue
@@ -250,7 +280,7 @@ def translate_query(query: str, today: date | None = None) -> dict:
                 if val.isascii():
                     crit = f"{key.upper()} {_qs(val)}"
                 else:
-                    text.append((key.upper(), val, neg))
+                    add_text(key.upper(), val, neg)
                     continue
             elif key == "is":
                 crit = {"unread": "UNSEEN", "read": "SEEN", "starred": "FLAGGED", "important": "FLAGGED",
@@ -310,7 +340,7 @@ def translate_query(query: str, today: date | None = None) -> dict:
                 if val.isascii():
                     crit = f"TEXT {_qs(val)}"
                 else:
-                    text.append(("TEXT", val, neg))
+                    add_text("TEXT", val, neg)
                     continue
         else:
             val = _unq(t)
@@ -319,7 +349,7 @@ def translate_query(query: str, today: date | None = None) -> dict:
             if val.isascii():
                 crit = f"TEXT {_qs(val)}"
             else:
-                text.append(("TEXT", val, neg))
+                add_text("TEXT", val, neg)
                 continue
         if neg:
             crit = f"NOT {crit}"
@@ -337,15 +367,30 @@ def translate_query(query: str, today: date | None = None) -> dict:
     return {"folders": fl or ["inbox", "archive"], "criteria": items, "text": text, "notes": list(dict.fromkeys(notes))}
 
 
-def local_match(msg: dict, terms: list[tuple[str, str, bool]]) -> bool:
-    """Filter for the non-ASCII terms the server did not get (subject / from / to / snippet, case-insensitive)."""
+def local_match(msg: dict, terms: list[tuple]) -> bool:
+    """Filter for the non-ASCII terms the server did not get (subject / from / to / snippet, case-insensitive).
+
+    Terms sharing a group id (4th element, set by translate_query for OR groups) match if ANY of them hits (OR);
+    separate groups must all hit (AND); a negative term must NOT hit. A 3-element term (older callers) is its own
+    AND group."""
     fields = {"FROM": msg.get("from", ""), "TO": msg.get("to", ""), "CC": msg.get("cc", ""), "BCC": "",
               "SUBJECT": msg.get("subject", "")}
-    for key, val, neg in terms:
-        hay = fields.get(key) if key in fields else " ".join([msg.get("subject", ""), msg.get("from", ""),
-                                                             msg.get("to", ""), msg.get("snippet", ""), msg.get("body", "")])
-        hit = val.lower() in (hay or "").lower()
-        if hit == neg:
+
+    def hay(key):
+        return fields.get(key) if key in fields else " ".join([msg.get("subject", ""), msg.get("from", ""),
+                                                               msg.get("to", ""), msg.get("snippet", ""), msg.get("body", "")])
+    from collections import defaultdict
+    groups: dict = defaultdict(list)
+    for n, t in enumerate(terms):
+        key, val, neg = t[0], t[1], t[2]
+        if neg:                                             # every negative is its own AND constraint
+            if val.lower() in (hay(key) or "").lower():
+                return False
+            continue
+        gid = t[3] if len(t) > 3 else ("n%d" % n)
+        groups[gid].append((key, val))
+    for lst in groups.values():                             # each positive group: at least one member must hit
+        if not any(v.lower() in (hay(k) or "").lower() for k, v in lst):
             return False
     return True
 

@@ -1045,11 +1045,25 @@ def test_mail_query_translation():
     assert tq("from:boss@x.com", d)["folders"] == ["inbox", "archive"]          # no folder = inbox + archive
     r = tq('{from:a@x.com from:b@y.com} subject:"hello world" 发票 -报销', d)
     assert r["criteria"] == ['OR FROM "a@x.com" FROM "b@y.com"', 'SUBJECT "hello world"']
-    assert r["text"] == [("TEXT", "发票", False), ("TEXT", "报销", True)]
+    assert r["text"] == [("TEXT", "发票", False, 1), ("TEXT", "报销", True, 2)]
     assert tq("label:工作 in:sent", d)["folders"] == ["label:工作", "sent"]
     assert tq("after:2026/09/01 before:2026-09-30 larger:2M", d)["criteria"] == ["SINCE 1-Sep-2026", "BEFORE 30-Sep-2026", "LARGER 2097152"]
     assert tq("invoice OR receipt", d)["criteria"] == ['OR TEXT "invoice" TEXT "receipt"']
     assert tq("in:anywhere", d)["folders"] == ["*"] and tq("", d)["criteria"] == []
+    # OR between non-ASCII terms must stay OR, not silently become AND (2026-10-05 colleague bug): a mail that matches
+    # only one of the alternatives must still be found.
+    from app.sentinel.mailproviders import local_match
+    rq = tq('newer_than:30d ("笔试" OR "笔试通知" OR "在线测评" OR "测评链接")', d)
+    terms = rq["text"]
+    assert rq["criteria"] == ["SINCE 3-Sep-2026"]
+    assert {t[3] for t in terms} == {1}                       # all four share one OR group
+    hit = {"subject": "笔试通知：下周二在线笔试", "from": "hr@x.com", "to": "", "snippet": "请参加", "body": ""}
+    assert local_match(hit, terms) is True                    # matches one alternative -> found
+    assert local_match({"subject": "周报", "from": "a@x.com", "to": "", "snippet": "", "body": ""}, terms) is False
+    # "{a b}" of non-ASCII words is also an OR group; a space between non-ASCII words is AND (separate groups)
+    assert {t[3] for t in tq("{笔试 测评}", d)["text"]} == {1}
+    g2 = tq("笔试 测评", d)["text"]
+    assert len({t[3] for t in g2}) == 2 and not local_match(hit, g2)   # needs BOTH -> not matched by "笔试通知…"
 
 
 def test_mail_presets_and_utf7():
@@ -1115,6 +1129,57 @@ def test_generic_search_utf8_fallback(monkeypatch):
     assert len(res) == 2
     f = g.folders(fake)
     assert f["drafts"] == '"&g0l6P3ux-"' and f["sent"] == '"Sent Messages"' and f["_display"]['"&g0l6P3ux-"'] == "草稿箱"
+
+
+class FakeIMAPChinese(FakeIMAPNoUTF8):
+    """QQ-like server (rejects CHARSET UTF-8) holding two Chinese emails, to prove OR search works end-to-end."""
+    def uid(self, cmd, *args):
+        import imaplib
+        from email.header import Header
+        if cmd == "SEARCH" and "CHARSET" in args:
+            raise imaplib.IMAP4.error("BADCHARSET")
+        if cmd == "SEARCH":
+            self.cmds.append((cmd, args))
+            return "OK", [b"201 202"]
+        if cmd == "FETCH" and "HEADER.FIELDS" in args[1]:
+            def hdr(subj, frm):
+                s = Header(subj, "utf-8").encode()
+                return f"From: {frm}\r\nTo: me@qq.com\r\nSubject: {s}\r\nDate: Mon, 05 Oct 2026 10:00:00 +0800\r\nMessage-ID: <x>\r\n\r\n".encode()
+            return "OK", [
+                (b'1 (UID 201 FLAGS () BODY[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID)] {10}', hdr("笔试通知：下周二在线笔试", "hr@company.com")),
+                (b' BODY[TEXT]<0> {4}', "请准时参加".encode()), b")",
+                (b'2 (UID 202 FLAGS (\\Seen) BODY[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID)] {10}', hdr("本周周报汇总", "boss@company.com")),
+                (b' BODY[TEXT]<0> {4}', "请填写".encode()), b")",
+            ]
+        return "OK", []
+
+
+def test_generic_search_or_of_chinese_terms(monkeypatch):
+    """The colleague's exact query: an OR of Chinese phrases must return a mail matching ANY one of them."""
+    g = Gmail("me@qq.com", "x", "imap.qq.com", "smtp.qq.com", provider="qq")
+    monkeypatch.setattr(g, "_imap", lambda: FakeIMAPChinese())
+    res = g.search('newer_than:30d ("笔试" OR "笔试通知" OR "在线测评" OR "测评链接")', 10)
+    subs = {r.get("subject", "") for r in res}
+    assert any("笔试" in s for s in subs), subs          # the 笔试通知 mail is found via the OR
+    assert not any("周报" in s for s in subs), subs       # the unrelated 周报 mail is not
+
+
+def test_budget_nudges_steer_to_delegate_not_quota():
+    """2026-10-05 colleague bug 3: a 'find N items' task stopped at 5 and told the user about a '网页调用预算'.
+    The step/web nudges must now push unmet counts to delegate and must tell the model never to expose a quota."""
+    from app.runtime.agent import Runtime, BUDGET_RESERVE
+    from app.runtime.prompts import executor_system
+    tr = [{"role": "user", "content": "找 3 个实习岗位"}]
+    Runtime._budget(tr, [], BUDGET_RESERVE, "zh")
+    msg = tr[-1]["content"]
+    assert "delegate" in msg and "不要向用户提" in msg and "预算" in msg          # only inside the "don't mention 预算" instruction
+    tr2 = [{"role": "user", "content": "find 3 internships"}]
+    Runtime._budget(tr2, [], BUDGET_RESERVE, "en")
+    m2 = tr2[-1]["content"]
+    assert "delegate" in m2 and "do not mention" in m2.lower() and "budget" in m2.lower()
+    # the system prompt itself tells the model these limits are internal, not a user-facing quota
+    s = executor_system(user_name="L", tz="UTC", connections={}, plan=None, facts=[], skills=[], language="en", reply_lang="English")
+    assert "quota" in s.lower() and "delegate" in s.lower()
 
 
 def test_calc_finance_helpers():

@@ -1560,6 +1560,17 @@ async def calendar_callback(req: Request, code: str = "", state: str = "", error
     from app.sentinel import gcal
     pend = store.kv_get("calendar_oauth", {}) or {}
     if error:
+        if error == "access_denied":
+            # Google's most common cause: the OMuse OAuth app is still in "Testing" publishing status, so only Google
+            # accounts on the developer's test-user list can authorize (2026-10-05 colleague on a non-listed account).
+            return _cal_page(False, (
+                "Google 拒绝了授权 (access_denied)。最常见的原因：OMuse 的 Google 应用还是「测试 Testing」发布状态，"
+                "只有被加入测试用户名单的 Google 账号才能连接。请让管理员在 Google Cloud Console →「OAuth 同意屏幕」里"
+                "把应用发布为「正式版 In production」，或把你的 Google 账号加入「测试用户 Test users」；"
+                "如果你是在同意页点了「取消」，重新点一次「连接 Google 日历」即可。"
+                " Google denied authorization. Most often OMuse's Google app is still in 'Testing' mode, so only accounts on "
+                "the developer's test-user list can connect — ask the admin to publish the OAuth consent screen to Production, "
+                "or add your Google account under Test users. If you clicked Cancel, just start the connect flow again."))
         return _cal_page(False, f"Google 返回错误 (error): {error}")
     if not state or not pend.get("state") or not secrets.compare_digest(state, pend["state"]) or time.time() - pend.get("ts", 0) > 900:
         return _cal_page(False, "授权链接已失效或不匹配，请回到连接页重新点「连接 Google 日历」(state mismatch / expired)")

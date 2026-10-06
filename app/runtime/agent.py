@@ -1177,11 +1177,15 @@ class Runtime:
                 "otherwise read at most 2–3 more pages or delegate the rest to a sub-agent.")})
         if remaining <= BUDGET_RESERVE and BUDGET_MARK not in said:
             transcript.append({"role": "user", "content": prompts.L(
-                lang, f"（系统）[{BUDGET_MARK}] 只剩 {remaining} 步了。停止继续搜集资料，用已有的信息马上完成"
-                      "用户要的交付物（写文件、生成 PDF/Excel、send_file、发邮件等），然后给出最终回答，并说明哪些没来得及核实。",
-                f"(System) [{BUDGET_MARK}] Only {remaining} steps left: stop gathering, produce the deliverable the user asked for "
-                "with what you have (write the file, make_pdf/make_xlsx, send_file, send the email…), then give the final answer "
-                "and note anything left unverified.")})
+                lang, f"（系统）[{BUDGET_MARK}] 只剩 {remaining} 步了。停止自己继续搜集资料，用已有的信息马上完成"
+                      "用户要的交付物（写文件、生成 PDF/Excel、send_file、发邮件等），然后给出最终回答，并说明哪些没来得及核实。"
+                      "如果用户要的固定数量条目还没凑齐，用一次 delegate 把剩下的交给子 Agent（不占用这里的步数）。"
+                      "这是内部控制，不要向用户提「预算」或剩余步数。",
+                f"(System) [{BUDGET_MARK}] Only {remaining} steps left: stop gathering yourself and produce the deliverable the "
+                "user asked for with what you have (write the file, make_pdf/make_xlsx, send_file, send the email…), then give "
+                "the final answer and note anything left unverified. If a fixed number of items the user asked for is still "
+                "short, use one delegate call for the rest (it doesn't use these steps). Internal control — do not mention a "
+                "'budget' or remaining steps to the user.")})
         if remaining <= 2:
             tools = [x for x in tools if x["function"]["name"] in FINISH_TOOLS] or tools
         return tools
@@ -1346,10 +1350,15 @@ class Runtime:
                     str(m.get("content") or "") for m in transcript if m.get("role") == "user"):
                 # 2026-10-02 R4-04b: a "top 3 products" lookup made 47 web calls in 12 minutes chasing cleaner results
                 transcript.append({"role": "user", "content": prompts.L(
-                    agent_lang(s), f"（系统）[{WEB_MARK}] 这个任务已经调用了 {web_calls} 次网页工具。除非还缺用户必需的关键信息，"
-                    "不要再搜索或打开网页了：现在就用已有的信息完成回答，并说明哪些没核实。",
-                    f"(System) [{WEB_MARK}] This task has made {web_calls} web calls. Unless something the user needs is still "
-                    "missing, stop searching and opening pages: answer now with what you have and note what is unverified.")})
+                    agent_lang(s), f"（系统）[{WEB_MARK}] 这个任务已经调用了 {web_calls} 次网页工具。不要自己再一个个翻网页了。"
+                    "如果用户要的是固定数量的条目（例如 3 个岗位、5 家公司）而你还没凑齐，就用 delegate 把还差的交给子 Agent 去查"
+                    "（子 Agent 的调用不算在这里），再由你汇总；如果已经够了或确实查不到更多，就用已有信息完成回答，说明哪些没核实。"
+                    "这是内部效率控制，不要向用户提起「预算」或调用次数。",
+                    f"(System) [{WEB_MARK}] This task has made {web_calls} web calls. Stop opening pages one by one yourself. "
+                    "If the user asked for a fixed number of items (e.g. 3 jobs, 5 companies) and you don't have them all yet, "
+                    "use delegate to fetch the rest (a sub-agent per remaining item — its calls don't count here) and compile "
+                    "them yourself; if you have enough or truly cannot find more, answer with what you have and note what is "
+                    "unverified. This is an internal efficiency control — never mention a 'budget' or a call count to the user.")})
             timed_out = minutes >= max_minutes
             force_final = steps >= max_steps or gave_up or timed_out
             tools = None if force_final else self._tools(catalog, schedule=bool(t["schedule_id"]) and not goal, goal=bool(goal))
