@@ -30,6 +30,12 @@ WORKSPACE = os.path.realpath(os.environ.get("WORKSPACE", "/workspace"))
 # ("This browser may not be secure"), which breaks "Sign in with Google" during a user takeover.
 HEADLESS_ENV = os.environ.get("BROWSER_HEADLESS", "")          # "1" force headless, "0" force headed, "" auto
 VIEWPORT = {"width": 1280, "height": 800}
+# Be a polite client, not a hammering one: a minimum gap between requests to the same site, with a little jitter, and a
+# longer cool-off after that site returns a block / 429. This lowers rate-triggered blocks; it is NOT fingerprint evasion.
+PACE_GAP = float(os.environ.get("BROWSER_PACE_GAP", "1.3"))     # min seconds between hits to one registered domain
+PACE_JITTER = 0.6                                               # up to this much extra, random
+PACE_MAX_WAIT = 8.0                                             # never pace-wait longer than this on one request
+PACE_BLOCK_HOLD = 45.0                                          # after a block / 429 on a site, hold further hits this long
 UA_ENV = os.environ.get("BROWSER_UA", "")
 UA_HEADLESS = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
 BLOCKED_EXT = {".exe", ".msi", ".dmg", ".pkg", ".app", ".bat", ".cmd", ".com", ".scr", ".sh", ".ps1", ".vbs", ".jar",
@@ -59,6 +65,20 @@ def format_feed(feed: dict, url: str) -> str:
 
 _LOADING = re.compile(r"^\s*(?:\[e\d+\]\s*)?(?:\w+\s+\")?(?:Loading(?:\.{1,3}|…)?|加载中(?:\.{1,3}|…)?|正在加载(?:\.{1,3}|…)?)\"?\s*$", re.M | re.I)
 
+_CC_SLD2 = {"com", "co", "net", "org", "gov", "edu", "ac"}
+
+
+def reg_domain(url: str) -> str:
+    """The registered domain used for pacing — decathlon.sg, amazon.com.sg → one key per site."""
+    try:
+        host = (urlparse(url if "://" in (url or "") else "https://" + (url or "")).hostname or "").lower().strip(".")
+    except Exception:
+        return ""
+    parts = [p for p in host.split(".") if p]
+    if len(parts) >= 3 and len(parts[-1]) == 2 and parts[-2] in _CC_SLD2:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+
 class Broker:
     def __init__(self):
         self.pw = None
@@ -79,6 +99,8 @@ class Broker:
         self.finished: dict[str, float] = {}     # task_id -> when the task ended (its page may be recycled)
         self.temp_pages: set = set()             # short-lived pages of browser_search / browser_read (not a task's page)
         self.last_used: dict[str, float] = {}
+        self.domain_at: dict[str, float] = {}     # registered domain -> when it was last requested (pacing)
+        self.domain_hold: dict[str, float] = {}   # registered domain -> don't hit before this time (block / 429 cool-off)
         self.parent: dict = {}                    # popup page -> opener page (e.g. "Sign in with Google" windows)
         self.xvfb = None
         self.headless = True
@@ -303,6 +325,34 @@ class Broker:
         except Exception:
             pass
         await asyncio.sleep(ms / 1000)
+
+    def pace_wait(self, url: str, now: float | None = None) -> float:
+        """How long to wait before hitting this site, so we don't hammer it (pure function, for testing)."""
+        import random
+        dom = reg_domain(url)
+        if not dom:
+            return 0.0
+        now = now if now is not None else time.time()
+        hold = self.domain_hold.get(dom, 0.0)
+        if hold > now:
+            return min(hold - now, PACE_MAX_WAIT)
+        last = self.domain_at.get(dom, 0.0)
+        gap = PACE_GAP + random.random() * PACE_JITTER
+        return max(0.0, min(last + gap - now, PACE_MAX_WAIT))
+
+    async def pace(self, url: str):
+        w = self.pace_wait(url)
+        if w > 0:
+            await asyncio.sleep(w)
+        dom = reg_domain(url)
+        if dom:
+            self.domain_at[dom] = time.time()
+
+    def note_block(self, url: str):
+        """A site returned a bot wall / 429: cool off before hitting it again this session."""
+        dom = reg_domain(url)
+        if dom:
+            self.domain_hold[dom] = time.time() + PACE_BLOCK_HOLD
 
     async def snapshot(self, task_id: str, max_chars=12000, near: bool = False) -> dict:
         """The page as text. A list still showing "Loading..." gets up to ~8 s more (2026-10-06 golden G04: decathlon.sg's
@@ -863,6 +913,7 @@ async def web_read(urls: list[str], limit: int = 6000) -> dict:
             return {"url": u, "error": why}
         p = await _temp_page()
         try:
+            await broker.pace(u)
             resp = await p.goto(u, wait_until="domcontentloaded", timeout=25000)
             await asyncio.sleep(1.2)
             r = await p.evaluate(READ_JS, limit)
@@ -872,6 +923,7 @@ async def web_read(urls: list[str], limit: int = 6000) -> dict:
                 blk = None
             if blk:
                 r["blocked"] = blk
+                broker.note_block(u)
             r["status"] = resp.status if resp else 0
             return r
         except Exception as e:
@@ -948,13 +1000,23 @@ async def agent_action(action: str, req: Request):
                 ok, why = check_url(url)
                 if not ok:
                     raise HTTPException(403, why)
+                await broker.pace(url)
                 try:
                     resp = await page.goto(url, wait_until="domcontentloaded", timeout=45000)
                     broker.nav_status[task_id] = resp.status if resp else 0
                 except Exception as e:
                     if "ERR_BLOCKED_BY_CLIENT" in str(e):
                         raise HTTPException(403, "该地址被安全策略拦截 (blocked by egress policy)")
-                    raise HTTPException(502, f"打开页面失败 navigation failed: {str(e)[:200]}")
+                    # a plain load timeout is often transient: wait a moment and try once more before giving up
+                    if "imeout" in str(e):
+                        try:
+                            await asyncio.sleep(2.0)
+                            resp = await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                            broker.nav_status[task_id] = resp.status if resp else 0
+                        except Exception as e2:
+                            raise HTTPException(502, f"打开页面失败 navigation failed (retried once): {str(e2)[:180]}")
+                    else:
+                        raise HTTPException(502, f"打开页面失败 navigation failed: {str(e)[:200]}")
                 await broker.settle(page, 1200)
             elif action == "snapshot":
                 pass
@@ -1085,6 +1147,7 @@ async def agent_action(action: str, req: Request):
                 blk = None
             if blk:
                 snap["blocked"] = blk
+                broker.note_block(snap.get("url") or page.url)
         return snap
 
 

@@ -861,5 +861,15 @@ window.OMUSE_EN = {
 "最近 30 天批准了 {0} 次": "approved {0} times in the last 30 days",
 "自动允许 30 天": "Allow for 30 days",
 "一直允许": "Always allow",
-"不用了": "No thanks"
+"不用了": "No thanks",
+"🌐 浏览器打开情况 Browsing": "🌐 Browsing",
+"OMuse 打开网页的成功率，以及哪些网站用反机器人拦截挡住了自动浏览器。被挡的网站会记进「网站习惯」，下次优先换别的来源或请你接管。": "How often OMuse opens pages, and which sites block the automated browser with a bot check. Blocked sites are saved to site habits, so next time OMuse prefers another source or asks you to take over.",
+"次打开": "opens",
+"次被拦": "blocked",
+"网站": "Site",
+"打开": "Opens",
+"被拦": "Blocked",
+"拦截率": "Block rate",
+"最近没有网站拦截记录。": "No site blocks recently.",
+"拦截类型：": "Block types: "
 };

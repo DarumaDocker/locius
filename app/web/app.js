@@ -727,9 +727,27 @@ async function viewTrust(root) {
         h('td', { class: 'mono' }, x.seconds != null ? x.seconds + 's' : ''), h('td', { class: 'small' }, (x.why || []).join('；'))))))) : null);
   const ledgerCard = h('div', { class: 'card stack' }, h('h3', null, T('🧾 交易账本 Ledger')));
   const fewer = h('div', { class: 'stack' });
-  root.append(h('div', { class: 'stack' }, h('div', { class: 'row' }, days), tiles, fewer, h('div', { class: 'grid2' }, health, golden), ledgerCard, perDay));
+  root.append(h('div', { class: 'stack' }, h('div', { class: 'row' }, days), tiles, fewer, h('div', { class: 'grid2' }, health, golden), browserCard(m.browser || {}), ledgerCard, perDay));
   fillLedger(ledgerCard).catch(() => ledgerCard.append(h('div', { class: 'muted small' }, T('账本暂时打不开'))));
   fillSuggestions(fewer).catch(() => {});
+}
+
+function browserCard(b) {
+  const pct = x => x == null ? '—' : Math.round(x * 100) + '%';
+  const rows = b.sites || [];
+  return h('div', { class: 'card stack' }, h('h3', null, T('🌐 浏览器打开情况 Browsing')),
+    h('p', { class: 'sub' }, T('OMuse 打开网页的成功率，以及哪些网站用反机器人拦截挡住了自动浏览器。被挡的网站会记进「网站习惯」，下次优先换别的来源或请你接管。')),
+    h('div', { class: 'row', style: 'gap:16px' },
+      h('div', null, h('b', null, String(b.opens || 0)), ' ', h('span', { class: 'muted small' }, T('次打开'))),
+      h('div', null, h('b', null, String(b.blocked || 0)), ' ', h('span', { class: 'muted small' }, T('次被拦')),
+        b.block_rate != null ? h('span', { class: 'muted small' }, ` (${pct(b.block_rate)})`) : null)),
+    rows.length ? h('div', { class: 'tablewrap' }, h('table', { class: 'data' },
+      h('thead', null, h('tr', null, [T('网站'), T('打开'), T('被拦'), T('拦截率')].map(x => h('th', null, x)))),
+      h('tbody', null, rows.map(r => h('tr', null, h('td', null, r.site), h('td', { class: 'mono' }, String(r.opens)),
+        h('td', { class: 'mono' }, String(r.blocked)),
+        h('td', null, h('span', { class: 'chip' + (r.block_rate > 0.5 ? ' bad' : '') }, pct(r.block_rate)))))))) :
+      h('div', { class: 'muted small' }, T('最近没有网站拦截记录。')),
+    (b.kinds || []).length ? h('div', { class: 'small muted' }, T('拦截类型：') + b.kinds.map(k => `${k.detail} ×${k.count}`).join('、')) : null);
 }
 
 async function fillSuggestions(box) {

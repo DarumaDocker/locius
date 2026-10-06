@@ -49,8 +49,23 @@ def compute(store, days: int = 7, now: float | None = None, tz_offset_h: float =
     per_day: dict[str, Counter] = defaultdict(Counter)
     causes, errors = Counter(), Counter()
     agg = Counter()
+    sites: dict[str, Counter] = defaultdict(Counter)   # registered site -> {opens, blocked}
+    block_kinds = Counter()
     for t in rows:
-        f = task_facts(t, store.events(t["id"]))
+        evs = store.events(t["id"])
+        for e in evs:
+            d = e.get("data") or {}
+            if e.get("type") == "tool_call" and d.get("name") in ("browser_navigate", "browser_read"):
+                for u in ([d.get("args", {}).get("url")] + list(d.get("args", {}).get("urls") or [])):
+                    s = _site_key(str(u or ""))
+                    if s:
+                        sites[s]["opens"] += 1
+            elif e.get("type") == "site_blocked":
+                s = str(d.get("site") or "")
+                if s:
+                    sites[s]["blocked"] += 1
+                    block_kinds[d.get("detail") or d.get("kind") or "?"] += 1
+        f = task_facts(t, evs)
         st = t.get("status")
         day = time.strftime("%Y-%m-%d", time.gmtime((t.get("created_at") or now) + tz_offset_h * 3600))
         per_day[day]["total"] += 1
@@ -94,4 +109,22 @@ def compute(store, days: int = 7, now: float | None = None, tz_offset_h: float =
         "top_errors": [{"error": k, "count": v} for k, v in errors.most_common(5)],
         "per_day": [{"day": d, "total": c["total"], "completed": c["COMPLETED"], "failed": c["FAILED"],
                      "cancelled": c["CANCELLED"]} for d, c in sorted(per_day.items())],
+        "browser": _browser_reliability(sites, block_kinds),
     }
+
+
+def _site_key(url: str) -> str:
+    from app.runtime.context import site_name
+    return site_name(url)
+
+
+def _browser_reliability(sites: dict, block_kinds: Counter) -> dict:
+    opens = sum(c["opens"] for c in sites.values())
+    blocked = sum(c["blocked"] for c in sites.values())
+    rows = sorted(({"site": s, "opens": c["opens"], "blocked": c["blocked"],
+                    "block_rate": round(c["blocked"] / c["opens"], 3) if c["opens"] else None}
+                   for s, c in sites.items() if c["blocked"]), key=lambda x: -x["blocked"])
+    return {"opens": opens, "blocked": blocked,
+            "block_rate": round(blocked / opens, 3) if opens else None,
+            "sites": rows[:12],
+            "kinds": [{"detail": k, "count": v} for k, v in block_kinds.most_common(8)]}

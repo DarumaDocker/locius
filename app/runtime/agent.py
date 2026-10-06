@@ -1054,6 +1054,29 @@ class Runtime:
         except Exception as e:
             print(f"[ledger] {e!r}", flush=True)
 
+    async def _learn_site_block(self, task_id: str, site: str, detail: str) -> None:
+        """Remember that a site blocks the automated browser, so next time OMuse goes another way from the start
+        (a site habit, domain=site, kept as 'to confirm'). Recorded once per site."""
+        if not site or len(site) < 3:
+            return
+        seen = self.__dict__.setdefault("_block_noted", set())
+        if site in seen:
+            return
+        seen.add(site)
+        try:
+            existing = self.store.search_facts(f"{site} 反机器人 bot", 5)
+            if any(site in (f.get("fact") or "") and ("反机器人" in f["fact"] or "bot" in f["fact"].lower())
+                   for f in existing):
+                return
+            fact = (f"{site} 会拦截自动浏览器（{detail or '反机器人检查'}）：直接浏览通常进不去，优先用别的来源，"
+                    f"必须用时让用户接管浏览器通过验证 ({site} blocks the automated browser — prefer another source, "
+                    "or a user takeover when it must be used)")
+            self.store.add_fact(fact, "habit", site, source=f"learned:block:{task_id}", confidence=0.8,
+                                domain="site", status="pending")
+            await self.publish({"kind": "memory_update"})
+        except Exception as e:
+            print(f"[block-learn] {e!r}", flush=True)
+
     async def _site_note(self, task_id: str, url: str) -> str:
         """The first time a task lands on a site, what OMuse already learned about it (guest checkout, phone format …)."""
         from app.runtime import context
@@ -2151,6 +2174,7 @@ class Runtime:
                            "on this site; switch to another source, or request a takeover if this site is essential.\n" + content)
                 ok = False
                 await self.event(task_id, "site_blocked", {"site": site, "kind": blk.get("kind"), "detail": blk.get("detail")})
+                await self._learn_site_block(task_id, site, str(blk.get("detail") or ""))
         else:
             content = f"ERROR: 未知工具 unknown tool '{name}'. Available tools are listed in the tool schema."
             ok = False

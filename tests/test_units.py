@@ -1984,3 +1984,52 @@ def test_fewer_approvals_are_suggested_not_switched_on(store):
     k = suggest.suggestions(store)[0]["key"]
     suggest.dismiss(store, k)
     assert suggest.suggestions(store) == []
+
+
+# ---------------------------------------------------------------- batch R: browser robustness (no detection evasion)
+def test_reg_domain_and_pacing():
+    from app.browser.main import reg_domain, Broker, PACE_GAP, PACE_MAX_WAIT
+    assert reg_domain("https://www.decathlon.sg/p/1") == "decathlon.sg"
+    assert reg_domain("https://m.amazon.com.sg/x") == "amazon.com.sg"
+    assert reg_domain("https://shop.test/") == "shop.test"
+    b = Broker()
+    # first hit: no wait; a second hit to the same site right after waits ~PACE_GAP; another site does not
+    assert b.pace_wait("https://decathlon.sg/a", now=1000.0) == 0.0
+    b.domain_at["decathlon.sg"] = 1000.0
+    w = b.pace_wait("https://decathlon.sg/b", now=1000.2)
+    assert PACE_GAP - 0.2 <= w <= PACE_GAP + 0.6 + 0.01
+    assert b.pace_wait("https://other.test/x", now=1000.2) == 0.0
+    # after a block, the site is held off for a while, capped at PACE_MAX_WAIT
+    b.note_block("https://decathlon.sg/c")
+    assert 0 < b.pace_wait("https://decathlon.sg/d") <= PACE_MAX_WAIT
+
+
+def test_browser_reliability_metric(tmp_path):
+    from app.runtime.store import RStore
+    from app.runtime import metrics
+    st = RStore(str(tmp_path))
+    t = st.create_task("shop", st.create_conv("c"), "chat")
+    st.update_task(t["id"], status="COMPLETED")
+    for u in ("https://www.decathlon.sg/a", "https://www.decathlon.sg/b", "https://www.amazon.sg/x"):
+        st.add_event(t["id"], "tool_call", {"name": "browser_navigate", "args": {"url": u}})
+    st.add_event(t["id"], "site_blocked", {"site": "decathlon", "kind": "cloudflare", "detail": "Cloudflare bot check"})
+    m = metrics.compute(st, days=7)["browser"]
+    assert m["opens"] == 3 and m["blocked"] == 1
+    d = next(r for r in m["sites"] if r["site"] == "decathlon")
+    assert d["opens"] == 2 and d["blocked"] == 1 and d["block_rate"] == 0.5
+    assert m["kinds"][0]["detail"] == "Cloudflare bot check"
+
+
+def test_block_is_learned_as_a_site_habit(tmp_path):
+    import asyncio
+    from app.runtime.agent import Runtime
+
+    async def pub(_):
+        pass
+    rt = Runtime(str(tmp_path), pub)
+    asyncio.run(rt._learn_site_block("t1", "decathlon", "Cloudflare bot check"))
+    f = rt.store.search_facts("decathlon 反机器人 bot", 5)
+    assert f and f[0]["domain"] == "site" and f[0]["status"] == "pending" and "拦截" in f[0]["fact"]
+    n = len(rt.store.facts())
+    asyncio.run(rt._learn_site_block("t2", "decathlon", "Cloudflare bot check"))   # once per site
+    assert len(rt.store.facts()) == n
