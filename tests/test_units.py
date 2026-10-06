@@ -1530,3 +1530,50 @@ def test_card_details_go_into_their_own_boxes(store, monkeypatch):
         b = dict(box, name=name)
         assert decide(store, "browser_fill_secret", {"ref": "f8e1", "item_id": "v1", "field": f}, "tw", elem=b, page=page).decision == ALLOW
     assert ex("12/2028", "MM/YY") == "12/28" and ex("2028-12", "") == "12/28" and ex("12/28", "MM/YYYY") == "12/2028"
+
+
+def test_model_fallback_never_picks_tts_and_expires(monkeypatch):
+    # 2026-10-05: the router briefly lost Qwen; OMuse fell back to the first listed model (Kokoro text-to-speech) and kept it
+    # for good, so every chat failed with HTTP 422 "registered with mode=tts" for a day
+    import asyncio
+    import httpx
+    from app.runtime import llm as L
+    models = {"data": [{"id": "speaches/speaches-ai/Kokoro-82M-v1.0-ONNX", "mode": "tts", "readiness": "ready"},
+                       {"id": "speaches/Systran/faster-whisper-small", "mode": "audio", "readiness": "ready"},
+                       {"id": "Olares/Qwen", "mode": "chat", "readiness": "ready"}]}
+    assert L.pick_chat_model(models["data"]) == "Olares/Qwen"
+    assert L.pick_chat_model(models["data"], exclude="Olares/Qwen") == ""
+    assert L.pick_chat_model([{"id": "speaches/speaches-ai/Kokoro-82M-v1.0-ONNX"}, {"id": "gpt-x"}]) == "gpt-x"
+    state = {"qwen_up": False, "seen": []}
+
+    def handler(req):
+        if req.url.path.endswith("/models"):
+            data = [m for m in models["data"] if state["qwen_up"] or m["id"] != "Olares/Qwen"]
+            return httpx.Response(200, json={"data": data})
+        m = json.loads(req.content)["model"]
+        state["seen"].append(m)
+        if m == "Olares/Qwen" and state["qwen_up"]:
+            return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+                                             "usage": {}})
+        if m == "Olares/Qwen":
+            return httpx.Response(404, json={"error": {"message": "model Olares/Qwen not found"}})
+        return httpx.Response(422, json={"error": {"message": f"model {m} is registered with mode=tts; chat/completions only accepts mode=chat"}})
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(L.httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handler), **{x: y for x, y in k.items() if x != "transport"}))
+    _sleep = asyncio.sleep
+
+    async def nosleep(*a, **k):
+        await _sleep(0)
+    monkeypatch.setattr(L.asyncio, "sleep", nosleep)
+    S = {"model_base_url": "http://router/v1", "model_name": "Olares/Qwen", "temperature": 0.3, "max_tokens": 100}
+    lm = L.LLM(lambda: S)
+    import pytest
+    with pytest.raises(L.LLMError) as e:      # Qwen missing and no other chat model: a clear error, no TTS model tried
+        asyncio.run(lm.chat([{"role": "user", "content": "x"}]))
+    assert "Kokoro" not in "".join(state["seen"]) and "不可用" in str(e.value)
+    import time
+    lm.fallback["Olares/Qwen"] = ("speaches/speaches-ai/Kokoro-82M-v1.0-ONNX", time.time() + 300)   # a stale stand-in
+    state["qwen_up"] = True
+    out = asyncio.run(lm.chat([{"role": "user", "content": "x"}]))
+    assert "hi" in json.dumps(out, ensure_ascii=False) and "Olares/Qwen" not in lm.fallback
