@@ -533,6 +533,11 @@ LOCAL_TOOLS = [
         "cards) — labels and the last 4 characters only, never the values. Use with browser_fill_secret to fill one into a "
         "web form; each fill needs the user's approval.", {}),
     _fn("memory_forget", "删除一条记忆 Forget a memory by id (from memory_search).", {"id": S}, ["id"]),
+    _fn("orders_list", "交易账本：OMuse 替用户下过的订单（商家、订单号、金额、卡尾号、状态、谁批准的）。用户说「取消/退货/查一下那个订单」时先查这里，"
+        "用账本里那一单的商家和订单号去操作，不要凭邮件或别的网站猜。"
+        " The ledger of orders OMuse placed for the user (merchant, order number, amount, card, status, who approved). "
+        "For cancel / return / track requests look the order up here first and act on exactly that merchant and number.",
+        {"query": {"type": "string", "description": "optional: merchant or order number"}}),
     _fn("schedule_create", "创建定时/周期任务 Create a recurring background task. kind=cron (spec like '0 8 * * *') or "
         "interval (spec = minutes). goal = full standalone instruction for each run.",
         {"name": S, "goal": S, "kind": {"type": "string", "enum": ["cron", "interval"]}, "spec": S}, ["name", "goal", "kind", "spec"]),
@@ -1035,6 +1040,20 @@ class Runtime:
             pass
         return out
 
+    async def _ledger_confirm(self, task_id: str, oc: dict, final: str):
+        """Tell the ledger how a purchase ended: the order number from the confirmation page, or none."""
+        num = next((r.get("order_number") for r in (oc.get("evidence") or [])
+                    if isinstance(r, dict) and r.get("kind") == "purchase"), "") or ""
+        try:
+            res = await self.sentinel("POST", "/internal/ledger/confirm", {
+                "task_id": task_id, "order_number": num,
+                "evidence": {"kind": "confirmation", "text": truncate(final, 400)} if num else None}, timeout=15)
+            if res.get("orders"):
+                await self.event(task_id, "ledger", {"orders": [{"merchant": o["merchant"], "order_number": o["order_number"],
+                                                                 "status": o["status_label"]} for o in res["orders"]]})
+        except Exception as e:
+            print(f"[ledger] {e!r}", flush=True)
+
     async def _site_note(self, task_id: str, url: str) -> str:
         """The first time a task lands on a site, what OMuse already learned about it (guest checkout, phone format …)."""
         from app.runtime import context
@@ -1509,6 +1528,9 @@ class Runtime:
             final += outcome.notice(oc, zh=agent_lang(s) != "en")
             self.store.update_task(task_id, outcome=oc)
             await self.event(task_id, "outcome", oc)
+            if "purchase" in (oc.get("actions") or []) or any(isinstance(a, dict) and a.get("kind") == "purchase"
+                                                              for a in (oc.get("actions") or [])):
+                await self._ledger_confirm(task_id, oc, final)
             transcript.append({"role": "assistant", "content": final})
             plan = t["plan"]
             for st in plan.get("steps", []):
@@ -2626,6 +2648,20 @@ class Runtime:
                 return (f"已记下，等用户在「记忆」页确认 — saved as 'to confirm' (used meanwhile): {r['fact']} "
                         f"[{r.get('domain')}]")
             return f"已记住 remembered: {r}" if r else "ERROR: empty fact"
+        if name == "orders_list":
+            try:
+                res = await self.sentinel("GET", "/internal/ledger?limit=50", None, timeout=20)
+            except Exception as e:
+                return f"ERROR: 账本不可用 ledger unavailable: {e}"
+            q = str(a.get("query") or "").strip().lower()
+            rows = [o for o in res.get("orders") or [] if not q or q in (o["merchant"] + " " + o["order_number"]).lower()]
+            if not rows:
+                return "账本里没有匹配的订单 — no matching order in the ledger (OMuse has not placed one). Ask the user which order they mean."
+            return "\n".join(
+                f"- {time.strftime('%Y-%m-%d', time.localtime(o['created_at']))} · {o['merchant']} · 订单号 order "
+                f"{o['order_number'] or '(无 none)'} · {o['currency']} {o['total']:.2f} · {o['card'] or ''} · {o['status_label']} "
+                f"({o['status']})" + (f" · items: {', '.join(str(i.get('name', '')) for i in o['items'][:3] if isinstance(i, dict))}"
+                                      if o.get('items') else "") for o in rows[:20])
         if name == "memory_forget":
             self.store.delete_fact(str(a["id"]))
             await self.publish({"kind": "memory_update"})

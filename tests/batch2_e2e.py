@@ -108,6 +108,19 @@ tid = c.post(B + "/api/chat", json={"message": "REMEMBER this"}, headers=H).json
 wait_task(tid)
 check("something the user asked to remember is kept right away", any(f["fact"] == "Lucas likes quiet hotels" and f["status"] == "active" for f in mem()["facts"]))
 
+# ---- 5b. the fast personal-context probe runs end to end (plan + statement, nothing executed)
+r = c.post(B + "/api/golden/run", json={"suite": "context_probe", "context": "legacy"}, headers=H).json()
+t0 = time.time()
+while time.time() - t0 < 120:
+    runs = c.get(B + "/api/golden/runs?limit=1", headers=H).json()["runs"]
+    if runs and runs[0]["status"] != "running":
+        break
+    time.sleep(2)
+run = c.get(B + "/api/golden/runs?limit=1", headers=H).json()["runs"][0]
+check("context probe scores all 10 requests without running any tool", run["trigger"] == "manual:context-legacy" or
+      (run["trigger"] == "probe:context-legacy" and run["status"] == "done" and len(run["results"]) == 10
+       and all("plan" in x and "context" in x for x in run["results"])), run)
+
 # ---- 6. mailbox health
 st = c.post(B + "/api/health/check", json={}, headers=H).json()
 comps = st.get("components") or {}

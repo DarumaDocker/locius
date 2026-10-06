@@ -1923,3 +1923,64 @@ def test_mailbox_health_check():
     h.rt.mail = {"accounts": []}
     assert asyncio.run(h.check_mail()) is None          # nothing connected: nothing to watch
     assert Hm.MAIL_EVERY * Hm.DOWN_AFTER * Hm.CHECK_EVERY <= 600
+
+
+def test_ledger_follows_the_order(store):
+    # batch 3: approved → placed (order no.) → shipped / delivered from the merchant's emails; numbers found on pages
+    from app.sentinel import ledger
+    r = ledger.add(store, "t1", "decathlon.sg", 9.9, "SGD", [{"name": "socks"}], "Visa •6411", "Home delivery", "buy_1", "appr_1")
+    assert r["status"] == "approved" and r["history"][0]["by"] == "user"
+    ledger.confirm(store, "t1", "SG5X42VMKCAG", None, {"kind": "confirmation", "text": "Order SG5X42VMKCAG"})
+    r = ledger.get(store, r["id"])
+    assert r["status"] == "placed" and r["order_number"] == "SG5X42VMKCAG" and r["evidence"][0]["kind"] == "confirmation"
+    assert ledger.by_number(store, "sg5x-42vmkcag")["id"] == r["id"]
+    assert [x["id"] for x in ledger.in_text(store, "Your order SG5X 42VMKCAG is on its way")] == [r["id"]]
+    assert ledger.in_text(store, "Order 113-555 from Amazon") == []
+    assert ledger.status_from_mail("Your Decathlon order SG5X42VMKCAG has been shipped") == "shipped"
+    assert ledger.status_from_mail("订单 SG5X42VMKCAG 已签收") == "delivered"
+    assert ledger.status_from_mail("Refund processed for order SG5X42VMKCAG") == "refunded"
+    assert ledger.status_from_mail("Weekly deals just for you") == ""
+    mails = {"SG5X42VMKCAG": [{"id": "m1", "subject": "Thank you for your order SG5X42VMKCAG"},
+                              {"id": "m2", "subject": "Your order SG5X42VMKCAG has been dispatched"}]}
+    res = ledger.reconcile(store, lambda q: next((v for k, v in mails.items() if k in q), []))
+    assert res["changed"] == [{"id": r["id"], "order_number": "SG5X42VMKCAG", "from": "placed", "to": "shipped"}]
+    r = ledger.get(store, r["id"])
+    assert r["status"] == "shipped" and r["evidence"][-1]["id"] == "m2"
+    # an older "order confirmed" email never moves it backwards
+    assert ledger.reconcile(store, lambda q: [{"id": "m1", "subject": "Order confirmed SG5X42VMKCAG"}])["changed"] == []
+    # a purchase task that ended without an order number
+    r2 = ledger.add(store, "t2", "shop.test", 5, "SGD")
+    ledger.confirm(store, "t2", "")
+    assert ledger.get(store, r2["id"])["status"] == "unconfirmed"
+
+
+def test_fewer_approvals_are_suggested_not_switched_on(store):
+    # batch 3: 3 approvals of the same low-risk action → a suggestion; nothing changes until the user accepts it
+    from app.sentinel import suggest
+    for i in range(3):
+        a = store.create_approval(f"t{i}", f"c{i}", "gmail_send", {"to": "john@x.com"},
+                                  {"title": "发送邮件 Send email", "destination": "john@x.com"}, "high", "sends an email")
+        store.resolve_approval(a["id"], "approved", "ONCE")
+        b = store.create_approval(f"t{i}", f"p{i}", "purchase_confirm", {"total": 5},
+                                  {"title": "确认购买", "destination": "decathlon.sg"}, "high", "确认这次购买 (spends money)")
+        store.resolve_approval(b["id"], "approved", "ONCE")
+        if i < 2:
+            assert suggest.suggestions(store) == []
+    sg = suggest.suggestions(store)
+    assert [x["tool"] for x in sg] == ["gmail_send"] and sg[0]["count"] == 3       # never the purchase
+    assert suggest.just_reached(store, store.approval(a["id"]))["destination"] == "john@x.com"
+    d0 = decide(store, "gmail_send", {"to": "john@x.com", "body": "hi"}, "t9")
+    suggest.accept(store, sg[0]["key"], 30)
+    assert suggest.suggestions(store) == []
+    g = store.active_grants()[0]
+    assert g["tool"] == "gmail_send" and g["scope"] == "TIME_BOUND"
+    d1 = decide(store, "gmail_send", {"to": "john@x.com", "body": "hi"}, "t9")
+    d2 = decide(store, "gmail_send", {"to": "eve@x.com", "body": "hi"}, "t9")
+    assert d0.decision == ASK and d1.decision == ALLOW and d2.decision == ASK, (d0, d1, d2)
+    # dismissed stays dismissed
+    for i in range(3):
+        a = store.create_approval(f"u{i}", f"c{i}", "notion_create_page", {}, {"title": "Notion", "destination": "ws"}, "high", "")
+        store.resolve_approval(a["id"], "approved", "ONCE")
+    k = suggest.suggestions(store)[0]["key"]
+    suggest.dismiss(store, k)
+    assert suggest.suggestions(store) == []

@@ -445,6 +445,26 @@ async def chat(req: Request):
         if not b.get("tools"):
             return reply(f"LOOP SUMMARY after {n} tool calls: feed read, email not sent.")
         return reply("", [tc("browser_navigate", {"url": PAGE.rsplit('/', 1)[0] + "/feed.xml"})])
+    if "BUYTEST" in goal:        # batch 3: one approved purchase → order number → ledger
+        if n == 0:
+            return reply("", [tc("purchase_confirm", {"site": "shop.test", "items": [{"name": "Kiprun socks", "qty": 1, "price": 4.9}],
+                                                      "shipping": 0, "total": 4.9, "currency": "SGD", "delivery": "Home delivery"})])
+        if n == 1:
+            return reply("", [tc("browser_navigate", {"url": PAGE.replace("page.html", "checkout_ledger.html")})])
+        if n == 2:
+            m = re.search(r"\[(e\d+)\] button \\\"Place order", last_tool) or re.search(r"\[(e\d+)\] button", last_tool)
+            return reply("", [tc("browser_click", {"ref": m.group(1) if m else "e1"})])
+        return reply("下单成功，订单号：OM-77821，总价 S$4.90，送货到家。")
+    if "CANCELTEST" in goal:     # batch 3: cancel goes through the ledger
+        page = "order_other.html" if "OTHER" in goal else "order_ledger.html"
+        if n == 0:
+            return reply("", [tc("orders_list", {"query": ""})])
+        if n == 1:
+            return reply("", [tc("browser_navigate", {"url": PAGE.replace("page.html", page)})])
+        if n == 2:
+            m = re.search(r"\[(e\d+)\] button \\\"Cancel order", last_tool) or re.search(r"\[(e\d+)\] button", last_tool)
+            return reply("", [tc("browser_click", {"ref": m.group(1) if m else "e1"})])
+        return reply(f"Cancel step done. {last_tool[:200]}")
     if "SITECHECK" in goal:      # batch 2: what OMuse learned about a site shows up when it opens
         if n == 0:
             return reply("", [tc("browser_navigate", {"url": PAGE})])

@@ -148,7 +148,8 @@ def _questions(answer: str, events: list[dict]) -> list[str]:
 
 def evaluate_ctx(case: dict, task: dict, events: list[dict]) -> dict:
     answer = str(task.get("result") or "")
-    blob = answer + "\n" + "\n".join(json.dumps(c.get("args"), ensure_ascii=False) for c in _calls(events)) \
+    blob = answer + "\n" + "\n".join(json.dumps(c.get("args"), ensure_ascii=False) for c in _calls(events)
+                                     if c.get("name") not in ("memory_search", "memory_remember")) \
         + "\n" + "\n".join(json.dumps(s.get("args"), ensure_ascii=False) for s in _stops(events))
     asked = [q for q in _questions(answer, events) if re.search(case["ask"], q, re.I)]
     used = bool(re.search(case["use"], blob, re.I))
@@ -373,6 +374,68 @@ class Golden:
             await self.rt.sentinel("POST", "/internal/notify", {"task_id": "", "text": f"{title}\n{body}"}, timeout=20)
         except Exception:
             pass
+
+    # ------------------------------------------------------------ personal-context probe (fast A/B)
+    async def context_probe(self, mode: str = "v1") -> dict:
+        """The 10 personal-context requests, planned and decided by the real model with the old (legacy) or new (v1)
+        memory context — no browsing, nothing executed. Measures whether the plan / the agent's own statement of how it
+        will do the task applies what memory knows, or asks the user for it again."""
+        from app.common.util import VERSION
+        from app.runtime import prompts
+        if self.running:
+            raise RuntimeError("黄金测试已在运行 (a golden run is already running)")
+        run = {"id": new_id("gold"), "started_at": now_ts(), "status": "running", "trigger": f"probe:context-{mode}",
+               "version": VERSION, "total": len(CTX_CASES), "passed": 0, "results": []}
+        self.running = run["id"]
+        self._save(run)
+        rt = self.rt
+        s = rt.store.settings()
+        try:
+            catalog = await rt.catalog()
+            for case in CTX_CASES:
+                t0 = time.time()
+                tid = f"probe_{case['id']}_{mode}"
+                if mode == "legacy":
+                    facts = rt._facts_legacy(case["prompt"])
+                else:
+                    from app.runtime import context
+                    facts = context.select(case["prompt"], rt.store.facts(500), rt.store.entities(), limit=12)
+                task = {"id": tid, "goal": case["prompt"], "conv_id": "", "attachments": []}
+                try:
+                    plan = await rt._plan(task, facts, "")
+                except Exception as e:
+                    plan = {"objective": "", "steps": [], "error": repr(e)[:200]}
+                plan_txt = plan.get("objective", "") + "\n" + "\n".join(x["description"] for x in plan.get("steps") or [])
+                sysp = prompts.executor_system(user_name=s["user_name"], tz=s["timezone"],
+                                               connections=catalog.get("connections", {}), plan=plan, facts=facts,
+                                               skills=rt.skills(), language="zh")
+                probe_q = (case["prompt"] + "\n\n（先不要调用任何工具。用两三句话说明：你会按哪些具体条件来办这件事"
+                           "（例如尺码、型号、舱位、人数、口味、风格、发件邮箱、格式），开始前需不需要问我什么——需要就把问题写出来。）")
+                try:
+                    r = await rt.llm.chat([{"role": "system", "content": sysp}, {"role": "user", "content": probe_q}],
+                                          purpose="probe", task_id=tid, max_tokens=500, temperature=0.2, no_think=True)
+                    probe = str(r.get("content") or "")
+                except Exception as e:
+                    probe = f"(error {e!r})"[:200]
+                text = plan_txt + "\n" + probe
+                qs = [q for q in re.split(r"(?<=[?？])|\n", text) if re.search(r"[?？]\s*$", q.strip())]
+                asked = [q.strip() for q in qs if re.search(case["ask"], q, re.I)]
+                used = bool(re.search(case["use"], text, re.I))
+                why = (["重复问了已知偏好：" + asked[0][:100]] if asked else []) + ([] if used else ["没有用上已知偏好"])
+                run["results"].append({"id": case["id"], "title": case["title"], "passed": not why, "why": why,
+                                       "asked": bool(asked), "used": used, "seconds": round(time.time() - t0),
+                                       "context": [f["fact"][:80] for f in facts],
+                                       "plan": plan_txt[:600], "answer": probe[:600]})
+                run["passed"] = sum(1 for x in run["results"] if x["passed"])
+                self._save(run)
+            run["status"] = "done"
+        except Exception as e:
+            run["status"] = f"error: {e!r}"[:200]
+        finally:
+            run["finished_at"] = now_ts()
+            self._save(run)
+            self.running = ""
+        return run
 
     # ------------------------------------------------------------ weekly
     def start(self):

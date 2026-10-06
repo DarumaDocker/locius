@@ -541,12 +541,40 @@ async def golden_run(req: Request):
     b = await req.json() if (req.headers.get("content-length") or "0") != "0" else {}
     if rt.golden.running:
         raise HTTPException(409, "黄金测试已在运行 (already running)")
+    if b.get("suite") == "context_probe":
+        asyncio.create_task(rt.golden.context_probe("legacy" if b.get("context") == "legacy" else "v1"))
+        await asyncio.sleep(0.2)
+        return {"ok": True, "run_id": rt.golden.running}
     only = [str(x) for x in (b.get("only") or [])] or None
     suite = "context" if b.get("suite") == "context" else ""
     ctx = "legacy" if b.get("context") == "legacy" else ""
     asyncio.create_task(rt.golden.run("manual", only, suite, ctx))
     await asyncio.sleep(0.2)
     return {"ok": True, "run_id": rt.golden.running}
+
+
+@app.post("/api/ledger/backfill")
+async def ledger_backfill():
+    """Ledger entries for purchases made before the ledger existed, with the order number their task got."""
+    from app.runtime import outcome
+    res = await rt.sentinel("POST", "/internal/ledger/backfill", {}, timeout=60)
+    done = []
+    for tid in res.get("tasks") or []:
+        t = rt.store.task(tid)
+        if not t:
+            continue
+        oc = t.get("outcome") or {}
+        if not oc:
+            texts = [str(m.get("content") or "") for m in (t.get("transcript") or []) if m.get("role") == "tool"]
+            oc = outcome.assess(rt.store.events(tid), str(t.get("result") or ""), texts, t.get("goal") or "")
+        await rt._ledger_confirm(tid, oc, str(t.get("result") or ""))
+        done.append(tid)
+    return {"created": res.get("created") or [], "confirmed": done}
+
+
+@app.post("/api/ledger/reconcile")
+async def ledger_reconcile():
+    return await rt.health.reconcile_ledger()
 
 
 @app.post("/api/outcome/{tid}")
@@ -641,6 +669,14 @@ async def file_raw(path: str, download: int = 0):
 @app.post("/internal/approval_resolved", dependencies=[Depends(internal_auth)])
 async def approval_resolved(req: Request):
     await rt.on_approval_resolved(await req.json())
+    return {"ok": True}
+
+
+@app.post("/internal/notify_user", dependencies=[Depends(internal_auth)])
+async def notify_user(req: Request):
+    b = await req.json()
+    n = rt.store.notify(str(b.get("title") or "")[:120], str(b.get("body") or "")[:1000], level="info")
+    await rt.publish({"kind": "notification", "notification": n})
     return {"ok": True}
 
 

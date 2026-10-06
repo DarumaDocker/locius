@@ -725,7 +725,51 @@ async function viewTrust(root) {
       h('tbody', null, (last.results || []).map(x => h('tr', null, h('td', null, x.passed ? '✅' : '❌'),
         h('td', null, x.task_id ? h('a', { href: '#tasks/' + x.task_id }, `${x.id} ${x.title}`) : `${x.id} ${x.title}`),
         h('td', { class: 'mono' }, x.seconds != null ? x.seconds + 's' : ''), h('td', { class: 'small' }, (x.why || []).join('；'))))))) : null);
-  root.append(h('div', { class: 'stack' }, h('div', { class: 'row' }, days), tiles, h('div', { class: 'grid2' }, health, golden), perDay));
+  const ledgerCard = h('div', { class: 'card stack' }, h('h3', null, T('🧾 交易账本 Ledger')));
+  const fewer = h('div', { class: 'stack' });
+  root.append(h('div', { class: 'stack' }, h('div', { class: 'row' }, days), tiles, fewer, h('div', { class: 'grid2' }, health, golden), ledgerCard, perDay));
+  fillLedger(ledgerCard).catch(() => ledgerCard.append(h('div', { class: 'muted small' }, T('账本暂时打不开'))));
+  fillSuggestions(fewer).catch(() => {});
+}
+
+async function fillSuggestions(box) {
+  const r = await sapi('grant_suggestions');
+  const list = r.suggestions || [];
+  if (!list.length) return;
+  const go = (k, body) => safe(async () => { await sapi('grant_suggestions', { method: 'POST', body: { key: k, ...body } }); route(); });
+  box.append(h('div', { class: 'card stack' }, h('h3', null, T('🔁 可以少批的操作 Fewer approvals')),
+    h('p', { class: 'sub' }, T('这些操作你已经批准过 3 次以上。开启后同样的操作不再弹审批卡（可随时在「连接」页撤销）。付款、填卡、打电话、取消/退货和网页点击永远逐次审批。')),
+    list.map(x => h('div', { class: 'row', style: 'border-bottom:1px solid var(--line-2);padding-bottom:6px' },
+      h('div', { style: 'flex:1;min-width:0' }, h('b', null, T(x.title)), x.destination ? h('span', { class: 'muted small' }, ' → ' + x.destination) : null,
+        h('div', { class: 'small muted' }, Tf("最近 30 天批准了 {0} 次", x.count))),
+      h('button', { class: 'btn approve small', onclick: go(x.key, { accept: true, days: 30 }) }, T('自动允许 30 天')),
+      h('button', { class: 'btn small', onclick: go(x.key, { accept: true, days: 0 }) }, T('一直允许')),
+      h('button', { class: 'btn small', onclick: go(x.key, { accept: false }) }, T('不用了'))))));
+}
+
+function ledgerProof(o) {
+  const ev = (o.evidence || []).slice(-1)[0] || {};
+  const proof = String(ev.subject || ev.text || '').slice(0, 80);
+  return [o.approval_id ? T('你批准的') : '', proof].filter(Boolean).join(' · ');
+}
+
+async function fillLedger(card) {
+  const r = await sapi('ledger');
+  const rows = r.orders || [];
+  const sync = h('button', { class: 'btn small', onclick: safe(async () => {
+    const x = await sapi('ledger/reconcile', { method: 'POST', body: {} });
+    toast(Tf("核对了 {0} 个订单，更新 {1} 个", x.checked, (x.changed || []).length)); route(); }) }, T('用邮件核对 Check emails'));
+  card.append(h('p', { class: 'sub' }, T('OMuse 替你下的每一笔订单：商家、订单号、金额、卡、状态，以及谁批准的、凭什么证据。取消或退货时只认这里的订单。')),
+    h('div', { class: 'row' }, sync),
+    rows.length ? h('div', { class: 'tablewrap' }, h('table', { class: 'data' },
+      h('thead', null, h('tr', null, [T('日期'), T('商家'), T('订单号'), T('金额'), T('卡'), T('状态'), T('批准 / 证据')].map(x => h('th', null, x)))),
+      h('tbody', null, rows.map(o => h('tr', null,
+        h('td', { class: 'mono small' }, fmtTime(o.created_at)), h('td', null, o.merchant),
+        h('td', { class: 'mono' }, o.order_number || '—'),
+        h('td', { class: 'mono' }, `${o.currency} ${Number(o.total || 0).toFixed(2)}`), h('td', { class: 'small' }, o.card || '—'),
+        h('td', null, h('span', { class: 'chip' + (['placed', 'shipped', 'delivered'].includes(o.status) ? ' ok' : (['unconfirmed'].includes(o.status) ? ' bad' : '')) }, T(o.status_label))),
+        h('td', { class: 'small' }, ledgerProof(o))))))) :
+      h('div', { class: 'muted small' }, T('还没有订单。')));
 }
 
 // ================================================================== APPROVALS

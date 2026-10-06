@@ -19,6 +19,7 @@ import httpx
 
 CHECK_EVERY = 120
 DOWN_AFTER = 2            # consecutive failed checks
+LEDGER_EVERY = 6 * 3600   # merchants' emails are matched to ledger orders every 6 hours
 MAIL_EVERY = 2            # mailboxes are checked every other round (≤ 8 min to an alert)
 REMIND_AFTER = 6 * 3600
 STREAK = 3                # failed tasks with the same cause …
@@ -219,4 +220,25 @@ class Health:
                     await self.observe(comp, ok, detail)
             except Exception as e:
                 print(f"[health] check failed: {e!r}", flush=True)
+            try:
+                if time.time() - getattr(self, "_ledger_at", 0) >= LEDGER_EVERY:
+                    self._ledger_at = time.time()
+                    await self.reconcile_ledger()
+            except Exception as e:
+                print(f"[health] ledger reconcile failed: {e!r}", flush=True)
             await asyncio.sleep(CHECK_EVERY)
+
+    async def reconcile_ledger(self) -> dict:
+        """Merchants' emails move ledger orders along (shipped → delivered, cancelled, refunded); tell the user."""
+        res = await self.rt.sentinel("POST", "/internal/ledger/reconcile", {}, timeout=300)
+        labels = {"shipped": "已发货 shipped", "delivered": "已送达 delivered", "cancelled": "已取消 cancelled",
+                  "refunded": "已退款 refunded", "placed": "已下单 placed"}
+        for c in res.get("changed") or []:
+            text = f"订单 {c['order_number']}：{labels.get(c['to'], c['to'])}（来自商家邮件）"
+            try:
+                n = self.rt.store.notify("🧾 " + text, "交易账本已更新 Ledger updated", level="info")
+                await self.rt.publish({"kind": "notification", "notification": n})
+                await self.rt.sentinel("POST", "/internal/notify", {"task_id": "", "text": "🧾 " + text}, timeout=20)
+            except Exception:
+                pass
+        return res

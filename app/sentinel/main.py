@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app.common.util import VERSION, token_ok, truncate
-from app.sentinel import actions, guard, mailboxes, mailproviders, mcp_hub, watchers
+from app.sentinel import actions, guard, ledger, mailboxes, suggest, mailproviders, mcp_hub, watchers
 from app.sentinel.actions import ActionError
 from app.sentinel.catalog import TOOLS, llm_schemas
 from app.sentinel.policy import ALLOW, ASK, DENY, PER_USE_TOOLS, decide
@@ -356,6 +356,79 @@ async def internal_expire_approvals(req: Request):
     return {"expired": n}
 
 
+@app.get("/internal/ledger", dependencies=[Depends(runtime_auth)])
+async def internal_ledger(limit: int = 30, task_id: str = ""):
+    return {"orders": ledger.for_task(store, task_id) if task_id else ledger.entries(store, min(limit, 200))}
+
+
+@app.post("/internal/ledger/confirm", dependencies=[Depends(runtime_auth)])
+async def internal_ledger_confirm(req: Request):
+    """The runtime reports how a purchase task ended: the order number from its confirmation page, or none."""
+    b = await req.json()
+    tot = b.get("total")
+    out = ledger.confirm(store, str(b.get("task_id") or ""), str(b.get("order_number") or ""),
+                         float(tot) if isinstance(tot, (int, float)) else None, b.get("evidence") or None)
+    if out:
+        store.audit("sentinel", "ledger.confirm", task_id=str(b.get("task_id") or ""), result="success",
+                    detail={"orders": [{"id": o["id"], "order_number": o["order_number"], "status": o["status"]} for o in out]})
+    return {"orders": out}
+
+
+def _ledger_search(query: str) -> list[dict]:
+    out = []
+    for acc in mailboxes.ready_accounts(store):
+        try:
+            out += actions.gmail_client(store, acc["id"]).search(query, 10)
+        except Exception:
+            continue
+    return out
+
+
+@app.post("/internal/ledger/backfill", dependencies=[Depends(runtime_auth)])
+async def internal_ledger_backfill():
+    made = ledger.backfill(store)
+    return {"created": made, "tasks": [ledger.get(store, i)["task_id"] for i in made]}
+
+
+@app.post("/internal/ledger/reconcile", dependencies=[Depends(runtime_auth)])
+async def internal_ledger_reconcile():
+    res = await asyncio.to_thread(ledger.reconcile, store, _ledger_search)
+    if res["changed"]:
+        store.audit("sentinel", "ledger.reconcile", result="success", detail=res)
+    return res
+
+
+@app.get("/sentinel/api/grant_suggestions", dependencies=[Depends(ui_auth)])
+async def ui_grant_suggestions():
+    return {"suggestions": suggest.suggestions(store)}
+
+
+@app.post("/sentinel/api/grant_suggestions", dependencies=[Depends(ui_auth)])
+async def ui_grant_suggestion_decide(req: Request):
+    b = await req.json()
+    k = str(b.get("key") or "")
+    if "|" not in k:
+        raise HTTPException(400, "bad key")
+    if b.get("accept"):
+        days = b.get("days")
+        gid = suggest.accept(store, k, float(days) if days else None)
+        store.audit("user", "grant.from_suggestion", resource=k.split("|")[0], result="success",
+                    detail={"key": k, "grant_id": gid, "days": days})
+        return {"ok": True, "grant_id": gid}
+    suggest.dismiss(store, k)
+    return {"ok": True}
+
+
+@app.get("/sentinel/api/ledger", dependencies=[Depends(ui_auth)])
+async def ui_ledger(limit: int = 100):
+    return {"orders": ledger.entries(store, min(limit, 300)), "labels": ledger.LABEL}
+
+
+@app.post("/sentinel/api/ledger/reconcile", dependencies=[Depends(ui_auth)])
+async def ui_ledger_reconcile():
+    return await asyncio.to_thread(ledger.reconcile, store, _ledger_search)
+
+
 @app.get("/internal/mail_check", dependencies=[Depends(runtime_auth)])
 async def internal_mail_check():
     """Health check for the connected mailboxes (runtime health watch): sign in to each one and list the inbox."""
@@ -597,6 +670,14 @@ async def act(req: Request):
             page = {**page, "text": str((pt or {}).get("text") or "")}
         except Exception:
             pass
+    order_hits = None
+    if tool in ("browser_click", "browser_click_at") and elem and guard.order_change_click(elem.get("name", "")):
+        try:   # cancel / return: which order in the ledger is this page about?
+            pt = await actions.broker("POST", "/agent/page_text", {"task_id": task_id}, timeout=15)
+            txt = str((pt or {}).get("text") or "")
+        except Exception:
+            txt = ""
+        order_hits = ledger.in_text(store, txt + " " + str((page or {}).get("url") or ""))
     d = decide(store, tool, args, task_id, elem=elem, page=page, gmail_ready=gmail_ready())
     detail = {"args": _safe_args(tool, args), "reason": d.reason, "destination": d.destination}
     if elem:
@@ -619,6 +700,8 @@ async def act(req: Request):
         summary = await _summary(tool, args, elem, page)
         summary["reason"] = d.reason
         summary["destination"] = d.destination
+        if order_hits is not None:
+            _ledger_summary(summary, order_hits, elem)
         ap = store.create_approval(task_id, call_id, tool, args, summary, d.risk, d.reason)
         if summary.get("screenshot"):
             try:
@@ -664,11 +747,52 @@ async def internal_user_request(req: Request):
     return {"ok": True}
 
 
+def _ledger_summary(summary: dict, hits: list[dict], elem: dict | None) -> None:
+    """Cancel / return approvals name the ledger order they act on (or warn that the page's order is not in it)."""
+    summary["ledger_click"] = str((elem or {}).get("name") or "")[:80]
+    summary["ledger"] = [{k: h.get(k) for k in ("id", "merchant", "order_number", "total", "currency", "status_label",
+                                                 "created_at")} for h in hits[:3]]
+    fields = summary.setdefault("fields", [])
+    if hits:
+        for h in hits[:3]:
+            fields.append(["账本订单 Ledger order", f"{h['merchant']} · {h['order_number']} · {h['currency']} {h['total']:.2f} · "
+                                                    f"{time.strftime('%Y-%m-%d', time.localtime(h['created_at']))} · {h['status_label']}"])
+    else:
+        summary["warning"] = ((summary.get("warning") or "") + " 这个页面上的订单号不在 OMuse 的交易账本里：可能不是 OMuse 替你下的单，"
+                              "请核对订单号再批准 (the order on this page is not in OMuse's ledger — check it)").strip()
+
+
+def _ledger_after(tool: str, args: dict, task_id: str, detail: dict, result) -> None:
+    """Keep the ledger in step with what was just done."""
+    try:
+        if tool == "purchase_confirm":
+            card = ""
+            if args.get("card_item_id"):
+                it = vault.item(store, str(args.get("card_item_id")))
+                card = vault.summary_text(it, "number") if it else ""
+            ledger.add(store, task_id, str((result or {}).get("site") or guard.domain_of(
+                           "https://" + str(args.get("site", "")).removeprefix("https://").removeprefix("http://"))),
+                       float(args.get("total") or 0), str(args.get("currency") or ""), args.get("items") or [], card,
+                       str(args.get("delivery") or ""), str((result or {}).get("purchase_id") or ""),
+                       str(detail.get("approval_id") or ""))
+        elif tool in ("browser_click", "browser_click_at") and detail.get("approval_id"):
+            ap = store.approval(str(detail["approval_id"]))
+            hits = ((ap or {}).get("summary") or {}).get("ledger") or []
+            name = str(((ap or {}).get("summary") or {}).get("ledger_click") or "")
+            st = "return_requested" if re.search(r"return|refund|退货|退款|返品", name, re.I) else "cancel_requested"
+            for h in hits:
+                ledger.set_status(store, h["id"], st, "user", f"用户批准了「{name or '取消/退货'}」 approval {detail['approval_id']}",
+                                  {"kind": "approval", "id": detail["approval_id"]})
+    except Exception as e:
+        store.audit("sentinel", "ledger.update_failed", task_id=task_id, result="error", detail={"error": repr(e)[:300]})
+
+
 async def _run(tool: str, args: dict, task_id: str, risk: str, detail: dict, decision: str) -> dict:
     t = TOOLS[tool]
     started = time.time()
     try:
         result = await actions.execute(store, tool, args, task_id)
+        _ledger_after(tool, args, task_id, detail, result)
         ms = int((time.time() - started) * 1000)
         store.audit("sentinel", tool, task_id=task_id, resource=t["connector"], risk=risk, decision=decision,
                     result="success", detail={**detail, "ms": ms,
@@ -787,6 +911,17 @@ async def _resolve(aid: str, b: dict, via: str) -> dict:
                 result="approved", detail={"approval_id": aid, "scope": scope, "edited": sorted(edited.keys()), "via": via})
     result = await _run(tool, args, task_id, ap["risk"], {"args": _safe_args(tool, args), "approval_id": aid}, decision="APPROVED")
     store.resolve_approval(aid, "approved", scope, result, args)
+    if scope == "ONCE":
+        try:
+            sg = suggest.just_reached(store, store.approval(aid))
+            if sg:
+                msg = (f"🔁 你已经第 {sg['count']} 次批准「{sg['title']}」" + (f"（{sg['destination']}）" if sg["destination"] else "")
+                       + "。要不要以后自动允许？到「可信度 Trust」页可以开启（随时可撤销）。")
+                if bot and bot.config():
+                    asyncio.create_task(_safe(actions.telegram_send(store, msg)))
+                asyncio.create_task(notify_runtime("/internal/notify_user", {"title": "🔁 可以少批一次 Fewer approvals", "body": msg}))
+        except Exception:
+            pass
     asyncio.create_task(notify_runtime("/internal/approval_resolved", {
         "approval_id": aid, "task_id": task_id, "call_id": ap["call_id"], "decision": "approved", "result": result}))
     return {"ok": True, "status": "approved", "result": result}
