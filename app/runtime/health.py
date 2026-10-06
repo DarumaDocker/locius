@@ -25,7 +25,8 @@ STREAK_WINDOW = 3600      # … within this many seconds
 
 LABELS = {"model": ("模型服务", "model service"), "browser": ("浏览器", "browser"), "sentinel": ("安全网关 Sentinel", "Sentinel"),
           "tasks": ("任务执行", "task runs")}
-CAUSES = {"model": "模型", "browser": "浏览器", "mail": "邮箱", "sentinel": "Sentinel", "other": "其他"}
+CAUSES = {"model": "模型", "browser": "浏览器", "mail": "邮箱", "sentinel": "Sentinel", "timeout": "超时",
+          "step_limit": "步数用完", "gave_up": "来源反复失败", "other": "其他"}
 
 
 def failure_cause(error: str) -> str:
@@ -40,6 +41,12 @@ def failure_cause(error: str) -> str:
         return "mail"
     if "sentinel" in low:
         return "sentinel"
+    if "用时上限" in e or "time limit" in low or "超时" in e or "timeout" in low:
+        return "timeout"
+    if "步数上限" in e or "step limit" in low:
+        return "step_limit"
+    if "反复失败" in e or "kept failing" in low or "stopped retrying" in low:
+        return "gave_up"
     return "other"
 
 

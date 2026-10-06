@@ -503,7 +503,7 @@ async def golden_run(req: Request):
     return {"ok": True, "run_id": rt.golden.running}
 
 
-@app.post("/api/tasks/{tid}/outcome")
+@app.post("/api/outcome/{tid}")
 async def task_outcome(tid: str):
     """Re-assess an older task's outcome from what it did (the tool results kept in its transcript)."""
     from app.runtime import outcome

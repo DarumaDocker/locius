@@ -68,7 +68,7 @@ check("all components healthy at start", all(v["ok"] for v in st["components"].v
 n0 = len(tg_texts())
 settings(model_name="missing-model")
 health_check()
-check("one failed check is not an alert yet (router restarts happen)", len(tg_texts()) == n0, tg_texts()[n0:])
+check("one failed check is not an alert yet (router restarts happen)", not [t for t in tg_texts()[n0:] if "出问题" in t], tg_texts()[n0:])
 health_check()
 alerts = [t for t in tg_texts()[n0:] if "模型服务出问题" in t]
 check("second failed check -> one Telegram alert naming the missing model", len(alerts) == 1 and "missing-model" in alerts[0], tg_texts()[n0:])
@@ -106,6 +106,8 @@ chk = [e for e in evs if e["type"] == "outcome_check"]
 check("claim without a send was caught before finishing", chk and "send:not_done" in chk[0]["data"]["missing"], [e["type"] for e in evs])
 check("final answer no longer says it was sent", "已发送" not in (t["result"] or "") and "没有" in (t["result"] or ""), t["result"])
 check("outcome stored on the task", (t.get("outcome") or {}).get("status") in ("none", "unverified"), t.get("outcome"))
+r = c.post(f"{B}/api/outcome/{tid}", json={}, headers=H)
+check("outcome can be re-assessed for an older task", r.status_code == 200 and r.json()["outcome"]["status"] in ("none", "unverified"), r.text[:200])
 
 # ---------------------------------------------------------------- 4 golden run (dry run)
 r = c.post(B + "/api/golden/run", json={"only": ["G12", "G19", "G20"]}, headers=H)

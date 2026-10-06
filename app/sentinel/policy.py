@@ -190,7 +190,7 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
             return Decision(DENY, "high", "Agent 不能输入密码。请调用 browser_request_takeover 让用户接管输入 (use takeover for passwords)")
         text = str(args.get("text", ""))
         is_search = elem and (guard.looks_like_search(elem.get("role", ""), elem.get("name", "")) or bool(elem.get("searchy")))
-        if args.get("submit") and not is_search:
+        if args.get("submit") and not is_search and not guard.filter_submit(elem, text, (page or {}).get("url", "")):
             risk = _bump(risk, "high")
             reasons.append("输入后会按回车提交表单 (submits a form)")
         elif tainted and len(text) > 40 and not is_search:
@@ -236,6 +236,13 @@ def decide(store, tool: str, args: dict, task_id: str, *, elem: dict | None = No
         if not vault.domain_ok(it, dom):
             return Decision(DENY, "high", f"「{it['label']}」只允许在 {', '.join(it['domains'])} 使用，当前网站是 {dom} "
                                           "(item restricted to other sites)")
+        if it.get("kind") == "card" and not purchase and not ctx["injection"]:
+            # 2026-10-06 golden G04: the card was filled before the purchase was confirmed, so the user would get a
+            # card-fill approval and then the purchase card. One card for the whole purchase: confirm first.
+            return Decision(DENY, "high", "填银行卡之前先调用 purchase_confirm：在显示最终总价的页面写清商品、运费、总价、送货方式和"
+                                          "这张卡（card_item_id）。用户批准这一张卡之后，填卡和下单都不用再单独批准。"
+                                          " (Call purchase_confirm first, on the page that shows the final total; once the user "
+                                          "approves it, the card fills and the order click go through without more approvals.)")
         risk = "high"
         reasons.append(f"把保险箱里的「{vault.summary_text(it, field)}」填到 {dom} 的输入框（每次使用都需要你批准）"
                        "(fills a vault value — approved per use)")

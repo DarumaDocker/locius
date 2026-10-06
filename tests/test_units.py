@@ -699,14 +699,20 @@ def test_vault_fill_policy_and_scrub(store):
     args = {"ref": "e1", "item_id": it["id"], "field": "number"}
     el = {"tag": "input", "input_type": "text", "name": "Card number"}
     d = decide(store, "browser_fill_secret", args, "t1", elem=el, page={"url": "https://shop.test/pay", "title": ""})
-    assert d.decision == ASK and "•••• 1234" in d.reason and "4111" not in d.reason
+    assert d.decision == DENY and "purchase_confirm" in d.reason    # a card needs the purchase confirmed first (0.2.68)
+    mem = vault.save_item(store, {"kind": "membership", "label": "KrisFlyer", "domains": "shop.test",
+                                  "values": {"number": "8800 1111 2222 1234", "name": "LU LIANG"}})
+    margs = {"ref": "e1", "item_id": mem["id"], "field": "number"}
+    mel = {"tag": "input", "input_type": "text", "name": "Membership number"}
+    d = decide(store, "browser_fill_secret", margs, "t1", elem=mel, page={"url": "https://shop.test/pay", "title": ""})
+    assert d.decision == ASK and "•••• 1234" in d.reason and "8800" not in d.reason
     assert decide(store, "browser_fill_secret", args, "t1", elem=el, page={"url": "https://evil.example/pay"}).decision == DENY
     assert decide(store, "browser_fill_secret", args, "t1", elem={"tag": "input", "input_type": "password"},
                   page={"url": "https://shop.test/"}).decision == DENY
     assert decide(store, "browser_fill_secret", {**args, "field": "pin"}, "t1", elem=el, page={"url": "https://shop.test/"}).decision == DENY
     store.add_grant("browser_fill_secret", "PERMANENT", None, {}, None)   # grants never cover vault fills
     assert "browser_fill_secret" in PER_USE_TOOLS
-    assert decide(store, "browser_fill_secret", args, "t1", elem=el, page={"url": "https://shop.test/pay"}).decision == ASK
+    assert decide(store, "browser_fill_secret", margs, "t1", elem=mel, page={"url": "https://shop.test/pay"}).decision == ASK
     out = vault.scrub(store, {"snapshot": "Card 4111-1111-1111-1234 / 4111111111111234 total 123", "image_b64": "4111111111111234"})
     assert "1234" not in out["snapshot"].replace("[VAULT_VALUE]", "") and "total 123" in out["snapshot"]
     assert out["image_b64"] == "4111111111111234"
@@ -1725,3 +1731,40 @@ def test_trust_metrics(tmp_path):
     assert m["completion_rate"] == 0.5 and m["autonomous_rate"] == 0.5 and m["intervention_rate"] == 0.5
     assert m["approvals"] == 2 and m["denied"] == 1 and m["acted"] == 1 and m["approval_burden"] == 1.0 and m["verified"] == 1
     assert m["failure_causes"][0]["cause"] == "model"
+
+
+def test_filter_boxes_need_no_approval(store):
+    # 2026-10-06 golden G03: typing "15" + Enter in decathlon.sg's max-price box would have asked for approval
+    page = {"url": "https://www.decathlon.sg/c/bottles.html", "title": "Bottles"}
+    price = {"tag": "input", "role": "spinbutton", "name": "", "input_type": "number", "in_form": True}
+    assert decide(store, "browser_type", {"ref": "e67", "text": "15", "submit": True}, "tf", elem=price, page=page).decision == ALLOW
+    maxp = {"tag": "input", "role": "textbox", "name": "Max price", "input_type": "text", "in_form": True}
+    assert decide(store, "browser_type", {"ref": "e9", "text": "S$15", "submit": True}, "tf", elem=maxp, page=page).decision == ALLOW
+    other = {"tag": "input", "role": "textbox", "name": "Message", "input_type": "text", "in_form": True}
+    assert decide(store, "browser_type", {"ref": "e3", "text": "hello", "submit": True}, "tf", elem=other, page=page).decision == ASK
+    co = {"url": "https://www.decathlon.sg/checkout/x", "title": "Checkout"}
+    assert decide(store, "browser_type", {"ref": "e67", "text": "2", "submit": True}, "tf", elem=price, page=co).decision == ASK
+    from app.runtime import golden as G
+    g03 = next(c for c in G.CASES if c["id"] == "G03")["expect"]
+    ev = [{"type": "tool_call", "data": {"name": "browser_click", "args": {}}},
+          {"type": "dry_run_stop", "data": {"tool": "browser_type", "args": {}, "why": "browser_type：需要你批准（输入后会按回车提交表单）"}}]
+    assert any("多弹审批卡" in w for w in G.evaluate(g03, {"status": "COMPLETED", "result": "已加入购物车"}, ev))
+
+
+def test_card_fill_needs_the_purchase_confirmed_first(store, monkeypatch):
+    # 2026-10-06 golden G04: the agent filled the card before purchase_confirm (two cards instead of one)
+    from app.sentinel import vault
+    monkeypatch.setattr(vault, "item", lambda st, iid: {"id": iid, "label": "Visa", "kind": "card", "fields": ["number", "expiry", "cvc"],
+                                                       "masked": "•••• 2198", "domains": []})
+    monkeypatch.setattr(vault, "domain_ok", lambda it, dom: True)
+    page = {"url": "https://www.decathlon.sg/checkout/x", "title": "Checkout", "text": ""}
+    box = {"tag": "input", "role": "textbox", "name": "Card number", "input_type": "text", "in_form": True}
+    d = decide(store, "browser_fill_secret", {"ref": "f9e1", "item_id": "v1", "field": "number"}, "tk", elem=box, page=page)
+    assert d.decision == DENY and "purchase_confirm" in d.reason
+    store.add_purchase("tk", "decathlon.sg", "v1", 6.8, "SGD", {})
+    assert decide(store, "browser_fill_secret", {"ref": "f9e1", "item_id": "v1", "field": "number"}, "tk", elem=box, page=page).decision == ALLOW
+    # a passport number (not a card) still asks per use
+    monkeypatch.setattr(vault, "item", lambda st, iid: {"id": iid, "label": "Passport", "kind": "id", "fields": ["number"],
+                                                       "masked": "E••••12", "domains": []})
+    pp = dict(box, name="Passport number")
+    assert decide(store, "browser_fill_secret", {"ref": "e4", "item_id": "p1", "field": "number"}, "tk2", elem=pp, page=page).decision == ASK

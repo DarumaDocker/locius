@@ -456,3 +456,18 @@ def card_box_mismatch(field: str, name: str) -> str:
         if kind != field and rx.search(label):
             return kind
     return ""
+
+
+# Enter in a price / size / quantity filter box only narrows a list (2026-10-06 golden G03: decathlon.sg's "max price"
+# number box asked for approval). Not on checkout / payment pages, and only short values.
+_FILTER_NAME = re.compile(r"price|min|max|filter|sort|range|quantity|qty|size|zip|postal|budget|价格|最低|最高|筛选|数量|尺码|邮编",
+                          re.I)
+
+
+def filter_submit(elem: dict | None, text: str, page_url: str = "") -> bool:
+    if not elem or len(str(text or "")) > 20 or _MONEY_URL.search(str(page_url or "")):
+        return False
+    kind = str(elem.get("input_type") or "").lower()
+    if kind in ("number", "range") and re.fullmatch(r"\s*[\d.,]+\s*", str(text or "")):
+        return True
+    return bool(_FILTER_NAME.search(str(elem.get("name") or ""))) and kind not in ("password", "email", "tel")

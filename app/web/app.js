@@ -607,16 +607,19 @@ function fillTimeline(tl, events) {
 
 // ================================================================== TASKS
 async function viewTasks(root) {
-  const r = await api('tasks' + (S.taskFilter ? '?status=' + S.taskFilter : ''));
+  const golden = S.taskFilter === 'golden';
+  const r = await api('tasks' + (S.taskFilter && !golden ? '?status=' + S.taskFilter : ''));
+  // golden (weekly test) runs live on the Trust page; the task list shows them only under their own filter
+  r.tasks = r.tasks.filter(t => golden ? t.source === 'golden' : t.source !== 'golden');
   r.tasks.forEach(t => { S.tasks[t.id] = { ...(S.tasks[t.id] || {}), ...t }; });
   const filters = [['', T('全部 All')], ['RUNNING,PLANNING,CREATED', T('执行中 Running')], ['WAITING_APPROVAL,WAITING_EXTERNAL,PAUSED', T('等待中 Waiting')],
-    ['COMPLETED', T('已完成 Done')], ['FAILED,CANCELLED', T('失败 Failed')]];
+    ['COMPLETED', T('已完成 Done')], ['FAILED,CANCELLED', T('失败 Failed')], ['golden', T('🧪 黄金测试')]];
   const left = h('div', null, h('div', { class: 'filters' }, filters.map(([v, l]) => h('button', { class: S.taskFilter === v ? 'on' : '', onclick: () => { S.taskFilter = v; route(); } }, l))));
   const list = h('div', { class: 'list' });
   if (!r.tasks.length) list.append(h('div', { class: 'empty' }, T('还没有任务。去「对话」里给 OMuse 布置一个吧。')));
   for (const t of r.tasks) list.append(h('button', { class: 'item' + (S.selTask === t.id ? ' active' : ''), onclick: () => { location.hash = 'tasks/' + t.id; } },
     h('div', { class: 'top' }, pill(t.status), h('span', { class: 'title' }, t.goal)),
-    h('div', { class: 'small muted' }, Tf("{0} · {1} · {2} 步", (fmtTime(t.created_at)), (t.source === 'schedule' ? T('⏰ 定时') : T('💬 对话')), (t.steps || 0)))));
+    h('div', { class: 'small muted' }, Tf("{0} · {1} · {2} 步", (fmtTime(t.created_at)), (t.source === 'schedule' ? T('⏰ 定时') : t.source === 'golden' ? T('🧪 黄金测试') : T('💬 对话')), (t.steps || 0)))));
   left.append(list);
   const right = h('div', { id: 'taskDetail' });
   root.append(h('div', { class: 'split' + (S.selTask ? ' has-sel' : '') }, left, right));
@@ -637,7 +640,7 @@ async function renderTaskDetail(box, id) {
     h('div', { class: 'row' }, pill(t.status), h('b', { style: 'flex:1' }, t.goal)),
     h('dl', { class: 'kv' },
       h('dt', null, T('任务 ID')), h('dd', { class: 'mono' }, t.id),
-      h('dt', null, T('来源 Source')), h('dd', null, t.source === 'schedule' ? T('⏰ 定时任务 schedule') : T('💬 对话 chat')),
+      h('dt', null, T('来源 Source')), h('dd', null, t.source === 'schedule' ? T('⏰ 定时任务 schedule') : t.source === 'golden' ? T('🧪 黄金测试（演练，不真正执行）') : T('💬 对话 chat')),
       h('dt', null, T('创建 Created')), h('dd', null, fmtTime(t.created_at)),
       h('dt', null, T('步数 Steps')), h('dd', null, t.steps || 0),
       t.outcome && t.outcome.status !== 'none' ? [h('dt', null, T('结果证据 Evidence')), h('dd', null, outcomeBadge(t.outcome))] : null,
