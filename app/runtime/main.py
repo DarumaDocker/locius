@@ -629,6 +629,34 @@ async def test_model():
         return {"ok": False, "error": str(e)[:500]}
 
 
+@app.post("/api/settings/test-image")
+async def test_image(req: Request):
+    """Reachability check for the image endpoint — resolves base URL + model and lists models; never generates (no cost)."""
+    from app.runtime import imagegen
+    b = await req.json()
+    s = dict(rt.store.settings())
+    for k in ("image_base_url", "image_model"):
+        if k in b:
+            s[k] = str(b[k] or "").strip()
+    t0 = time.time()
+    try:
+        base, model = await imagegen.resolve(s)
+        listed = None
+        try:
+            ids = [str(m.get("id") or "") for m in await imagegen.list_models(base)]
+            listed = model in ids
+        except Exception:
+            pass   # some image servers have no /models; the explicit model is still usable
+        key = "OMUSE_IMAGE_API_KEY" if os.environ.get("OMUSE_IMAGE_API_KEY", "").strip() else (
+            "model key" if imagegen.auth_headers() else "none")
+        if listed is False:
+            return {"ok": False, "error": f"端点可达，但模型列表里没有 {model} (endpoint reachable, but it does not list {model})",
+                    "base": base, "model": model, "key": key}
+        return {"ok": True, "base": base, "model": model, "key": key, "listed": listed, "latency_s": round(time.time() - t0, 2)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:500]}
+
+
 # ------------------------------------------------------------------ workspace files (read-only for the UI)
 @app.get("/api/files")
 async def files(path: str = ""):

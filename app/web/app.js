@@ -596,6 +596,7 @@ function evLine(e) {
     case 'profile_read': body = h('span', { class: 'muted' }, Tf("🪪 读取档案：{0}", (d.fields || []).join(', ') || T('全部'))); break;
     case 'replanning': body = h('span', { style: 'color:var(--warn)' }, T('🔄 重新规划 Re-plan')); break;
     case 'chart': body = h('span', null, Tf("📊 图表：{0}", (d.title || d.path || ''))); break;
+    case 'image': body = h('span', null, Tf("🎨 生成图片：{0}", ((d.paths || []).join(', ') || d.path || '') + (d.model ? '  (' + d.model + ', ' + (d.size || '') + ', ' + (d.latency_s || '') + 's)' : ''))); break;
     case 'gave_up': body = h('span', { style: 'color:var(--warn)' }, T('🛑 同样的来源反复失败，停止重试，按已有信息作答')); break;
     case 'error': case 'planner_error': body = h('span', { style: 'color:var(--danger)' }, '❌ ' + (d.message || '')); break;
     default: body = h('span', { class: 'muted' }, e.type + ' ' + JSON.stringify(d).slice(0, 200));
@@ -2109,6 +2110,7 @@ async function viewSettings(root) {
     return h('label', { class: 'field' }, h('span', null, `${zh} `, LANG === 'en' ? null : h('span', { class: 'muted' }, en)), i, help ? h('span', null, help) : null); };
   const tog = (k, zh) => { const i = h('input', { type: 'checkbox', checked: !!s[k] }); f[k] = i; return h('label', { class: 'toggle' }, i, zh); };
   const testOut = h('span', { class: 'small muted' });
+  const imgOut = h('span', { class: 'small muted' });
   root.append(h('div', { class: 'grid2' },
     h('div', { class: 'card stack' }, h('h3', null, T('🧠 模型 Model（通过 Olares Router）')),
       h('p', { class: 'sub' }, T('默认全部使用本机 Qwen3.8-27B，数据不出 Olares One。任何 OpenAI 兼容接口都可替换。')),
@@ -2121,7 +2123,14 @@ async function viewSettings(root) {
       tog('disable_thinking', T('关闭思考模式（更快，复杂任务效果可能下降）Disable thinking')),
       field('extra_body', T('额外请求参数 JSON'), 'Extra body'),
       h('div', { class: 'row' }, h('button', { class: 'btn small', onclick: safe(async () => { testOut.textContent = T('测试中…'); const t = await api('settings/test-model', { method: 'POST', body: {} });
-        testOut.textContent = t.ok ? Tf("✓ {0}s：{1}", (t.latency_s), (t.reply)) : '✕ ' + t.error; }) }, T('测试模型 Test model')), testOut)),
+        testOut.textContent = t.ok ? Tf("✓ {0}s：{1}", (t.latency_s), (t.reply)) : '✕ ' + t.error; }) }, T('测试模型 Test model')), testOut),
+      h('h3', { style: 'margin-top:12px' }, T('🎨 图片生成 Images')),
+      h('p', { class: 'sub' }, T('留空 = 用上面的接口地址并自动寻找图像模型。接 OpenAI 时填 https://api.openai.com/v1 + gpt-image-1；密钥只能通过环境变量 OMUSE_IMAGE_API_KEY 提供，不在这里填。')),
+      field('image_base_url', T('图片接口地址（留空=同上）'), 'Image base URL'),
+      field('image_model', T('图像模型（留空=自动）'), 'Image model'),
+      h('div', { class: 'row' }, h('button', { class: 'btn small', onclick: safe(async () => { imgOut.textContent = T('检查中…');
+        const t = await api('settings/test-image', { method: 'POST', body: { image_base_url: f.image_base_url.value, image_model: f.image_model.value } });
+        imgOut.textContent = t.ok ? Tf("✓ {0} @ {1}（密钥：{2}）", t.model, t.base, t.key) : '✕ ' + t.error; }) }, T('检查图片接口 Check image endpoint')), imgOut)),
     h('div', { class: 'card stack' }, h('h3', null, '🤖 Agent'),
       langField(s, f),
       field('user_name', T('你的名字'), 'Your name'), field('timezone', T('时区（定时任务）'), 'Timezone'),

@@ -301,6 +301,23 @@ async def internal_render_png(req: Request):
     return r
 
 
+@app.post("/internal/compose_image", dependencies=[Depends(runtime_auth)])
+async def internal_compose_image(req: Request):
+    """Put exact text on a workspace image (poster title, caption, logo wordmark) — rendered by the browser container on
+    this machine (it has CJK fonts), offline. Image models get text wrong; this guarantees the letters."""
+    b = await req.json()
+    body = {k: b.get(k) for k in ("image", "text", "position", "size", "color", "band", "weight", "align", "font", "output", "padding")}
+    try:
+        r = await actions.broker("POST", "/compose", body, timeout=90)
+    except ActionError as e:
+        store.audit("sentinel", "image.compose", task_id=str(b.get("task_id", "")), resource=str(b.get("image") or ""),
+                    result="error", detail={"error": str(e)[:200]})
+        return {"error": str(e)}
+    store.audit("sentinel", "image.compose", task_id=str(b.get("task_id", "")), resource=r.get("path", ""), result="success",
+                detail={"size": r.get("size")})
+    return r
+
+
 TG_FILE_MAX = 50 * 1024 * 1024   # Telegram Bot API upload limit
 
 

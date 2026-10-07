@@ -491,6 +491,82 @@ LOCAL_TOOLS = [
          "output": {"type": "string", "description": "保存路径，默认 charts/<标题>.png output .png path"},
          "send": {"type": "boolean", "description": "是否发到对话里（默认 true）show it in the chat (default true)"}},
         ["type", "title"]),
+    _fn("make_image", "用 AI 根据文字描述生成一张图片（像 Midjourney / DALL·E）并直接显示在对话里：插画、海报、头像、产品图、"
+        "场景、概念图、logo 草稿、壁纸等。用户说「画一张…、生成一张…图、做个海报/头像/壁纸、来张…的图」时就用它——"
+        "不要去打开在线作图网站，也不要用 make_chart（那是数据图表）。prompt 用英文写得具体：主体、场景、风格、光线、构图、"
+        "颜色；用户给的中文描述你翻译并补全细节。aspect 按用途选：海报/手机壁纸 portrait，横幅/桌面壁纸 landscape，头像/logo square。"
+        "生成后图片自动发到对话；用户要改时（换风格、换颜色、加东西）用新的 prompt 再调一次。"
+        " Generate an image from a text description with an AI image model (like Midjourney / DALL·E) and show it in the "
+        "chat: illustrations, posters, avatars, product shots, scenes, concept art, logo drafts, wallpapers. Use it whenever "
+        "the user asks to draw / generate / make a picture, poster, avatar or wallpaper — never open an online image site, "
+        "and not make_chart (that is for data charts). Write the prompt in English and concretely (subject, setting, "
+        "style, lighting, composition, colours); translate and enrich a Chinese request. Pick aspect by use. The image is "
+        "sent to the chat automatically; to change it, call again with a new prompt.",
+        {"prompt": {"type": "string", "description": "英文、具体的画面描述 a concrete English description of the picture"},
+         "aspect": {"type": "string", "enum": ["square", "landscape", "portrait"],
+                    "description": "画幅：square 方形(头像/logo)，landscape 横向(横幅/桌面)，portrait 竖向(海报/手机)"},
+         "size": {"type": "string", "description": "或明确尺寸 or an explicit size like 1024x1024 / 1536x1024 / 1024x1536"},
+         "n": {"type": "integer", "description": "张数 1-4（默认 1）how many variations"},
+         "quality": {"type": "string", "enum": ["low", "medium", "high"], "description": "质量（支持时）quality when the model supports it"},
+         "style": {"type": "string", "description": "风格（中英皆可，会展开成具体提示词）：写实 photorealistic / 电影感 cinematic / 动漫 anime / 水彩 watercolor / 油画 oil painting / 3D render / 扁平矢量 flat vector / 像素 pixel art / 素描 sketch / 水墨 ink wash / 线稿 line art / 等距 isometric / 极简 minimalist / logo / 产品图 product"},
+         "negative_prompt": {"type": "string", "description": "不想出现的东西（支持的模型才生效）things to avoid, e.g. 'text, watermark, blurry, extra fingers'"},
+         "background": {"type": "string", "enum": ["transparent", "opaque"], "description": "透明背景（logo/贴纸/产品抠图；支持的模型才生效）transparent background when the model supports it"},
+         "output_format": {"type": "string", "enum": ["png", "jpeg", "webp"], "description": "输出格式，默认 png"},
+         "title": {"type": "string", "description": "文件名用的短标题 short title for the file name"},
+         "output": {"type": "string", "description": "保存路径，默认 images/<标题>.png output .png path"},
+         "send": {"type": "boolean", "description": "是否发到对话里（默认 true）show it in the chat (default true)"}},
+        ["prompt"]),
+    _fn("edit_image", "用 AI 修改一张已有图片（像 Midjourney 编辑器 / ChatGPT 选区编辑）：换颜色、加/去掉东西、换背景、改风格、"
+        "按参考图改。path 是工作区里的图（刚生成的、用户附件、browser_save_media 存的）；不给 path 就改本任务最近那张。"
+        "mask 可选：一张 PNG，透明的地方就是要重画的区域（局部重绘 inpainting）；不给 mask 就整张按 prompt 改。"
+        "references 可选：几张参考图（风格/人物/物体一致，对标 Midjourney --sref / --oref）。"
+        "用户说「把这张图…改成/换成/加上/去掉」「按这张的风格」时用它；不要重新 make_image 从头生成。"
+        " Edit an existing image with the AI model: recolour, add/remove things, swap background, restyle, or follow "
+        "reference images. `path` = a workspace image (just generated, a user attachment, or saved from a page); omit it "
+        "to edit this task's latest image. Optional `mask` PNG: transparent pixels = the region to repaint (inpainting); "
+        "without a mask the whole image is edited by prompt. Optional `references`: images to keep style/character/object "
+        "consistent (like --sref / --oref). Use it when the user wants an existing picture changed — don't regenerate.",
+        {"path": {"type": "string", "description": "要改的图片 workspace path of the image to edit (default: latest image of this task)"},
+         "prompt": {"type": "string", "description": "英文、具体地说明改什么 what to change, concretely, in English"},
+         "mask": {"type": "string", "description": "可选：遮罩 PNG 的工作区路径，透明区域=重画区域 optional mask PNG (transparent = repaint here)"},
+         "references": {"type": "array", "items": S, "description": "可选：参考图路径 optional reference images (style / character / object)"},
+         "aspect": {"type": "string", "enum": ["square", "landscape", "portrait"]},
+         "size": {"type": "string", "description": "或明确尺寸 or an explicit size"},
+         "n": {"type": "integer", "description": "张数 1-4"},
+         "title": {"type": "string", "description": "文件名用的短标题"},
+         "send": {"type": "boolean", "description": "是否发到对话里（默认 true）"}},
+        ["prompt"]),
+    _fn("vary_image", "基于一张图再生成几张「差不多但不一样」的变体（像 Midjourney 的 Vary / 再来几张）：主体、构图、风格不变，细节有变化。"
+        "不给 path 就用本任务最近那张。用户说「再来几张类似的」「换几个版本」「微调一下」时用它。"
+        " Make close variations of an image (like Midjourney Vary): same subject, composition and style with small "
+        "differences. Omit `path` for this task's latest image. Use when the user asks for more versions / similar ones.",
+        {"path": {"type": "string", "description": "原图 workspace path (default: latest image of this task)"},
+         "prompt": {"type": "string", "description": "可选：变化方向 optional direction, e.g. 'warmer colours', 'from the side'"},
+         "n": {"type": "integer", "description": "张数 1-4（默认 2）"},
+         "title": {"type": "string"}, "send": {"type": "boolean"}}),
+    _fn("caption_image", "把一段**准确的文字**压到图片上（海报标题、口号、价格、logo 字样、字幕）。AI 图像模型写字经常拼错或乱码，"
+        "这个工具由本机排版、字对字保证正确，支持中文。不给 path 就用本任务最近那张图。用户要「海报上写…」「加标题/文字/口号」"
+        "「logo 下面写公司名」时：先 make_image 生成不带文字的底图，再用它加字。"
+        " Put EXACT text on an image (poster title, slogan, price, wordmark, caption). Image models misspell or garble "
+        "text; this lays it out locally, letter-perfect, Chinese included. Omit `path` for this task's latest image. For "
+        "'write … on the poster', generate the picture without text first (make_image), then add the words with this.",
+        {"path": {"type": "string", "description": "底图 workspace image (default: latest image of this task)"},
+         "text": {"type": "string", "description": "要写的文字（可多行）the exact text, line breaks allowed"},
+         "position": {"type": "string", "enum": ["top", "bottom", "center", "top-left", "top-right", "bottom-left", "bottom-right"],
+                      "description": "位置，默认 bottom"},
+         "size": {"type": "integer", "description": "字号 px（默认按图片大小自动）font size in px (auto by default)"},
+         "color": {"type": "string", "description": "文字颜色，如 #ffffff / #111 / gold（默认白）"},
+         "band": {"type": "boolean", "description": "文字下垫半透明色带，复杂背景上更清楚 a translucent band behind the text"},
+         "weight": {"type": "string", "enum": ["400", "500", "600", "700", "800", "900"], "description": "字重，默认 700"},
+         "title": {"type": "string"}, "send": {"type": "boolean"}},
+        ["text"]),
+    _fn("upscale_image", "把图片放大 2 倍或 4 倍（本机像素放大 + 锐化，不联网）。用户要「放大」「高清一点」「做成大图/打印尺寸」时用。"
+        "注意：这是像素放大，不会凭空生成新细节（真正的 AI 超分需要专门模型，目前没有）。不给 path 就用本任务最近那张。"
+        " Enlarge an image 2x or 4x locally (resampling + sharpening, offline). Use for 'make it bigger / higher-res / print "
+        "size'. Note: pixel upscaling, it does not invent new detail (true AI super-resolution needs a dedicated model, "
+        "not available). Omit `path` for this task's latest image.",
+        {"path": {"type": "string"}, "factor": {"type": "integer", "enum": [2, 4], "description": "放大倍数，默认 2"},
+         "title": {"type": "string"}, "send": {"type": "boolean"}}),
     _fn("present_choices", "把几个选项做成卡片给用户挑（餐厅、商品、航班、方案等）。kind=comparison 时，每个选项的 label 和 details "
         "必须是你在本任务里读过的网页/邮件的原文摘录（照抄原文，不要翻译或改写），source_url 是读过的那个页面（或其中的链接）；"
         "系统会逐条核对，找不到原文就拒绝显示。你的翻译、评价写在 note 里（不核对）。kind=clarify 用于简单的澄清选项（不核对）。"
@@ -599,7 +675,7 @@ BUDGET_MARK_PAGES = "research check"
 TIME_MARK = "time budget"
 WEB_MARK = "web budget"
 WEB_NUDGE = 18        # web tool calls in one task before the agent is told to wrap up
-REMAKE_TOOLS = {"make_xlsx", "make_pdf", "make_docx", "make_chart"}
+REMAKE_TOOLS = {"make_xlsx", "make_pdf", "make_docx", "make_chart", "make_image", "edit_image", "vary_image", "caption_image", "upscale_image"}
 REMAKE_MAX = 4   # the 2026-10-02 itinerary run re-made the same Excel file 9 times (≈5 minutes of generation)
 
 
@@ -607,7 +683,7 @@ def _out_key(args: dict) -> str:
     return str(args.get("output") or args.get("title") or "").strip().lower()
 
 
-FINISH_TOOLS = {"update_plan", "files_write", "files_read", "file_look", "files_list", "make_pdf", "make_xlsx", "make_docx", "make_chart", "market_data", "stock_fundamentals", "calculate", "data_query", "send_file", "notify_user",
+FINISH_TOOLS = {"update_plan", "files_write", "files_read", "file_look", "files_list", "make_pdf", "make_xlsx", "make_docx", "make_chart", "make_image", "edit_image", "vary_image", "caption_image", "upscale_image", "market_data", "stock_fundamentals", "calculate", "data_query", "send_file", "notify_user",
                 "memory_remember", "goal_update", "schedule_state_set", "gmail_send", "gmail_reply", "gmail_create_draft",
                 "slack_send_message", "notion_create_page", "notion_append", "calendar_create_event"}
 
@@ -713,6 +789,7 @@ class Runtime:
         self.store = RStore(data_dir)
         self.publish = publish            # async fn(event: dict)
         self.llm = LLM(self.store.settings, on_call=self._on_llm_call)
+        self._last_image: dict[str, str] = {}   # task_id -> latest generated/edited image (edit_image / vary_image default)
         self.running: dict[str, asyncio.Task] = {}
         self._remakes: dict[tuple, int] = {}   # (task, tool, output) -> files made, see REMAKE_MAX
         self._seen_ids: dict[str, set] = {}   # task -> id-like tokens seen in its tool results (survives compression)
@@ -2269,6 +2346,221 @@ class Runtime:
         return (f"图表已生成 chart saved: {path}（未发送 not sent）。放进 PDF：在 make_pdf 的 Markdown 里写 ![标题]({path})；"
                 "要给用户看就用 send_file。")
 
+    async def _make_image(self, t: dict, a: dict) -> str:
+        """AI image generation (make_image): OpenAI-compatible Images API via app.runtime.imagegen; files land in
+        images/<title>.png and are shown in the chat like a chart."""
+        from app.runtime import imagegen as IG
+        prompt = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", str(a.get("prompt") or "")).strip()[:4000]   # Round 10: sane prompt
+        if not prompt:
+            return "ERROR: 需要 prompt（画面描述）prompt required."
+        prompt = IG.with_style(prompt, a.get("style"))
+        if a.get("background") == "transparent" and "transparent" not in prompt.lower():
+            prompt += ", isolated on a transparent background"   # models that ignore the parameter still get the hint
+        n = self._img_n(a, 1)
+        s = self.store.settings()
+        fmt = str(a.get("output_format") or "png").lower()
+        if fmt not in ("png", "jpeg", "webp"):
+            fmt = "png"
+        try:
+            res = await IG.generate(s, prompt, size=a.get("size"), aspect=a.get("aspect"), n=n,
+                                    quality=a.get("quality") or None, negative_prompt=a.get("negative_prompt") or None,
+                                    background=a.get("background") or None,
+                                    output_format=fmt if fmt != "png" else None)
+        except IG.ImageError as e:
+            return self._img_error(e)
+        except Exception as e:
+            return f"ERROR: 图像生成失败 image generation failed: {str(e)[:200]}"
+        return await self._save_images(t, a, res, prompt, fmt, kind="image", verb="生成 generated")
+
+    @staticmethod
+    def _img_n(a: dict, default: int) -> int:
+        try:
+            return max(1, min(int(a.get("n") or default), 4))
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _img_error(e: Exception) -> str:
+        msg = str(e)
+        if any(k in msg for k in ("没有图像生成模型", "no image-generation model", "image_base_url", "没有配置模型地址",
+                                  "no model endpoint", "无法读取模型列表", "could not list models")):
+            return ("ERROR: 图像生成没有配置 (image generation is not set up): " + msg +
+                    " 告诉用户：需要在 Settings 里配置图像模型后才能生成图片；不要重试，不要改用其他工具画。"
+                    " Tell the user an image model must be configured in Settings first; do not retry or draw another way.")
+        if "不支持图片编辑" in msg or "does not support image edits" in msg:
+            return ("ERROR: " + msg + " 告诉用户这个图像模型不支持编辑/变体，可以用 make_image 按新描述重新生成一张。"
+                    " Tell the user this model can't edit; offer to regenerate with make_image instead.")
+        return f"ERROR: {msg}。不要用同样的参数重试超过一次 (don't retry the same request more than once)."
+
+    def _img_read(self, rel: str) -> tuple[str, bytes]:
+        """A workspace image as (filename, bytes); raises ValueError with a message for the model."""
+        rel = str(rel or "").strip()
+        if not rel:
+            raise ValueError("需要图片路径 (image path required)")
+        full = self._path(rel)
+        if not os.path.isfile(full):
+            raise ValueError(f"找不到图片 image not found: {rel}")
+        if os.path.splitext(full)[1].lower() not in (".png", ".jpg", ".jpeg", ".webp"):
+            raise ValueError(f"不是 PNG/JPEG/WebP 图片 not a PNG/JPEG/WebP image: {rel}")
+        if os.path.getsize(full) > 50 * 1024 * 1024:
+            raise ValueError(f"图片太大 image over 50 MB: {rel}")
+        with open(full, "rb") as f:
+            return os.path.basename(full), f.read()
+
+    async def _save_images(self, t: dict, a: dict, res: dict, prompt: str, fmt: str, *, kind: str, verb: str) -> str:
+        ext = {"jpeg": "jpg", "webp": "webp"}.get(fmt, "png")
+        slug = re.sub(r"[^\w\-一-鿿]+", "_", str(a.get("title") or prompt[:40])).strip("_")[:50] or "image"
+        out = str(a.get("output") or f"images/{slug}.{ext}")
+        stem, oext = os.path.splitext(out)
+        if oext.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
+            stem, oext = out, "." + ext
+        out = stem + oext
+        paths = []
+        for i, png in enumerate(res["images"]):
+            p = out if i == 0 else f"{stem}-{i + 1}{oext}"
+            base, k = os.path.splitext(p)[0], 2
+            while os.path.exists(self._path(p)) and not a.get("output"):
+                p, k = f"{base}-{k}{oext}", k + 1
+            full = self._path(p)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "wb") as f:
+                f.write(png)
+            paths.append(p)
+        self._last_image[t["id"]] = paths[0]   # "change the colour" / "more like this" without a path
+        await self.event(t["id"], "image", {"paths": paths, "model": res["model"], "size": res["size"], "kind": kind,
+                                            "latency_s": res["latency_s"], "prompt": prompt[:300]})
+        info = f"{res['model']} {res['size']} {res['latency_s']}s" + (f" via {res['via']}" if res.get("via") else "")
+        if a.get("send", True) is not False and str(a.get("send")).lower() != "false":
+            sent = await self._send_file(t, {"paths": paths, "note": str(a.get("title") or "")} if len(paths) > 1
+                                         else {"path": paths[0], "note": str(a.get("title") or "")})
+            if sent.startswith("ERROR"):
+                return f"图片已{verb}: {', '.join(paths)}（{info}），但发送失败 but sending failed: {sent}"
+            return (f"图片已{verb}并显示在对话里 shown in the chat: {', '.join(paths)}（{info}）。"
+                    "不要再用 send_file 重复发送；在回答里用一两句话描述画面并问用户是否要调整。要改这张就用 edit_image，"
+                    "要更多类似的用 vary_image（都可以不传 path）。"
+                    + (f" 模型改写后的描述 revised prompt: {res['revised_prompt'][:200]}" if res.get("revised_prompt") else "")
+                    + " Don't send it again; describe it briefly and offer adjustments (edit_image / vary_image).")
+        return f"图片已{verb}: {', '.join(paths)}（{info}，未发送 not sent）。要给用户看就用 send_file。"
+
+    async def _edit_image(self, t: dict, a: dict, *, vary: bool = False) -> str:
+        """edit_image (inpainting by mask / prompt edit / reference-guided) and vary_image (close variations)."""
+        from app.runtime import imagegen as IG
+        rel = str(a.get("path") or "").strip() or self._last_image.get(t["id"], "")
+        if not rel:
+            return ("ERROR: 没有可以修改的图片 (no image to edit): 先用 make_image 生成一张，或给 path（工作区里的图片）。"
+                    " Generate one with make_image first, or pass the workspace path of an image.")
+        try:
+            main = self._img_read(rel)
+            refs = [self._img_read(r) for r in (a.get("references") or [])[:4]]
+            mask = self._img_read(a["mask"])[1] if a.get("mask") else None
+        except ValueError as e:
+            return f"ERROR: {e}"
+        prompt = str(a.get("prompt") or "").strip()
+        n = self._img_n(a, 2 if vary else 1)
+        s = self.store.settings()
+        try:
+            if vary:
+                res = await IG.variation(s, main, prompt=prompt, n=n, size=a.get("size"), aspect=a.get("aspect"))
+                label = prompt or f"variation of {os.path.basename(rel)}"
+            else:
+                if not prompt:
+                    return "ERROR: 需要 prompt（说明改什么）prompt required: what to change."
+                if refs:
+                    prompt += " Use the additional reference images for style, character and object consistency."
+                res = await IG.edit(s, [main] + refs, prompt, mask=mask, size=a.get("size"), aspect=a.get("aspect"), n=n)
+                label = prompt
+        except IG.ImageError as e:
+            return self._img_error(e)
+        except Exception as e:
+            return f"ERROR: 图像编辑失败 image edit failed: {str(e)[:200]}"
+        a = dict(a); a.setdefault("title", (("variation_" if vary else "edited_") + os.path.splitext(os.path.basename(rel))[0])[:50])
+        return await self._save_images(t, a, res, label, "png", kind="variation" if vary else "edit",
+                                       verb="生成变体 varied" if vary else "修改 edited")
+
+    async def _caption_image(self, t: dict, a: dict) -> str:
+        """caption_image: exact text on an image, laid out by the browser container (CJK fonts), offline."""
+        rel = str(a.get("path") or "").strip() or self._last_image.get(t["id"], "")
+        if not rel:
+            return "ERROR: 没有图片可以加字 (no image): 先 make_image 生成底图，或给 path。Generate one first or pass a path."
+        try:
+            self._img_read(rel)
+        except ValueError as e:
+            return f"ERROR: {e}"
+        text = str(a.get("text") or "").strip()
+        if not text:
+            return "ERROR: 需要 text（要写的文字）text required."
+        stem = os.path.splitext(rel)[0]
+        out = f"{stem}_text.png"
+        k = 2
+        while os.path.exists(self._path(out)):
+            out, k = f"{stem}_text-{k}.png", k + 1
+        body = {"task_id": t["id"], "image": rel, "text": text[:400], "position": a.get("position") or "bottom",
+                "size": a.get("size") or 0, "color": a.get("color") or "", "band": bool(a.get("band")),
+                "weight": str(a.get("weight") or "700"), "output": out}
+        r = await self.sentinel("POST", "/internal/compose_image", body, timeout=120)
+        if r.get("error") or not r.get("path"):
+            return f"ERROR: 加字失败 (caption failed): {r.get('error') or r}。不要重试超过一次。"
+        res = {"images": [], "model": "local-compose", "size": f"{r.get('width')}x{r.get('height')}", "latency_s": 0}
+        path = r["path"]
+        self._last_image[t["id"]] = path
+        await self.event(t["id"], "image", {"paths": [path], "model": "local-compose", "size": res["size"], "kind": "caption",
+                                            "latency_s": 0, "prompt": text[:300]})
+        if a.get("send", True) is not False and str(a.get("send")).lower() != "false":
+            sent = await self._send_file(t, {"path": path, "note": str(a.get("title") or "")})
+            if sent.startswith("ERROR"):
+                return f"已加字 text added: {path}，但发送失败 but sending failed: {sent}"
+            return (f"已把文字加到图上并显示在对话里 text added and shown: {path}（字号 {r.get('font_px')}px）。"
+                    "不要再 send_file；文字是本机排版的，字对字准确。Don't send again; the text is letter-perfect.")
+        return f"已加字 text added: {path}（未发送）。"
+
+    async def _upscale_image(self, t: dict, a: dict) -> str:
+        """upscale_image: local 2x/4x Lanczos resampling + unsharp mask (no new detail; true AI super-resolution needs a model)."""
+        rel = str(a.get("path") or "").strip() or self._last_image.get(t["id"], "")
+        if not rel:
+            return "ERROR: 没有图片可以放大 (no image): 先 make_image 生成一张，或给 path。"
+        try:
+            name, _ = self._img_read(rel)
+        except ValueError as e:
+            return f"ERROR: {e}"
+        try:
+            factor = 4 if int(a.get("factor") or 2) >= 4 else 2
+        except (TypeError, ValueError):
+            factor = 2
+
+        def _do():
+            from PIL import Image, ImageFilter
+            with Image.open(self._path(rel)) as im:
+                im = im.convert("RGBA") if im.mode in ("P", "LA", "RGBA") else im.convert("RGB")
+                w, h = im.size
+                if w * factor > 8192 or h * factor > 8192:
+                    raise ValueError(f"放大后超过 8192px 上限 (would exceed 8192px): {w*factor}x{h*factor}")
+                big = im.resize((w * factor, h * factor), Image.LANCZOS)
+                big = big.filter(ImageFilter.UnsharpMask(radius=1.2, percent=80, threshold=2))
+                stem = os.path.splitext(rel)[0]
+                out = f"{stem}_x{factor}.png"
+                k = 2
+                while os.path.exists(self._path(out)):
+                    out, k = f"{stem}_x{factor}-{k}.png", k + 1
+                os.makedirs(os.path.dirname(self._path(out)), exist_ok=True)
+                big.save(self._path(out), "PNG", optimize=True)
+                return out, w, h
+        try:
+            out, w, h = await asyncio.to_thread(_do)
+        except ValueError as e:
+            return f"ERROR: {e}"
+        except Exception as e:
+            return f"ERROR: 放大失败 upscale failed: {str(e)[:200]}"
+        self._last_image[t["id"]] = out
+        await self.event(t["id"], "image", {"paths": [out], "model": "local-lanczos", "size": f"{w*factor}x{h*factor}",
+                                            "kind": "upscale", "latency_s": 0, "prompt": f"{factor}x of {rel}"})
+        if a.get("send", True) is not False and str(a.get("send")).lower() != "false":
+            sent = await self._send_file(t, {"path": out, "note": str(a.get("title") or "")})
+            if sent.startswith("ERROR"):
+                return f"已放大 upscaled: {out}（{w*factor}x{h*factor}），但发送失败 but sending failed: {sent}"
+            return (f"已放大 {factor}x 并显示在对话里 upscaled and shown: {out}（{w}x{h} → {w*factor}x{h*factor}）。"
+                    "说明一下这是像素放大、不会新增细节。Mention it is pixel upscaling, no new detail.")
+        return f"已放大 upscaled: {out}（{w*factor}x{h*factor}，未发送）。"
+
     async def _market_data(self, task_id: str, a: dict) -> str:
         syms = a.get("symbols") or a.get("symbol") or []
         if isinstance(syms, str):
@@ -2580,6 +2872,14 @@ class Runtime:
             return self._make_docx(a)
         if name == "make_chart":
             return await self._make_chart(t, a)
+        if name == "make_image":
+            return await self._make_image(t, a)
+        if name in ("edit_image", "vary_image"):
+            return await self._edit_image(t, a, vary=(name == "vary_image"))
+        if name == "caption_image":
+            return await self._caption_image(t, a)
+        if name == "upscale_image":
+            return await self._upscale_image(t, a)
         if name == "market_data":
             return await self._market_data(tid, a)
         if name == "stock_fundamentals":

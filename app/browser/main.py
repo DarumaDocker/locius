@@ -961,6 +961,108 @@ async def make_png(req: Request):
     return {"path": os.path.relpath(op, WORKSPACE), "size": len(data)}
 
 
+# ================================================================== compose: exact text on an image (Round 8)
+def _css_color(s: str, default: str) -> str:
+    s = str(s or "").strip()
+    return s if re.fullmatch(r"#[0-9a-fA-F]{3,8}|[a-zA-Z]{3,20}|rgba?\([0-9., %]+\)", s) else default
+
+
+@app.post("/compose", dependencies=[Depends(auth)])
+async def compose_image(req: Request):
+    """Overlay exact text on a workspace image and save a PNG: JavaScript off, no network, the image is loaded from the
+    workspace file, the text is laid out by the browser's own (CJK-capable) fonts, then the composed element is
+    screenshotted at 1:1. Image models misspell text; this guarantees the letters a poster / caption / wordmark needs."""
+    import html as _html
+    b = await req.json()
+    src = _ws(str(b.get("image") or ""))
+    if not os.path.isfile(src):
+        raise HTTPException(404, "图片不存在 image not found")
+    text = str(b.get("text") or "").strip()
+    if not text or len(text) > 400:
+        raise HTTPException(400, "需要 1-400 字的文字 text required (1-400 chars)")
+    pos = str(b.get("position") or "bottom").lower()
+    if pos not in ("top", "bottom", "center", "top-left", "top-right", "bottom-left", "bottom-right"):
+        pos = "bottom"
+    try:
+        size = int(b.get("size") or 0)
+    except (TypeError, ValueError):
+        size = 0
+    if size:
+        size = max(12, min(size, 400))   # a given size is clamped; 0 = auto-size below
+    color = _css_color(b.get("color"), "#ffffff")
+    band = _css_color(b.get("band"), "") if b.get("band") not in (None, "", False) else ""
+    if b.get("band") is True:
+        band = "rgba(0,0,0,0.45)"
+    weight = str(b.get("weight") or "700")
+    if weight not in ("300", "400", "500", "600", "700", "800", "900"):
+        weight = "700"
+    align = str(b.get("align") or ("center" if pos in ("top", "bottom", "center") else ("left" if "left" in pos else "right"))).lower()
+    if align not in ("left", "center", "right"):
+        align = "center"
+    font = str(b.get("font") or "").strip()[:80]
+    try:
+        pad = max(0, min(int(b.get("padding") or 24), 200))
+    except (TypeError, ValueError):
+        pad = 24
+    out_rel = str(b.get("output") or "")
+    if not out_rel:
+        stem, _ = os.path.splitext(os.path.relpath(src, WORKSPACE))
+        out_rel = stem + "_text.png"
+    if not out_rel.lower().endswith(".png"):
+        out_rel += ".png"
+    op = _ws(out_rel)
+    # size the text to the picture when not given: ~1/12 of the shorter side, smaller for long text
+    from PIL import Image as _Img   # the playwright image has Pillow; only used to read dimensions
+    try:
+        with _Img.open(src) as im:
+            w, h = im.size
+    except Exception as e:
+        raise HTTPException(400, f"无法读取图片 cannot read image: {str(e)[:100]}")
+    if not size:
+        size = max(14, int(min(w, h) / 12 * (1.0 if len(text) <= 16 else 0.75 if len(text) <= 40 else 0.55)))
+    v = "top" if pos.startswith("top") else "bottom" if pos.startswith("bottom") else "center"
+    just = {"top": "flex-start", "bottom": "flex-end", "center": "center"}[v]
+    fam = (_html.escape(font) + ", ") if font else ""
+    cap_bg = f"background:{band};" if band else ""
+    page_html = f"""<!doctype html><html><head><meta charset="utf-8"><style>
+html,body{{margin:0;background:#fff}}
+#w{{position:relative;width:{w}px;height:{h}px;overflow:hidden}}
+#w img{{display:block;width:{w}px;height:{h}px}}
+#c{{position:absolute;left:0;top:0;width:{w}px;height:{h}px;display:flex;flex-direction:column;justify-content:{just};align-items:stretch;box-sizing:border-box;padding:{pad}px}}
+#t{{{cap_bg}color:{color};font:{weight} {size}px/1.25 {fam}"Noto Sans CJK SC","Noto Sans SC","PingFang SC","Microsoft YaHei","Helvetica Neue",Arial,sans-serif;text-align:{align};padding:{int(size*0.35)}px {int(size*0.6)}px;white-space:pre-wrap;word-break:break-word;text-shadow:{'none' if band else '0 2px 6px rgba(0,0,0,.6), 0 0 2px rgba(0,0,0,.8)'};border-radius:{int(size*0.25)}px}}
+</style></head><body><div id="w"><img src="file://{src}"><div id="c"><div id="t">{_html.escape(text)}</div></div></div></body></html>"""
+    tmp = os.path.join("/tmp", f"compose_{int(time.time()*1000)}_{os.getpid()}.html")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(page_html)
+    await broker.ensure_pw()
+    broker.touch()
+    async with _pdf["lock"]:
+        br = _pdf["browser"]
+        if br is None or not br.is_connected():
+            br = _pdf["browser"] = await broker.pw.chromium.launch(headless=True)
+        ctx = await br.new_context(java_script_enabled=False, device_scale_factor=1, viewport={"width": w, "height": h})
+        try:
+            async def block(route):
+                if route.request.url.startswith(("file://", "data:")):
+                    await route.continue_()
+                else:
+                    await route.abort()
+            await ctx.route("**/*", block)
+            page = await ctx.new_page()
+            await page.goto("file://" + tmp, wait_until="load", timeout=30000)
+            data = await page.locator("#w").screenshot(type="png", timeout=30000)
+        finally:
+            await ctx.close()
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    os.makedirs(os.path.dirname(op), exist_ok=True)
+    with open(op, "wb") as f:
+        f.write(data)
+    return {"path": os.path.relpath(op, WORKSPACE), "size": len(data), "width": w, "height": h, "font_px": size}
+
+
 # ================================================================== fast search / read (no snapshot round trips)
 SEARCH_JS = r"""() => {
   const out = [];

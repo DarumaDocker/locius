@@ -55,6 +55,8 @@ DEFAULT_SETTINGS = {
     "planner_model": "",
     "vision_model": "",       # "" = the executor model (Qwen3.x on Olares can read images)
     "stt_model": "",          # speech-to-text for audio/video attachments; "" = a whisper-like model on the endpoint, if any
+    "image_base_url": os.environ.get("OMUSE_IMAGE_URL", ""),   # OpenAI-Images-compatible endpoint for make_image; "" = the model endpoint
+    "image_model": os.environ.get("OMUSE_IMAGE_MODEL", ""),    # image model id (gpt-image-1 / dall-e-3 / FLUX …); "" = auto-pick
     "temperature": 0.3,
     "max_steps": 40,
     "llm_concurrency": 2,   # model requests in flight at once (match the model server's parallel slots, llama.cpp -np)

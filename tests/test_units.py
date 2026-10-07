@@ -2286,3 +2286,458 @@ def test_browser_restarts_after_idle_shutdown(monkeypatch):
         await b.page_for("t2")          # a new web action brings it back
     asyncio.run(go())
     assert b.started is True and launches["ctx"] == 2   # launched, torn down, launched again
+
+
+# ----------------------------------------------------------------- make_image (Round 1: text-to-image foundation)
+def test_image_model_picking():
+    from app.runtime.imagegen import pick_image_model
+    # an explicit image mode wins over names; vision-LANGUAGE / embedding / speech models are never picked
+    ms = [{"id": "Qwen3-VL-8B", "mode": "chat"}, {"id": "bge-embed"}, {"id": "whisper-large"},
+          {"id": "FLUX.1-schnell"}, {"id": "my-painter", "mode": "image"}]
+    assert pick_image_model(ms) == "my-painter"
+    assert pick_image_model([{"id": "Qwen2-VL"}, {"id": "stable-diffusion-xl"}]) == "stable-diffusion-xl"
+    assert pick_image_model([{"id": "gpt-image-1", "readiness": "loading"}, {"id": "dall-e-3"}]) == "dall-e-3"
+    assert pick_image_model([{"id": "Qwen3-27B", "mode": "chat"}, {"id": "bge-m3", "mode": "embedding"}]) == ""
+
+
+def test_image_shape_normalisation():
+    from app.runtime.imagegen import shape_of
+    assert shape_of(None)[0] == "square" and shape_of("square")[1] == ["1024x1024"]
+    assert shape_of("16:9")[0] == "landscape" and shape_of("16:9")[1][0] == "1536x1024"
+    assert shape_of("9:16")[0] == "portrait" and "1024x1792" in shape_of("9:16")[1]
+    assert shape_of(None, "poster")[0] == "portrait" and shape_of(None, "桌面壁纸")[0] == "landscape"
+    # an explicit size is tried first, then the shape's fallbacks
+    sh, sizes = shape_of("1792x1024")
+    assert sh == "landscape" and sizes[0] == "1792x1024" and "1536x1024" in sizes
+
+
+def _fake_images_api(monkeypatch, *, reject_sizes=(), reject_fields=(), use_url=False, models=None, calls=None):
+    """A fake OpenAI-Images server behind httpx: records calls, rejects given sizes/fields with 400 like real vendors do."""
+    import base64, json as _json
+    from app.runtime import imagegen as IG
+    calls = calls if calls is not None else []
+    png = b"\x89PNG\r\n\x1a\n" + b"fakepng"
+
+    class R:
+        def __init__(self, status, body, content=b""):
+            self.status_code, self._b, self.content = status, body, content
+            self.text = _json.dumps(body) if isinstance(body, dict) else str(body)
+        def json(self): return self._b
+
+    class FakeClient:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+        async def get(self, url, headers=None):
+            if url.endswith("/models"):
+                return R(200, {"data": models if models is not None else [{"id": "FLUX.1-dev"}]})
+            return R(200, {}, png)   # the image url
+        async def post(self, url, json=None, headers=None):
+            calls.append(dict(json))
+            for f in reject_fields:
+                if f in json:
+                    return R(400, {"error": {"message": f"Unknown parameter: '{f}'"}})
+            if json.get("size") in reject_sizes:
+                return R(400, {"error": {"message": f"Invalid value: '{json['size']}'. Supported size values are 1024x1024"}})
+            item = {"url": "http://img/x.png"} if use_url else {"b64_json": base64.b64encode(png).decode()}
+            item["revised_prompt"] = "a detailed " + json["prompt"]
+            return R(200, {"data": [item] * int(json.get("n") or 1)})
+    monkeypatch.setattr(IG.httpx, "AsyncClient", FakeClient)
+    return IG, calls, png
+
+
+def test_make_image_generates_png_with_auto_model(monkeypatch):
+    import asyncio
+    IG, calls, png = _fake_images_api(monkeypatch)
+    s = {"model_base_url": "http://router/v1", "image_base_url": "", "image_model": ""}
+    res = asyncio.run(IG.generate(s, "a red fox in snow", aspect="landscape", n=2))
+    assert res["model"] == "FLUX.1-dev" and res["size"] == "1536x1024" and len(res["images"]) == 2
+    assert res["images"][0] == png and res["revised_prompt"].startswith("a detailed")
+    assert calls[0]["model"] == "FLUX.1-dev" and calls[0]["prompt"] == "a red fox in snow" and calls[0]["n"] == 2
+
+
+def test_make_image_walks_size_fallbacks_and_drops_unknown_fields(monkeypatch):
+    import asyncio
+    # a DALL·E-3-like server: rejects 1536x1024 (gpt-image size) and doesn't know `quality`
+    IG, calls, png = _fake_images_api(monkeypatch, reject_sizes=("1536x1024",), reject_fields=("quality",))
+    s = {"model_base_url": "http://router/v1", "image_model": "dall-e-3"}
+    res = asyncio.run(IG.generate(s, "a lighthouse", aspect="landscape", quality="high"))
+    assert res["size"] == "1792x1024"             # fell through to the next landscape size
+    assert "quality" not in calls[-1]             # the rejected field was dropped, not fatal
+    assert calls[-1]["model"] == "dall-e-3"
+
+
+def test_make_image_url_response_and_explicit_endpoint(monkeypatch):
+    import asyncio
+    IG, calls, png = _fake_images_api(monkeypatch, use_url=True)
+    s = {"model_base_url": "http://router/v1", "image_base_url": "https://api.example/v1", "image_model": "gpt-image-1"}
+    res = asyncio.run(IG.generate(s, "studio portrait"))
+    assert res["images"] == [png] and res["size"] == "1024x1024"   # url responses are fetched; square default
+
+
+def test_make_image_clear_error_when_no_image_model(monkeypatch):
+    import asyncio, pytest
+    IG, calls, png = _fake_images_api(monkeypatch, models=[{"id": "Qwen3-27B", "mode": "chat"}])
+    s = {"model_base_url": "http://router/v1", "image_model": ""}
+    with pytest.raises(IG.ImageError) as ei:
+        asyncio.run(IG.generate(s, "anything"))
+    assert "Image model" in str(ei.value) or "图像生成模型" in str(ei.value)
+    assert calls == []   # never called /images/generations without a model
+
+
+# ----------------------------------------------------------------- make_image Round 2 (sizes / n / quality) + Round 3 (styles)
+def test_image_ratios_and_n_cap(monkeypatch):
+    import asyncio
+    from app.runtime.imagegen import shape_of
+    assert shape_of("4:3")[0] == "landscape" and shape_of("3:4")[0] == "portrait" and shape_of("21:9")[0] == "landscape"
+    assert shape_of("1:1")[1] == ["1024x1024"] and shape_of(None, "手机壁纸")[0] == "portrait"
+    IG, calls, png = _fake_images_api(monkeypatch)
+    s = {"model_base_url": "http://router/v1", "image_model": "FLUX.1-dev"}
+    res = asyncio.run(IG.generate(s, "cat", n=9, quality="high"))     # n is capped at 4; quality kept when accepted
+    assert calls[-1]["n"] == 4 and len(res["images"]) == 4 and calls[-1]["quality"] == "high"
+
+
+def test_image_style_presets_zh_and_en():
+    from app.runtime.imagegen import style_suffix, with_style
+    assert "watercolor" in style_suffix("水彩") and "anime" in style_suffix("动漫") and "ink wash" in style_suffix("水墨")
+    assert style_suffix("Photorealistic").startswith("photorealistic") and "flat vector" in style_suffix("扁平矢量")
+    assert style_suffix("steampunk") == "steampunk style"             # unknown words pass through
+    p = with_style("a red fox", "油画")
+    assert p.startswith("a red fox, oil painting") and with_style(p, "油画") == p   # not appended twice
+    assert with_style("a cat", "") == "a cat"
+
+
+def test_image_negative_prompt_dropped_on_openai_like_server(monkeypatch):
+    import asyncio
+    # OpenAI rejects negative_prompt by name; an SD server accepts it. One code path handles both.
+    IG, calls, png = _fake_images_api(monkeypatch, reject_fields=("negative_prompt",))
+    s = {"model_base_url": "http://x/v1", "image_model": "gpt-image-1"}
+    asyncio.run(IG.generate(s, "a dog", negative_prompt="text, watermark"))
+    assert "negative_prompt" not in calls[-1] and calls[0].get("negative_prompt") == "text, watermark"
+    IG2, calls2, _ = _fake_images_api(monkeypatch)
+    asyncio.run(IG2.generate({"model_base_url": "http://x/v1", "image_model": "sdxl"}, "a dog", negative_prompt="blurry"))
+    assert calls2[-1]["negative_prompt"] == "blurry"
+
+
+def test_image_transparent_background_and_webp_passthrough(monkeypatch):
+    import asyncio
+    IG, calls, png = _fake_images_api(monkeypatch)
+    s = {"model_base_url": "http://x/v1", "image_model": "gpt-image-1"}
+    asyncio.run(IG.generate(s, "a sticker of a fox", background="transparent", output_format="webp"))
+    assert calls[-1]["background"] == "transparent" and calls[-1]["output_format"] == "webp"
+    # a server that knows neither: both are dropped and the image still comes back
+    IG2, calls2, _ = _fake_images_api(monkeypatch, reject_fields=("background", "output_format"))
+    res = asyncio.run(IG2.generate({"model_base_url": "http://x/v1", "image_model": "sdxl"}, "fox", background="transparent", output_format="webp"))
+    assert res["images"] and "background" not in calls2[-1] and "output_format" not in calls2[-1]
+
+
+def test_image_moderation_and_timeout_are_clear_errors(monkeypatch):
+    import asyncio, pytest, json as _json
+    from app.runtime import imagegen as IG
+
+    class R:
+        def __init__(self, status, body): self.status_code, self._b = status, body; self.text = _json.dumps(body)
+        def json(self): return self._b
+
+    class Moderating:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+        async def post(self, url, json=None, headers=None):
+            return R(400, {"error": {"code": "content_policy_violation", "message": "Your request was rejected as a result of our safety system."}})
+    monkeypatch.setattr(IG.httpx, "AsyncClient", Moderating)
+    with pytest.raises(IG.ImageError) as ei:
+        asyncio.run(IG.generate({"model_base_url": "http://x/v1", "image_model": "dall-e-3"}, "something"))
+    assert "safety" in str(ei.value) and "do not retry" in str(ei.value)
+
+    class Slow:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+        async def post(self, url, json=None, headers=None): raise IG.httpx.ReadTimeout("slow")
+    monkeypatch.setattr(IG.httpx, "AsyncClient", Slow)
+    with pytest.raises(IG.ImageError) as ei:
+        asyncio.run(IG.generate({"model_base_url": "http://x/v1", "image_model": "dall-e-3"}, "something"))
+    assert "timed out" in str(ei.value)
+
+
+# ----------------------------------------------------------------- make_image Rounds 4-6 (inpainting / references / variations)
+def _fake_edits_api(monkeypatch, *, single_image_only=False, has_variations=True, no_edits=False, calls=None):
+    """A fake OpenAI-Images server for /images/edits and /images/variations: records multipart fields and file parts."""
+    import base64, json as _json
+    from app.runtime import imagegen as IG
+    calls = calls if calls is not None else []
+    png = b"\x89PNG\r\n\x1a\n" + b"edited"
+
+    class R:
+        def __init__(self, status, body): self.status_code, self._b = status, body; self.text = _json.dumps(body)
+        def json(self): return self._b
+
+    class FakeClient:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+        async def get(self, url, headers=None): return R(200, {"data": [{"id": "gpt-image-1"}]})
+        async def post(self, url, data=None, files=None, json=None, headers=None):
+            rec = {"url": url.split("/images/")[-1], "data": dict(data or {}), "parts": [f[0] for f in (files or [])]}
+            calls.append(rec)
+            if url.endswith("/variations"):
+                if not has_variations:
+                    return R(404, {"error": {"message": "Not found"}})
+                return R(200, {"data": [{"b64_json": base64.b64encode(png + b"v").decode()}] * int(data["n"])})
+            if no_edits:
+                return R(404, {"error": {"message": "Not found"}})
+            if single_image_only and "image[]" in rec["parts"]:
+                return R(400, {"error": {"message": "Invalid value for 'image': expected a file, got an array"}})
+            if "response_format" in (data or {}):
+                return R(400, {"error": {"message": "Unknown parameter: 'response_format'"}})   # gpt-image-1 behaviour
+            return R(200, {"data": [{"b64_json": base64.b64encode(png).decode(), "revised_prompt": "edited: " + data["prompt"]}] * int(data["n"])})
+    monkeypatch.setattr(IG.httpx, "AsyncClient", FakeClient)
+    return IG, calls, png
+
+
+def test_edit_image_inpainting_with_mask_and_references(monkeypatch):
+    import asyncio
+    IG, calls, png = _fake_edits_api(monkeypatch)
+    s = {"model_base_url": "http://x/v1", "image_model": "gpt-image-1"}
+    main, ref, mask = ("photo.png", b"MAIN"), ("style.jpg", b"REF"), b"MASK"
+    res = asyncio.run(IG.edit(s, [main, ref], "make the sky purple", mask=mask, aspect="landscape"))
+    assert res["images"] == [png] and res["revised_prompt"].startswith("edited:")
+    last = calls[-1]
+    assert last["url"] == "edits" and last["parts"] == ["image[]", "image[]", "mask"]   # multi-image + mask multipart
+    assert last["data"]["prompt"] == "make the sky purple" and "response_format" not in last["data"]  # dropped after 400
+    assert last["data"]["size"] == "1536x1024"
+
+
+def test_edit_image_falls_back_to_single_image_server(monkeypatch):
+    import asyncio
+    IG, calls, png = _fake_edits_api(monkeypatch, single_image_only=True)
+    s = {"model_base_url": "http://x/v1", "image_model": "sd-inpaint"}
+    res = asyncio.run(IG.edit(s, [("a.png", b"A"), ("b.png", b"B")], "add a hat"))
+    assert res["images"] == [png] and calls[-1]["parts"] == ["image"]   # kept the main image, dropped the array form
+
+
+def test_vary_image_uses_variations_endpoint_then_edit_fallback(monkeypatch):
+    import asyncio
+    IG, calls, png = _fake_edits_api(monkeypatch, has_variations=True)
+    s = {"model_base_url": "http://x/v1", "image_model": "dall-e-2"}
+    res = asyncio.run(IG.variation(s, ("a.png", b"A"), n=3))
+    assert res["via"] == "variations" and len(res["images"]) == 3 and calls[-1]["url"] == "variations"
+    IG2, calls2, png2 = _fake_edits_api(monkeypatch, has_variations=False)
+    res2 = asyncio.run(IG2.variation({"model_base_url": "http://x/v1", "image_model": "gpt-image-1"}, ("a.png", b"A"), prompt="warmer colours", n=2))
+    assert res2["via"] == "edit" and calls2[-1]["url"] == "edits"
+    assert calls2[-1]["data"]["prompt"].startswith("Create a close variation") and "warmer colours" in calls2[-1]["data"]["prompt"]
+    assert len(res2["images"]) == 2
+
+
+def test_edit_image_unsupported_server_is_a_clear_error(monkeypatch):
+    import asyncio, pytest
+    IG, calls, png = _fake_edits_api(monkeypatch, no_edits=True, has_variations=False)
+    with pytest.raises(IG.ImageError) as ei:
+        asyncio.run(IG.edit({"model_base_url": "http://x/v1", "image_model": "flux-txt2img-only"}, [("a.png", b"A")], "add a hat"))
+    assert "does not support image edits" in str(ei.value)
+
+
+def test_edit_image_tool_uses_latest_image_and_reads_workspace(tmp_path, monkeypatch):
+    """The runtime tool: no path -> this task's latest image; files are read from the workspace; results saved + sent."""
+    import asyncio
+    from app.runtime.agent import Runtime
+    IG, calls, png = _fake_edits_api(monkeypatch)
+    sent = []
+
+    async def pub(_): pass
+    rt = Runtime(str(tmp_path), pub)
+    import app.runtime.agent as _ag; monkeypatch.setattr(_ag, "WORKSPACE", os.path.realpath(str(tmp_path)))
+    rt.store.set_settings({"model_base_url": "http://x/v1", "image_model": "gpt-image-1"}) if hasattr(rt.store, "set_settings") else None
+    monkeypatch.setattr(rt, "_send_file", lambda t, a: asyncio.sleep(0, result=(sent.append(a) or "ok")))
+    monkeypatch.setattr(rt, "event", lambda *a, **k: asyncio.sleep(0))
+    monkeypatch.setattr(rt.store, "settings", lambda: {"model_base_url": "http://x/v1", "image_model": "gpt-image-1", "llm_timeout": 60})
+    t = {"id": "t1"}
+    # no image yet -> clear error, not a crash
+    r0 = asyncio.run(rt._edit_image(t, {"prompt": "add a hat"}))
+    assert r0.startswith("ERROR") and "make_image" in r0
+    # seed a "generated" image in the workspace and register it as the task's latest
+    os.makedirs(rt._path("images"), exist_ok=True)
+    with open(rt._path("images/fox.png"), "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\nFOX")
+    rt._last_image["t1"] = "images/fox.png"
+    r1 = asyncio.run(rt._edit_image(t, {"prompt": "give the fox a red scarf"}))
+    assert "edited" in r1 and os.path.isfile(rt._path("images/edited_fox.png")) and sent and sent[-1]["path"] == "images/edited_fox.png"
+    assert calls[-1]["parts"] == ["image"] and rt._last_image["t1"] == "images/edited_fox.png"   # chain: next edit targets the edit
+    r2 = asyncio.run(rt._edit_image(t, {"n": 2}, vary=True))
+    assert "varied" in r2 and len(sent[-1]["paths"]) == 2
+
+
+# ----------------------------------------------------------------- Rounds 7-8 (upscale / exact text on images)
+def _png(path, w=64, h=48, color=(30, 120, 200)):
+    from PIL import Image
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    Image.new("RGB", (w, h), color).save(path, "PNG")
+
+
+def test_upscale_image_doubles_and_quadruples(tmp_path, monkeypatch):
+    import asyncio
+    from PIL import Image
+    from app.runtime.agent import Runtime
+
+    async def pub(_): pass
+    rt = Runtime(str(tmp_path), pub)
+    import app.runtime.agent as _ag; monkeypatch.setattr(_ag, "WORKSPACE", os.path.realpath(str(tmp_path)))
+    sent = []
+    monkeypatch.setattr(rt, "_send_file", lambda t, a: asyncio.sleep(0, result=(sent.append(a) or "ok")))
+    monkeypatch.setattr(rt, "event", lambda *a, **k: asyncio.sleep(0))
+    _png(rt._path("images/cat.png"), 64, 48)
+    rt._last_image["t1"] = "images/cat.png"
+    r = asyncio.run(rt._upscale_image({"id": "t1"}, {}))                       # default 2x, latest image
+    assert "upscaled" in r and sent[-1]["path"] == "images/cat_x2.png"
+    with Image.open(rt._path("images/cat_x2.png")) as im:
+        assert im.size == (128, 96)
+    r4 = asyncio.run(rt._upscale_image({"id": "t1"}, {"path": "images/cat.png", "factor": 4}))
+    with Image.open(rt._path("images/cat_x4.png")) as im:
+        assert im.size == (256, 192)
+    assert rt._last_image["t1"] == "images/cat_x4.png"
+    _png(rt._path("images/huge.png"), 5000, 100)
+    assert "8192" in asyncio.run(rt._upscale_image({"id": "t1"}, {"path": "images/huge.png", "factor": 2}))   # capped, clear error
+    assert asyncio.run(rt._upscale_image({"id": "t9"}, {})).startswith("ERROR")                               # no image yet
+
+
+def test_caption_image_tool_calls_compose_with_exact_text(tmp_path, monkeypatch):
+    import asyncio
+    from app.runtime.agent import Runtime
+
+    async def pub(_): pass
+    rt = Runtime(str(tmp_path), pub)
+    import app.runtime.agent as _ag; monkeypatch.setattr(_ag, "WORKSPACE", os.path.realpath(str(tmp_path)))
+    sent, calls = [], []
+    monkeypatch.setattr(rt, "_send_file", lambda t, a: asyncio.sleep(0, result=(sent.append(a) or "ok")))
+    monkeypatch.setattr(rt, "event", lambda *a, **k: asyncio.sleep(0))
+
+    async def fake_sentinel(method, path, body, timeout=0):
+        calls.append((method, path, body))
+        return {"path": body["output"], "size": 1234, "width": 64, "height": 48, "font_px": 20}
+    monkeypatch.setattr(rt, "sentinel", fake_sentinel)
+    _png(rt._path("images/poster.png"))
+    rt._last_image["t1"] = "images/poster.png"
+    r = asyncio.run(rt._caption_image({"id": "t1"}, {"text": "双十一 大促 50% OFF", "position": "top", "band": True, "color": "gold"}))
+    assert "letter-perfect" in r and calls[-1][1] == "/internal/compose_image"
+    b = calls[-1][2]
+    assert b["image"] == "images/poster.png" and b["text"] == "双十一 大促 50% OFF" and b["position"] == "top" and b["band"] is True
+    assert b["output"] == "images/poster_text.png" and sent[-1]["path"] == "images/poster_text.png"
+    assert rt._last_image["t1"] == "images/poster_text.png"
+    assert asyncio.run(rt._caption_image({"id": "t1"}, {"text": ""})).startswith("ERROR")
+
+
+def test_compose_endpoint_renders_chinese_text_on_image(tmp_path, monkeypatch):
+    """Real end-to-end: the browser container's /compose draws exact (CJK) text onto a workspace PNG with headless Chromium."""
+    import asyncio, shutil
+    from PIL import Image
+    ws = tmp_path / "ws"; ws.mkdir()
+    monkeypatch.setenv("WORKSPACE", str(ws)); monkeypatch.setenv("BROWSER_TOKEN", "tkn"); monkeypatch.setenv("BROWSER_HEADLESS", "1")
+    import importlib, app.browser.main as bm
+    bm = importlib.reload(bm)
+    _png(str(ws / "images" / "bg.png"), 320, 200, (20, 20, 20))
+    from fastapi.testclient import TestClient
+    try:
+        with TestClient(bm.app) as c:
+            r = c.post("/compose", headers={"X-Browser-Token": "tkn"},
+                       json={"image": "images/bg.png", "text": "海报标题 Hello", "position": "bottom", "band": True, "color": "#ffffff"})
+    except Exception as e:   # no Chromium in this environment: the pipeline is covered by the tool test above
+        import pytest; pytest.skip(f"headless chromium unavailable: {str(e)[:80]}")
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert j["path"] == "images/bg_text.png" and j["width"] == 320 and j["height"] == 200 and j["font_px"] >= 14
+    with Image.open(ws / "images" / "bg_text.png") as im:
+        assert im.size == (320, 200)
+        px = im.convert("RGB").load()
+        # the bottom band area must now contain bright (text / band) pixels on the dark background
+        bright = sum(1 for x in range(0, 320, 4) for y in range(140, 200, 4) if sum(px[x, y]) > 300)
+        assert bright > 20
+    with TestClient(bm.app) as c:   # validation
+        assert c.post("/compose", headers={"X-Browser-Token": "tkn"}, json={"image": "images/nope.png", "text": "x"}).status_code == 404
+        assert c.post("/compose", headers={"X-Browser-Token": "tkn"}, json={"image": "images/bg.png", "text": ""}).status_code == 400
+
+
+# ----------------------------------------------------------------- Rounds 9-10 (practical outputs / safety & robustness)
+def test_make_image_tool_logo_transparent_jpeg_and_pdf_ready(tmp_path, monkeypatch):
+    import asyncio
+    from app.runtime.agent import Runtime
+    IG, calls, png = _fake_images_api(monkeypatch)
+
+    async def pub(_): pass
+    rt = Runtime(str(tmp_path), pub)
+    import app.runtime.agent as _ag; monkeypatch.setattr(_ag, "WORKSPACE", os.path.realpath(str(tmp_path)))
+    sent = []
+    monkeypatch.setattr(rt, "_send_file", lambda t, a: asyncio.sleep(0, result=(sent.append(a) or "ok")))
+    monkeypatch.setattr(rt, "event", lambda *a, **k: asyncio.sleep(0))
+    monkeypatch.setattr(rt.store, "settings", lambda: {"model_base_url": "http://x/v1", "image_model": "gpt-image-1", "llm_timeout": 60})
+    t = {"id": "t1"}
+    # logo on a transparent background: style preset expanded, transparency asked both as a parameter and in the prompt
+    r = asyncio.run(rt._make_image(t, {"prompt": "fox head mark", "style": "logo", "background": "transparent", "title": "fox-logo"}))
+    assert "shown in the chat" in r and os.path.isfile(rt._path("images/fox-logo.png")) and sent[-1]["path"] == "images/fox-logo.png"
+    assert calls[-1]["background"] == "transparent" and "logo design" in calls[-1]["prompt"] and "transparent background" in calls[-1]["prompt"]
+    # jpeg output gets a .jpg file; send=false returns a path the model can put into make_pdf Markdown
+    r2 = asyncio.run(rt._make_image(t, {"prompt": "sunset", "output_format": "jpeg", "send": False, "title": "sunset"}))
+    assert os.path.isfile(rt._path("images/sunset.jpg")) and "未发送" in r2 and calls[-1]["output_format"] == "jpeg"
+    assert len(sent) == 1                                   # send=false really didn't send
+    # a second image with the same title doesn't overwrite the first
+    asyncio.run(rt._make_image(t, {"prompt": "sunset 2", "output_format": "jpeg", "send": False, "title": "sunset"}))
+    assert os.path.isfile(rt._path("images/sunset-2.jpg"))
+    # the latest image is tracked for edit/vary/caption/upscale
+    assert rt._last_image["t1"] == "images/sunset-2.jpg"
+
+
+def test_image_tools_guard_paths_prompts_and_masks(tmp_path, monkeypatch):
+    import asyncio
+    from app.runtime.agent import Runtime
+    IG, calls, png = _fake_images_api(monkeypatch)
+
+    async def pub(_): pass
+    rt = Runtime(str(tmp_path), pub)
+    import app.runtime.agent as _ag; monkeypatch.setattr(_ag, "WORKSPACE", os.path.realpath(str(tmp_path)))
+    monkeypatch.setattr(rt, "_send_file", lambda t, a: asyncio.sleep(0, result="ok"))
+    monkeypatch.setattr(rt, "event", lambda *a, **k: asyncio.sleep(0))
+    monkeypatch.setattr(rt.store, "settings", lambda: {"model_base_url": "http://x/v1", "image_model": "gpt-image-1", "llm_timeout": 60})
+    t = {"id": "t1"}
+    # control characters stripped and the prompt capped, so a pasted blob can't break the request
+    asyncio.run(rt._make_image(t, {"prompt": "a\x00cat\x1b[31m" + "x" * 5000, "send": False}))
+    assert "\x00" not in calls[-1]["prompt"] and len(calls[-1]["prompt"]) <= 4100 and calls[-1]["prompt"].startswith("a cat")
+    # workspace escape attempts are refused with a clear message, never read
+    for bad in ("../../etc/passwd", "/etc/hostname"):
+        r = asyncio.run(rt._edit_image(t, {"path": bad, "prompt": "x"}))
+        assert r.startswith("ERROR") and ("工作区" in r or "not found" in r or "inside the workspace" in r)
+    # a non-image file is refused; a mask must be an image too
+    with open(rt._path("notes.txt"), "w") as f:
+        f.write("hi")
+    assert "not a PNG" in asyncio.run(rt._edit_image(t, {"path": "notes.txt", "prompt": "x"}))
+    _png(rt._path("images/a.png"))
+    assert "not a PNG" in asyncio.run(rt._edit_image(t, {"path": "images/a.png", "mask": "notes.txt", "prompt": "x"}))
+    # the not-configured path tells the model to stop, not retry
+    monkeypatch.setattr(rt.store, "settings", lambda: {"model_base_url": "", "image_model": "", "llm_timeout": 60})
+    r = asyncio.run(rt._make_image(t, {"prompt": "anything"}))
+    assert r.startswith("ERROR") and "do not retry" in r.lower().replace("不要重试", "do not retry")
+
+
+@pytest.mark.asyncio
+async def test_settings_test_image_endpoint(monkeypatch):
+    from app.runtime import main as rmain, imagegen
+    class Req:
+        def __init__(self, b): self._b = b
+        async def json(self): return self._b
+    async def fake_list(base):
+        return [{"id": "gpt-image-1"}, {"id": "gpt-4o"}]
+    monkeypatch.setattr(imagegen, "list_models", fake_list)
+    class _Store:
+        def settings(self): return {"model_base_url": "http://x/v1"}
+    class _RT:
+        store = _Store()
+    monkeypatch.setattr(rmain, "rt", _RT())
+    monkeypatch.delenv("OMUSE_IMAGE_API_KEY", raising=False)
+    r = await rmain.test_image(Req({"image_base_url": "https://api.openai.com/v1", "image_model": "gpt-image-1"}))
+    assert r["ok"] and r["model"] == "gpt-image-1" and r["base"] == "https://api.openai.com/v1" and r["listed"] is True
+    r = await rmain.test_image(Req({"image_base_url": "https://api.openai.com/v1", "image_model": "dall-e-9"}))
+    assert not r["ok"] and "dall-e-9" in r["error"]
+    r = await rmain.test_image(Req({"image_base_url": "", "image_model": ""}))   # auto-pick on the model endpoint
+    assert r["ok"] and r["model"] == "gpt-image-1"
+    monkeypatch.setenv("OMUSE_IMAGE_API_KEY", "k")
+    r = await rmain.test_image(Req({"image_model": "gpt-image-1"}))
+    assert r["key"] == "OMUSE_IMAGE_API_KEY"

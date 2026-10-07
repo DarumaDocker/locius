@@ -71,11 +71,11 @@ spec:
 
     Runs on the local models served by your Olares by default — any OpenAI-compatible endpoint works. English and 中文 interface.
   upgradeDescription: |
+    0.2.75: Images: make_image (text-to-image via any OpenAI-Images-compatible endpoint: Olares Router / gpt-image-1 / DALL-E / FLUX / SD; auto model pick, aspect/size fallbacks, styles, negative prompt, transparent background, formats), edit_image (inpainting by mask, prompt edits, reference images), vary_image (variations), caption_image (letter-perfect text on images, CJK), upscale_image (2x/4x local); clear not-configured / moderation / timeout handling
     0.2.74: Browser: Chromium now launches lazily on first web use and shuts down after idle, instead of holding ~2GB at startup (fixes OOM crashes on small-RAM boxes); browser service stays up and healthy even if Chromium cannot start
     0.2.73: Calendar: when Google Calendar is not connected or sign-in expired, calendar_create_event returns a one-tap add-to-calendar link instead of erroring
     0.2.72: Fix OR email search on non-Gmail mailboxes; clearer calendar access-denied message; internal step budgets no longer surfaced to users
     0.2.71: Browser robustness (not detection evasion): polite per-site pacing with a cool-off after a block or 429 so rate-triggered blocks drop; one automatic retry on a load timeout; a bot wall is detected, the task switches source or asks you to take over instead of retry-looping, and the blocked site is saved as a site habit (to confirm) so next time OMuse goes another way; Trust page shows per-site open / block rates
-    0.2.70: Ledger: every purchase recorded with order number, amount, card, status and who approved it; cancels/returns name the ledger order (or warn when it is not in the ledger); merchants' emails move orders to shipped/delivered/refunded; orders_list tool; fewer approvals: after 3 identical approvals OMuse suggests a standing approval you can turn on (never for payments, card fills, calls, cancels or page clicks)
   developer: Lucas Lu
   website: https://github.com/Drlucaslu/locius
   sourceCode: https://github.com/Drlucaslu/locius

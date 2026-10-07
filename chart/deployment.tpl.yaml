@@ -93,6 +93,11 @@ spec:
         - {name: SENTINEL_URL, value: "http://127.0.0.1:8080"}
         - {name: PERSONA_MODEL_URL, value: {{ (.Values.olaresEnv).OMUSE_MODEL_URL | default (printf "https://router.%s.olares.com/v1" (.Values.bfl).username) | quote }}}
         - {name: PERSONA_MODEL, value: {{ (.Values.olaresEnv).OMUSE_MODEL | default "Olares/unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL" | quote }}}
+        # optional: an OpenAI-Images-compatible endpoint for make_image (gpt-image-1 / DALL·E / a local FLUX or SD server)
+        # and its key — the key is read from the environment only, never shown in Settings or the audit log
+        - {name: OMUSE_IMAGE_URL, value: {{ (.Values.olaresEnv).OMUSE_IMAGE_URL | default "" | quote }}}
+        - {name: OMUSE_IMAGE_API_KEY, value: {{ (.Values.olaresEnv).OMUSE_IMAGE_API_KEY | default "" | quote }}}
+        - {name: OMUSE_IMAGE_MODEL, value: {{ (.Values.olaresEnv).OMUSE_IMAGE_MODEL | default "" | quote }}}
         - {name: PATCH_DIR, value: /cache/patch}
         resources:
           requests: {cpu: 100m, memory: 256Mi}
