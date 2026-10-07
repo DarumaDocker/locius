@@ -2158,3 +2158,131 @@ def test_block_is_learned_as_a_site_habit(tmp_path):
     n = len(rt.store.facts())
     asyncio.run(rt._learn_site_block("t2", "decathlon", "Cloudflare bot check"))   # once per site
     assert len(rt.store.facts()) == n
+
+
+# ----------------------------------------------------------------- lazy Chromium (crash-on-small-box fix)
+def _fake_pw(monkeypatch):
+    """Install a fake Playwright into app.browser.main so the lazy-start/idle-shutdown state machine can be tested
+    without a real ~2 GB Chromium. Returns (module, launches) where launches counts persistent-context and pdf launches."""
+    import app.browser.main as m
+    launches = {"ctx": 0, "pdf": 0}
+
+    class FakePage:
+        def __init__(self): self._closed = False; self.url = "about:blank"
+        def is_closed(self): return self._closed
+        async def close(self): self._closed = True
+
+    class FakeCtx:
+        def __init__(self): self.pages = []; self.closed = False
+        async def new_page(self): p = FakePage(); self.pages.append(p); return p
+        async def route(self, *a, **k): pass
+        def on(self, *a, **k): pass
+        async def close(self): self.closed = True
+
+    class FakeBrowser:
+        def __init__(self): self._c = True
+        def is_connected(self): return self._c
+        async def close(self): self._c = False
+
+    class FakeChromium:
+        async def launch_persistent_context(self, *a, **k):
+            launches["ctx"] += 1; return FakeCtx()
+        async def launch(self, headless=True):
+            launches["pdf"] += 1; return FakeBrowser()
+
+    class FakePW:
+        def __init__(self): self.chromium = FakeChromium(); self.stopped = False
+        async def stop(self): self.stopped = True
+
+    class FakeAP:
+        async def start(self): return FakePW()
+
+    monkeypatch.setattr(m, "async_playwright", lambda: FakeAP())
+    monkeypatch.setattr(m, "HEADLESS_ENV", "1")   # force headless -> no Xvfb spawn in tests
+    return m, launches
+
+
+def test_browser_is_not_launched_until_used(monkeypatch):
+    import asyncio
+    m, launches = _fake_pw(monkeypatch)
+    b = m.Broker()
+    # idle install: nothing launched, and an idle status read must NOT launch anything (what the UI polls)
+    assert b.started is False and launches["ctx"] == 0
+    assert b.view_page() is None
+    assert asyncio.run(b.page_for("t", create=False)) is None
+    assert launches["ctx"] == 0 and b.started is False
+
+
+def test_browser_starts_once_on_first_use(monkeypatch):
+    import asyncio
+    m, launches = _fake_pw(monkeypatch)
+    b = m.Broker()
+
+    async def go():
+        p1 = await b.page_for("t1")   # first real use -> launches Chromium
+        p2 = await b.page_for("t1")   # same task -> same page, no relaunch
+        p3 = await b.page_for("t2")   # another task -> new page, same context
+        return p1, p2, p3
+    p1, p2, p3 = asyncio.run(go())
+    assert b.started is True and launches["ctx"] == 1   # launched exactly once
+    assert p1 is p2 and p3 is not p1
+
+
+def test_pdf_path_uses_driver_not_the_persistent_browser(monkeypatch):
+    import asyncio
+    m, launches = _fake_pw(monkeypatch)
+    b = m.Broker()
+    asyncio.run(b.ensure_pw())
+    # the lightweight driver is up, but the heavy ~2 GB persistent browser is NOT
+    assert b.pw is not None and b.started is False and launches["ctx"] == 0
+
+
+def test_idle_shutdown_releases_the_browser(monkeypatch):
+    import asyncio, time
+    m, launches = _fake_pw(monkeypatch)
+    b = m.Broker()
+
+    async def go():
+        await b.page_for("t1")
+        ctx = b.ctx
+        b.finished["t1"] = 0.0          # task done, its page is recyclable
+        b.last_activity = time.time() - 10_000   # long idle
+        idle = b._idle_ok()
+        await b.teardown()
+        return ctx, idle
+    ctx, idle = asyncio.run(go())
+    assert idle is True
+    assert ctx.closed is True and b.started is False and b.ctx is None   # ~2 GB released
+
+
+def test_idle_shutdown_is_skipped_while_busy(monkeypatch):
+    import asyncio, time
+    m, launches = _fake_pw(monkeypatch)
+    b = m.Broker()
+
+    async def go():
+        await b.page_for("t1")          # a live, unfinished task page
+        b.last_activity = time.time() - 10_000
+        busy_idle = b._idle_ok()        # must be False: a page is still live
+        await b.teardown()              # re-checks under the lock and must bail
+        # and a user takeover also blocks teardown
+        b.mode = "user"; b.takeover_task = "t1"
+        user_idle = b._idle_ok()
+        return busy_idle, user_idle
+    busy_idle, user_idle = asyncio.run(go())
+    assert busy_idle is False and user_idle is False
+    assert b.started is True and b.ctx is not None   # browser was NOT torn down mid-use
+
+
+def test_browser_restarts_after_idle_shutdown(monkeypatch):
+    import asyncio, time
+    m, launches = _fake_pw(monkeypatch)
+    b = m.Broker()
+
+    async def go():
+        await b.page_for("t1")
+        b.finished["t1"] = 0.0; b.last_activity = time.time() - 10_000
+        await b.teardown()
+        await b.page_for("t2")          # a new web action brings it back
+    asyncio.run(go())
+    assert b.started is True and launches["ctx"] == 2   # launched, torn down, launched again

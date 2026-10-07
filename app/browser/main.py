@@ -36,6 +36,10 @@ PACE_GAP = float(os.environ.get("BROWSER_PACE_GAP", "1.3"))     # min seconds be
 PACE_JITTER = 0.6                                               # up to this much extra, random
 PACE_MAX_WAIT = 8.0                                             # never pace-wait longer than this on one request
 PACE_BLOCK_HOLD = 45.0                                          # after a block / 429 on a site, hold further hits this long
+# Lazy Chromium: it is NOT launched at startup (that held ~2 GB even on an idle install, which OOM-crashed small
+# boxes). It starts on the first real web action and is shut down again after this many idle seconds (0 disables the
+# idle shutdown but keeps the lazy start). PDF/chart rendering use a separate small headless Chromium, unaffected.
+IDLE_SHUTDOWN = float(os.environ.get("BROWSER_IDLE_SHUTDOWN", "600"))   # close the browser after 10 min idle
 UA_ENV = os.environ.get("BROWSER_UA", "")
 UA_HEADLESS = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
 BLOCKED_EXT = {".exe", ".msi", ".dmg", ".pkg", ".app", ".bat", ".cmd", ".com", ".scr", ".sh", ".ps1", ".vbs", ".jar",
@@ -104,37 +108,121 @@ class Broker:
         self.parent: dict = {}                    # popup page -> opener page (e.g. "Sign in with Google" windows)
         self.xvfb = None
         self.headless = True
+        self.started = False                     # is the persistent Chromium (self.ctx) currently up?
+        self.last_activity = 0.0                 # last real web action, for the idle-shutdown reaper
 
+    async def ensure_pw(self):
+        """Start just the Playwright driver (a lightweight node process). Needed by PDF/chart rendering, which launch
+        their own small headless Chromium, and by ensure_ctx(). Cheap compared with the persistent browser."""
+        if self.pw is not None:
+            return
+        async with self.lock:
+            if self.pw is not None:
+                return
+            if HEADLESS_ENV == "1":
+                self.headless = True
+            elif HEADLESS_ENV == "0" or os.environ.get("DISPLAY"):
+                self.headless = False
+            else:
+                self.headless = not self._start_xvfb()   # must happen before the Playwright driver starts (env)
+            self.pw = await async_playwright().start()
+
+    async def ensure_ctx(self):
+        """Start the persistent Chromium (self.ctx) on demand — the heavy, ~2 GB part. Idempotent and safe to call on
+        every web action; if the browser is already up it returns at once. Launching here (not at startup) is what lets
+        an idle install sit at near-zero memory instead of OOM-crashing small boxes."""
+        if self.started and self.ctx is not None:
+            return
+        await self.ensure_pw()
+        async with self.lock:
+            if self.started and self.ctx is not None:
+                return
+            os.makedirs(PROFILE_DIR, exist_ok=True)
+            for lock in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+                try:
+                    os.remove(os.path.join(PROFILE_DIR, lock))
+                except FileNotFoundError:
+                    pass
+            kw = {"env": dict(os.environ)}
+            ua = UA_ENV or (UA_HEADLESS if self.headless else "")
+            if ua:
+                kw["user_agent"] = ua
+            self.ctx = await self.pw.chromium.launch_persistent_context(
+                PROFILE_DIR, headless=self.headless, viewport=VIEWPORT, accept_downloads=True, locale="en-US",
+                ignore_default_args=["--enable-automation"],
+                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled",
+                      "--window-size=1280,900", "--no-first-run", "--no-default-browser-check", "--password-store=basic"],
+                **kw,
+            )
+            print(f"[browser] chromium started headless={self.headless} display={os.environ.get('DISPLAY', '')}", flush=True)
+            await self.ctx.route("**/*", self._egress_filter)
+            self.ctx.on("page", self._on_page)
+            for p in self.ctx.pages:
+                self._on_page(p)
+            self.started = True
+            self.last_activity = time.time()
+
+    # backwards-compatible alias (tests / any external caller): start == bring the persistent browser up
     async def start(self):
-        if HEADLESS_ENV == "1":
-            self.headless = True
-        elif HEADLESS_ENV == "0" or os.environ.get("DISPLAY"):
-            self.headless = False
-        else:
-            self.headless = not self._start_xvfb()   # must happen before the Playwright driver starts (env)
-        self.pw = await async_playwright().start()
-        os.makedirs(PROFILE_DIR, exist_ok=True)
-        for lock in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        await self.ensure_ctx()
+
+    def touch(self):
+        """Mark a real web action, so the idle-shutdown reaper doesn't close the browser while it's in use."""
+        self.last_activity = time.time()
+
+    def _idle_ok(self) -> bool:
+        """True when it is safe to shut the persistent browser down: agent mode, nobody taking over or waiting, the
+        user isn't watching a pinned view, no task page is still live, and we've been idle past the threshold."""
+        if not self.started or IDLE_SHUTDOWN <= 0:
+            return False
+        if self.mode == "user" or self.takeover_task or self.requests:
+            return False
+        now = time.time()
+        if now < self.view_pinned_until:
+            return False
+        for k, p in self.pages.items():
             try:
-                os.remove(os.path.join(PROFILE_DIR, lock))
-            except FileNotFoundError:
+                if k not in self.finished and not p.is_closed():
+                    return False
+            except Exception:
                 pass
-        kw = {"env": dict(os.environ)}
-        ua = UA_ENV or (UA_HEADLESS if self.headless else "")
-        if ua:
-            kw["user_agent"] = ua
-        self.ctx = await self.pw.chromium.launch_persistent_context(
-            PROFILE_DIR, headless=self.headless, viewport=VIEWPORT, accept_downloads=True, locale="en-US",
-            ignore_default_args=["--enable-automation"],
-            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled",
-                  "--window-size=1280,900", "--no-first-run", "--no-default-browser-check", "--password-store=basic"],
-            **kw,
-        )
-        print(f"[browser] chromium started headless={self.headless} display={os.environ.get('DISPLAY', '')}", flush=True)
-        await self.ctx.route("**/*", self._egress_filter)
-        self.ctx.on("page", self._on_page)
-        for p in self.ctx.pages:
-            self._on_page(p)
+        return (now - self.last_activity) > IDLE_SHUTDOWN
+
+    async def teardown(self):
+        """Release the persistent Chromium (and the driver / Xvfb) so an idle install drops back to near-zero memory.
+        The next web action calls ensure_ctx() and brings it back. Guarded by the same lock as startup."""
+        async with self.lock:
+            if not self._idle_ok():   # a task grabbed the browser between the reaper's check and this lock
+                return
+            ctx, self.ctx, self.started = self.ctx, None, False
+            self.pages.clear(); self.frame_maps.clear(); self.last_used.clear()
+            self.finished.clear(); self.temp_pages.clear(); self.parent.clear(); self.nav_status.clear()
+            self.view_task = ""
+            if ctx is not None:
+                try:
+                    await ctx.close()
+                except Exception:
+                    pass
+            pb = _pdf.get("browser")
+            if pb is not None:
+                try:
+                    await pb.close()
+                except Exception:
+                    pass
+                _pdf["browser"] = None
+            pw, self.pw = self.pw, None
+            if pw is not None:
+                try:
+                    await pw.stop()
+                except Exception:
+                    pass
+            if self.xvfb is not None:
+                try:
+                    self.xvfb.terminate()
+                except Exception:
+                    pass
+                self.xvfb = None
+            print("[browser] chromium shut down (idle)", flush=True)
 
     def _start_xvfb(self) -> bool:
         if not shutil.which("Xvfb"):
@@ -162,9 +250,11 @@ class Broker:
 
     async def stop(self):
         try:
-            await self.ctx.close()
+            if self.ctx is not None:
+                await self.ctx.close()
         finally:
-            await self.pw.stop()
+            if self.pw is not None:
+                await self.pw.stop()
             if self.xvfb:
                 self.xvfb.terminate()
 
@@ -254,6 +344,11 @@ class Broker:
     # ------------------------------------------------------------ pages
     async def page_for(self, task_id: str, create=True):
         task_id = task_id or "default"
+        if create:
+            await self.ensure_ctx()
+        elif not self.started:
+            return None
+        self.touch()
         p = self.pages.get(task_id)
         if p is not None and not p.is_closed():
             self.last_used[task_id] = time.time()
@@ -681,11 +776,34 @@ class Broker:
 broker = Broker()
 
 
+async def _idle_reaper():
+    """Shut the persistent Chromium down after it has been idle, so an unused install doesn't hold ~2 GB."""
+    while True:
+        try:
+            await asyncio.sleep(60)
+            if broker._idle_ok():
+                await broker.teardown()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[browser] idle reaper error: {str(e)[:150]}", flush=True)
+
+
 @asynccontextmanager
 async def lifespan(app):
-    await broker.start()
-    yield
-    await broker.stop()
+    # Chromium is NOT launched here anymore — it starts lazily on the first web action (ensure_ctx). The browser
+    # service itself stays up and /health answers immediately, so the pod is Ready even before/without a browser.
+    reaper = asyncio.create_task(_idle_reaper()) if IDLE_SHUTDOWN > 0 else None
+    try:
+        yield
+    finally:
+        if reaper is not None:
+            reaper.cancel()
+            try:
+                await reaper
+            except (asyncio.CancelledError, Exception):
+                pass
+        await broker.stop()
 
 
 app = FastAPI(lifespan=lifespan, title="OMuse Browser Broker")
@@ -698,7 +816,7 @@ def auth(x_browser_token: str | None = Header(default=None)):
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "mode": broker.mode, "headless": broker.headless}
+    return {"ok": True, "mode": broker.mode, "headless": broker.headless, "started": broker.started}
 
 
 # ================================================================== local PDF export
@@ -737,6 +855,8 @@ def _img_data(base_dir: str):
 
 
 async def _print_pdf(doc: str) -> bytes:
+    await broker.ensure_pw()
+    broker.touch()
     async with _pdf["lock"]:
         b = _pdf["browser"]
         if b is None or not b.is_connected():
@@ -815,6 +935,8 @@ async def make_png(req: Request):
     if not out_rel.lower().endswith(".png"):
         out_rel += ".png"
     op = _ws(out_rel)
+    await broker.ensure_pw()
+    broker.touch()
     async with _pdf["lock"]:
         br = _pdf["browser"]
         if br is None or not br.is_connected():
@@ -868,6 +990,8 @@ READ_JS = r"""(limit) => {
 
 
 async def _temp_page():
+    await broker.ensure_ctx()
+    broker.touch()
     p = await broker.ctx.new_page()
     broker.temp_pages.add(p)
     return p
@@ -942,6 +1066,8 @@ async def web_read(urls: list[str], limit: int = 6000) -> dict:
 async def agent_action(action: str, req: Request):
     body = await req.json()
     task_id = body.get("task_id") or "default"
+    await broker.ensure_ctx()   # every agent web action needs the persistent browser (lazy start)
+    broker.touch()
     if action == "describe":
         return await broker.describe(task_id, body.get("ref", ""))
     if action == "page_text":   # Sentinel: the order total shown on the page before a pre-approved "Place order" click
