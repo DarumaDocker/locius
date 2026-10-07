@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import re
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
@@ -26,6 +26,52 @@ TIMEOUT = 30
 
 class GCalError(Exception):
     pass
+
+
+def _parse_dt(value, tz: str = "UTC") -> datetime:
+    """Standalone time parser (no connected client needed) for the add-to-calendar links."""
+    s = str(value or "").strip().replace("Z", "+00:00")
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+        s += "T00:00"
+    s = s.replace(" ", "T", 1)
+    try:
+        d = datetime.fromisoformat(s)
+    except ValueError:
+        raise GCalError(f"看不懂的时间格式 (bad time): {value!r}；请用 2026-10-03 19:00 这种格式")
+    if d.tzinfo is None:
+        try:
+            z = ZoneInfo(tz or "UTC")
+        except Exception:
+            z = timezone.utc
+        d = d.replace(tzinfo=z)
+    return d
+
+
+def add_to_calendar_links(a: dict, tz: str = "UTC") -> dict:
+    """Build one-click "add to calendar" links from the same args calendar_create_event takes.
+
+    Works with NO calendar connection — used as the reliable fallback when the Calendar API is not connected
+    or its OAuth has expired. The user taps the link and the event opens pre-filled in their calendar."""
+    title = (str(a.get("title") or a.get("summary") or "").strip() or "(无标题 no title)")[:300]
+    all_day = bool(a.get("all_day"))
+    s = _parse_dt(a.get("start"), tz)
+    e = _parse_dt(a.get("end"), tz) if a.get("end") else s + timedelta(days=1 if all_day else 0, hours=0 if all_day else 1)
+    if e <= s:
+        e = s + (timedelta(days=1) if all_day else timedelta(hours=1))
+    su, eu = s.astimezone(timezone.utc), e.astimezone(timezone.utc)
+    loc = str(a.get("location") or "")[:500]
+    desc = str(a.get("description") or "")[:1500]
+    if all_day:
+        g_dates = f"{su:%Y%m%d}/{eu:%Y%m%d}"
+    else:
+        g_dates = f"{su:%Y%m%dT%H%M%SZ}/{eu:%Y%m%dT%H%M%SZ}"
+    google = "https://calendar.google.com/calendar/render?" + urlencode(
+        {"action": "TEMPLATE", "text": title, "dates": g_dates, "details": desc, "location": loc})
+    outlook = "https://outlook.live.com/calendar/0/deeplink/compose?" + urlencode(
+        {"subject": title, "body": desc, "location": loc, "path": "/calendar/action/compose", "rru": "addevent",
+         "startdt": su.strftime("%Y-%m-%dT%H:%M:%SZ"), "enddt": eu.strftime("%Y-%m-%dT%H:%M:%SZ")})
+    return {"google": google, "outlook": outlook, "title": title, "all_day": all_day,
+            "start": f"{s:%Y-%m-%d %H:%M}", "end": f"{e:%Y-%m-%d %H:%M}"}
 
 
 # ------------------------------------------------------------------ OMuse's own ("managed") Google client

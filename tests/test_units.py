@@ -1182,6 +1182,66 @@ def test_budget_nudges_steer_to_delegate_not_quota():
     assert "quota" in s.lower() and "delegate" in s.lower()
 
 
+def test_add_to_calendar_links():
+    from app.sentinel.gcal import add_to_calendar_links
+    r = add_to_calendar_links({"title": "[测试] A", "start": "2026-10-08 15:00", "end": "2026-10-08 15:30",
+                               "location": "X", "description": "d"}, "Asia/Singapore")
+    assert "calendar.google.com/calendar/render" in r["google"] and "action=TEMPLATE" in r["google"]
+    assert "20261008T070000Z/20261008T073000Z" in r["google"].replace("%2F", "/")   # 15:00 SGT -> 07:00 UTC
+    assert "%5B" in r["google"]                                                      # url-encoded title "["
+    assert "outlook.live.com" in r["outlook"]
+    # all-day uses date form
+    rd = add_to_calendar_links({"title": "休假", "start": "2026-12-25", "all_day": True}, "UTC")
+    assert "dates=20261225/20261226" in rd["google"].replace("%2F", "/")
+
+
+def test_calendar_create_falls_back_to_link_when_not_connected(store):
+    from app.sentinel.actions import calendar_create_or_link
+    r = calendar_create_or_link(store, {"title": "[测试] 牙医", "start": "2026-10-08 09:00", "end": "2026-10-08 09:30"})
+    assert r["created"] is False and r["method"] == "add_link"
+    assert "calendar.google.com" in r["add_to_calendar"]["google"]
+
+
+def test_calendar_create_link_on_auth_error(store, monkeypatch):
+    from app.sentinel import actions
+    from app.sentinel.gcal import GCalError
+
+    class FakeG:
+        def create_event(self, a):
+            raise GCalError("Google 授权已过期或被撤销 (invalid_grant)。请在「连接」页重新连接。")
+
+        def close(self):
+            pass
+    monkeypatch.setattr(actions, "calendar_client", lambda s: FakeG())
+    r = actions.calendar_create_or_link(store, {"title": "x", "start": "2026-10-08 09:00"})
+    assert r["method"] == "add_link" and "google" in r["add_to_calendar"]
+
+
+def test_calendar_create_success_passthrough_and_real_error(store, monkeypatch):
+    from app.sentinel import actions
+    from app.sentinel.gcal import GCalError
+
+    class OkG:
+        def create_event(self, a):
+            return {"created": True, "event": {"id": "e1", "title": a["title"]}}
+
+        def close(self):
+            pass
+    monkeypatch.setattr(actions, "calendar_client", lambda s: OkG())
+    r = actions.calendar_create_or_link(store, {"title": "团队会", "start": "2026-10-08 09:00"})
+    assert r["created"] is True and r["event"]["id"] == "e1"
+
+    class BadTimeG:
+        def create_event(self, a):
+            raise GCalError("结束时间必须晚于开始时间 (end must be after start)")
+
+        def close(self):
+            pass
+    monkeypatch.setattr(actions, "calendar_client", lambda s: BadTimeG())
+    with pytest.raises(actions.ActionError):   # a real (non-auth) error must NOT become a link
+        actions.calendar_create_or_link(store, {"title": "x", "start": "2026-10-08 09:00", "end": "2026-10-08 08:00"})
+
+
 def test_calc_finance_helpers():
     from app.common import calc
     assert round(calc.evaluate("npv(6, [-50000, 12000, 12000, 12000, 12000, 12000])"), 2) == 548.37
