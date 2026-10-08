@@ -69,3 +69,8 @@ description: 网购：搜索商品、用视觉挑选、加入购物车（不结�
   a word from the product's own title, current_price=the price you saw) or mode="text", text="In stock". It notifies once
   per new drop; no need for a schedule. The watch reads the page itself and says what it read — report THAT value to the
   user; if it refuses (it read a different price), fix the keyword or say the page can't be watched reliably.
+
+## After the order / cancelling or returning
+- The order lands in the ledger (Trust page → Ledger) with the order number from the confirmation page — always report
+  that number. To cancel or return later, orders_list first and act on that exact order; the approval card shows which
+  ledger order the cancel is for.

@@ -75,7 +75,8 @@ from app.sentinel import guard  # noqa: E402
 check("Add to Cart (an <input type=submit> on Amazon) is a normal click", not guard.click_is_risky("button", "Add to Cart", "submit"))
 check("...also with Amazon's shortcut suffix", not guard.click_is_risky("button", "Add to cart, shift, Alt, K", "submit"))
 check("Buy Now still needs approval", guard.click_is_risky("button", "Buy Now", "submit"))
-check("checkout still needs approval", guard.click_is_risky("link", "Proceed to checkout", ""))
+check("going to checkout is navigation (0.2.65); placing the order still needs approval",
+      not guard.click_is_risky("link", "Proceed to checkout", "") and guard.click_is_risky("button", "Place order", "submit"))
 
 # ---------------------------------------------------------------- the configured vision model can't take images
 c.put(B + "/api/settings", json={"vision_model": "text-only"}, headers=H)

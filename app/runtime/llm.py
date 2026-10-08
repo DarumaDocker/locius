@@ -37,6 +37,25 @@ def auth_headers() -> dict:
     return {"Authorization": f"Bearer {key}"} if key else {}
 
 
+def pick_chat_model(models: list[dict], exclude: str = "") -> str:
+    """A model that can chat: the router's mode says so when it reports one (tts / audio / embedding models are never picked),
+    otherwise judge by the name. Models that are still loading are skipped."""
+    out = []
+    for m in models:
+        mid = str(m.get("id") or "")
+        if not mid or mid == exclude:
+            continue
+        mode = str(m.get("mode") or "").lower()
+        if mode and mode != "chat":
+            continue
+        if str(m.get("readiness") or "ready").lower() not in ("ready", "running", "loaded"):
+            continue
+        if any(k in mid.lower() for k in ("embed", "rerank", "whisper", "tts", "kokoro", "speech", "audio")):
+            continue
+        out.append(mid)
+    return out[0] if out else ""
+
+
 class LLMError(Exception):
     pass
 
@@ -111,7 +130,10 @@ class LLM:
             n = 2
         self.sem = asyncio.Semaphore(max(1, min(n, 8)))
         self.stt_sem = asyncio.Semaphore(1)   # speech-to-text runs on its own server; it must not hold an LLM slot
-        self.fallback: dict[str, str] = {}  # configured model -> model actually served (when the configured one is missing)
+        # configured model -> (model actually served, until when). Only for a few minutes: while the Olares router restarts,
+        # the configured model is briefly "missing"; a permanent fallback kept every task on whatever model was listed
+        # first — on 2026-10-05 that was a text-to-speech model, and every chat failed with HTTP 422 for a day.
+        self.fallback: dict[str, tuple[str, float]] = {}
 
     @staticmethod
     def _model_missing(r) -> bool:
@@ -122,11 +144,10 @@ class LLM:
         try:
             async with httpx.AsyncClient(timeout=15) as c:
                 r = await c.get(f"{base}/models", headers=auth_headers())
-            ids = [m.get("id") for m in (r.json().get("data") or []) if m.get("id")]
+            models = [m for m in (r.json().get("data") or []) if isinstance(m, dict) and m.get("id")]
         except Exception:
             return ""
-        ids = [i for i in ids if i != exclude and not any(k in i.lower() for k in ("embed", "rerank", "whisper", "tts"))]
-        return ids[0] if ids else ""
+        return pick_chat_model(models, exclude)
 
     async def stt_model(self) -> str:
         """Speech-to-text model: Settings → stt_model, else the first whisper-like model the endpoint serves ('' = none)."""
@@ -177,8 +198,12 @@ class LLM:
         s = self.get_settings()
         base = str(s["model_base_url"]).rstrip("/")
         want = model or s["model_name"]
+        fb = self.fallback.get(want)
+        if fb and fb[1] < time.time():
+            self.fallback.pop(want, None)
+            fb = None
         body = {
-            "model": self.fallback.get(want, want),
+            "model": fb[0] if fb else want,
             "messages": messages,
             "temperature": float(s["temperature"] if temperature is None else temperature),
             "max_tokens": int(max_tokens or s["max_tokens"]),
@@ -214,12 +239,19 @@ class LLM:
                         continue
                     if r.status_code >= 400:
                         # some servers reject chat_template_kwargs; retry once without it
+                        if body["model"] != want and not _context_exceeded(r.text):
+                            # the stand-in model fails: forget it and try the configured model again
+                            self.fallback.pop(want, None)
+                            body["model"] = want
+                            continue
                         if self._model_missing(r) and want not in self.fallback:
                             alt = await self.first_model(base, body["model"])
                             if alt:
-                                self.fallback[want] = alt
+                                self.fallback[want] = (alt, time.time() + 300)
                                 body["model"] = alt
                                 continue
+                            raise LLMError(f"设置里的模型 {want} 现在不可用（可能正在加载或已被卸载），也没有别的聊天模型可用 "
+                                           f"(the configured model is not available right now): HTTP {r.status_code}: {r.text[:200]}")
                         if "chat_template_kwargs" in body and attempt == 0:
                             body.pop("chat_template_kwargs", None)
                             continue

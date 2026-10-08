@@ -32,11 +32,15 @@ Rules:
 - Report a time as available **only** after you set that restaurant's date and party size on its booking page and saw the
   time offered. Times on search/listing pages are often generic — mark them "未核实 unverified".
 - If several restaurants show exactly the same list of times, be suspicious and verify on one booking page.
+- Checking is not booking: the offered times are in the time list / slot buttons once date and party are set (Chope:
+  the *Time* dropdown on the restaurant page lists only bookable times). Do NOT press "Book Now" / "Reserve" / "Find a
+  table → Book" while only checking — that starts a booking, needs the user's approval and stops the check.
 - Note deposits / prepayment, minimum spend, seating time limits (e.g. 90 min) and cancellation rules.
 - Verify each shortlisted restaurant (usually 3–5) with **delegate — one sub-agent per restaurant**. Their steps don't use
   your budget, so every candidate gets checked instead of only the first one. Give each sub-agent everything it needs:
   "Check real availability at <restaurant> (<address>) on <date> around <time> for <n> people. Open <Reserve with Google
-  link or booking page URL>, set party size and date, read the offered times. Do NOT book or press Continue/Confirm.
+  link or booking page URL>, set party size and date, read the offered times (the time list shows them). Do NOT press Book Now / Reserve /
+  Continue / Confirm.
   Report: verified times (or 'none near <time>'), booking provider, deposit/min spend, link."
 - If a sub-agent can't verify, keep that restaurant as "未核实 unverified" — never fill in times yourself.
 

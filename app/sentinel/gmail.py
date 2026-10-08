@@ -34,6 +34,11 @@ class GmailError(Exception):
     pass
 
 
+def _unfold(v) -> str:
+    """Collapse header folding (CR/LF + whitespace) into single spaces; EmailMessage rejects values with line breaks."""
+    return re.sub(r"[\r\n]+[ \t]*", " ", str(v or "")).strip()
+
+
 def _dec(value) -> str:
     if value is None:
         return ""
@@ -423,8 +428,15 @@ class Gmail:
         tq = translate_query(query)
         self.search_notes = tq["notes"]
         crit = tq["criteria"] or ["ALL"]
-        server_txt = next(((k, v) for k, v, neg in tq["text"] if not neg), None)
-        local = [t for t in tq["text"] if (t[0], t[1]) != server_txt or t[2]]
+        texts = tq["text"]
+        # Only pre-filter on the server by one positive term when the positive terms are pure AND. If any OR group has
+        # more than one term (e.g. "笔试" OR "在线测评"), narrowing by a single member would drop messages that match a
+        # sibling, so fetch by the date/folder criteria and OR-filter everything locally instead.
+        from collections import Counter
+        pos_gids = Counter(t[3] for t in texts if not t[2] and len(t) > 3)
+        has_or = any(c > 1 for c in pos_gids.values())
+        server_txt = None if has_or else next(((t[0], t[1]) for t in texts if not t[2]), None)
+        local = [t for t in texts if not (server_txt is not None and not t[2] and (t[0], t[1]) == server_txt)]
         found: list[dict] = []
         for raw in self._search_targets(m, tq["folders"]):
             try:
@@ -697,15 +709,17 @@ class Gmail:
         if cc:
             msg["Cc"] = cc
         if in_reply_to:
-            subj = in_reply_to.get("subject", "")
+            subj = _unfold(in_reply_to.get("subject", ""))
             if not subject:
                 subject = subj if subj.lower().startswith("re:") else f"Re: {subj}"
-            mid = in_reply_to.get("message_id_header", "")
+            mid = _unfold(in_reply_to.get("message_id_header", ""))
             if mid:
                 msg["In-Reply-To"] = mid
-                refs = (in_reply_to.get("references", "") + " " + mid).strip()
+                # long References headers arrive folded over several lines (CRLF + space); EmailMessage refuses
+                # header values with line breaks, so unfold them (E2E-1: two of three reply drafts failed on this)
+                refs = _unfold(in_reply_to.get("references", "") + " " + mid)
                 msg["References"] = refs
-        msg["Subject"] = subject or "(no subject)"
+        msg["Subject"] = _unfold(subject) or "(no subject)"
         msg["Date"] = email.utils.formatdate(localtime=True)
         msg["Message-ID"] = email.utils.make_msgid(domain=self.email.split("@")[-1])
         msg.set_content(body)

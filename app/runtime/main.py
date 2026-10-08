@@ -45,6 +45,8 @@ async def lifespan(app):
     rt = Runtime(DATA, publish)
     sched = Scheduler(rt)
     sched.start()
+    rt.health.start()
+    rt.golden.start()
     await rt.recover()
     yield
 
@@ -363,7 +365,9 @@ async def memory():
     runs = [{"id": r["id"], "ts": r["ts"], "kind": r["kind"], "lines": (r["report"] or {}).get("lines") or [],
              "errors": (r["report"] or {}).get("errors") or [], "applied": (r["report"] or {}).get("applied")}
             for r in st.memory_runs(10)]
+    from app.runtime.context import DOMAINS
     return {"facts": st.facts(), "recent": st.facts(1000, tier="recent"), "episodes": st.episodes(50),
+            "domains": [{"key": k, "zh": zh, "en": en} for k, zh, en in DOMAINS], "entities": st.entities(),
             "profile": st.profile(), "profile_fields": [{"key": k, "zh": zh, "en": en} for k, zh, en in PROFILE_FIELDS],
             "pending": st.profile_pending(), "runs": runs, "job": MT.job_state(),
             "needs_first_review": MT.needs_first_review(st),
@@ -378,7 +382,8 @@ async def add_memory(req: Request):
     if looks_sensitive(fact):
         raise HTTPException(400, "证件号、卡号和密码请放进保险箱 (ID / card numbers and passwords belong in the vault)")
     r = rt.store.add_fact(fact, str(b.get("category") or "preference"), str(b.get("entity") or ""),
-                          source="user-ui", confidence=1.0, tier="recent" if b.get("tier") == "recent" else "long")
+                          source="user-ui", confidence=1.0, tier="recent" if b.get("tier") == "recent" else "long",
+                          domain=str(b.get("domain") or ""))
     if not r:
         raise HTTPException(400, "empty fact")
     await rt.audit("user", "memory.add", detail={"fact": r["fact"]})
@@ -398,11 +403,51 @@ async def edit_memory(fid: str, req: Request):
         kw["tier"] = b["tier"]
     if isinstance(b.get("category"), str):
         kw["category"] = b["category"][:30]
+    if isinstance(b.get("domain"), str):
+        kw["domain"] = b["domain"]
+    if b.get("status") in ("active", "pending"):
+        kw["status"] = b["status"]       # "active" = the user confirmed something OMuse learned
+    if isinstance(b.get("entity"), str):
+        kw["entity"] = b["entity"].strip()[:60]
     r = rt.store.update_fact(fid, **kw)
     if not r:
         raise HTTPException(404, "not found")
     await rt.audit("user", "memory.edit", resource=fid, detail={k: v for k, v in kw.items()})
     return r
+
+
+@app.get("/api/context/preview")
+async def context_preview(q: str = "", mode: str = "v1"):
+    """What OMuse would know going into a request (Memory page → "试一试"; also used by the batch 2 tests)."""
+    from app.runtime import context
+    if mode == "legacy":
+        facts = rt._facts_legacy(q)
+    else:
+        facts = context.select(q, rt.store.facts(500), rt.store.entities(), limit=12)
+    return {"mode": mode, "facts": [{"id": f["id"], "fact": f["fact"], "domain": f.get("domain"), "status": f.get("status"),
+                                     "why": f.get("why", ""), "score": f.get("score")} for f in facts]}
+
+
+@app.put("/api/entities/{eid}")
+async def edit_entity(eid: str, req: Request):
+    b = await req.json()
+    al = b.get("aliases")
+    if isinstance(al, str):
+        al = [x for x in re.split(r"[,，、;；]", al)]
+    r = rt.store.update_entity(eid, aliases=al if isinstance(al, list) else None,
+                               relation=b.get("relation") if isinstance(b.get("relation"), str) else None,
+                               kind=b.get("type"))
+    if not r:
+        raise HTTPException(404, "not found")
+    await rt.audit("user", "memory.entity", resource=eid, detail={k: b.get(k) for k in ("aliases", "relation", "type")})
+    await rt.publish({"kind": "memory_update"})
+    return r
+
+
+@app.delete("/api/entities/{eid}")
+async def del_entity(eid: str):
+    rt.store.delete_entity(eid)
+    return {"ok": True}
 
 
 @app.delete("/api/memory/{fid}")
@@ -459,6 +504,92 @@ async def memory_run(rid: int):
     return r
 
 
+# ------------------------------------------------------------------ trust: metrics, health, golden runs, outcomes
+@app.get("/api/metrics")
+async def api_metrics(days: int = 7):
+    from app.runtime import metrics
+    days = max(1, min(int(days), 90))
+    off = float(rt.store.settings().get("tz_offset_hours") or 8)
+    m = await asyncio.to_thread(metrics.compute, rt.store, days, None, off)
+    runs = rt.golden.runs(6)
+    return {"metrics": m, "health": rt.health.status(), "golden": {"running": rt.golden.running, "runs": runs}}
+
+
+@app.get("/api/health/status")
+async def api_health():
+    return rt.health.status()
+
+
+@app.post("/api/health/check")
+async def api_health_check():
+    res = await rt.health.run_checks()
+    for comp, (ok, detail) in res.items():
+        await rt.health.observe(comp, ok, detail)
+    return rt.health.status()
+
+
+@app.get("/api/golden/runs")
+async def golden_runs(limit: int = 10):
+    from app.runtime.golden import CASES, CTX_CASES
+    return {"running": rt.golden.running, "runs": rt.golden.runs(min(limit, 50)),
+            "cases": [{"id": c["id"], "title": c["title"], "prompt": c["prompt"]} for c in CASES],
+            "context_cases": [{"id": c["id"], "title": c["title"], "prompt": c["prompt"]} for c in CTX_CASES]}
+
+
+@app.post("/api/golden/run")
+async def golden_run(req: Request):
+    b = await req.json() if (req.headers.get("content-length") or "0") != "0" else {}
+    if rt.golden.running:
+        raise HTTPException(409, "黄金测试已在运行 (already running)")
+    if b.get("suite") == "context_probe":
+        asyncio.create_task(rt.golden.context_probe("legacy" if b.get("context") == "legacy" else "v1"))
+        await asyncio.sleep(0.2)
+        return {"ok": True, "run_id": rt.golden.running}
+    only = [str(x) for x in (b.get("only") or [])] or None
+    suite = "context" if b.get("suite") == "context" else ""
+    ctx = "legacy" if b.get("context") == "legacy" else ""
+    asyncio.create_task(rt.golden.run("manual", only, suite, ctx))
+    await asyncio.sleep(0.2)
+    return {"ok": True, "run_id": rt.golden.running}
+
+
+@app.post("/api/ledger/backfill")
+async def ledger_backfill():
+    """Ledger entries for purchases made before the ledger existed, with the order number their task got."""
+    from app.runtime import outcome
+    res = await rt.sentinel("POST", "/internal/ledger/backfill", {}, timeout=60)
+    done = []
+    for tid in res.get("tasks") or []:
+        t = rt.store.task(tid)
+        if not t:
+            continue
+        oc = t.get("outcome") or {}
+        if not oc:
+            texts = [str(m.get("content") or "") for m in (t.get("transcript") or []) if m.get("role") == "tool"]
+            oc = outcome.assess(rt.store.events(tid), str(t.get("result") or ""), texts, t.get("goal") or "")
+        await rt._ledger_confirm(tid, oc, str(t.get("result") or ""))
+        done.append(tid)
+    return {"created": res.get("created") or [], "confirmed": done}
+
+
+@app.post("/api/ledger/reconcile")
+async def ledger_reconcile():
+    return await rt.health.reconcile_ledger()
+
+
+@app.post("/api/outcome/{tid}")
+async def task_outcome(tid: str):
+    """Re-assess an older task's outcome from what it did (the tool results kept in its transcript)."""
+    from app.runtime import outcome
+    t = rt.store.task(tid)
+    if not t:
+        raise HTTPException(404, "no such task")
+    texts = [str(m.get("content") or "") for m in (t.get("transcript") or []) if m.get("role") == "tool"]
+    oc = outcome.assess(rt.store.events(tid), str(t.get("result") or ""), texts, t.get("goal") or "")
+    rt.store.update_task(tid, outcome=oc)
+    return {"task_id": tid, "outcome": oc}
+
+
 # ------------------------------------------------------------------ notifications
 @app.get("/api/notifications")
 async def notifications():
@@ -494,6 +625,34 @@ async def test_model():
         r = await rt.llm.chat([{"role": "user", "content": "只回复 OK 两个字母。Reply with just OK."}], purpose="test",
                               max_tokens=400, no_think=True)
         return {"ok": True, "reply": r["content"][:200], "latency_s": round(time.time() - t0, 2)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:500]}
+
+
+@app.post("/api/settings/test-image")
+async def test_image(req: Request):
+    """Reachability check for the image endpoint — resolves base URL + model and lists models; never generates (no cost)."""
+    from app.runtime import imagegen
+    b = await req.json()
+    s = dict(rt.store.settings())
+    for k in ("image_base_url", "image_model"):
+        if k in b:
+            s[k] = str(b[k] or "").strip()
+    t0 = time.time()
+    try:
+        base, model = await imagegen.resolve(s)
+        listed = None
+        try:
+            ids = [str(m.get("id") or "") for m in await imagegen.list_models(base)]
+            listed = model in ids
+        except Exception:
+            pass   # some image servers have no /models; the explicit model is still usable
+        key = "OMUSE_IMAGE_API_KEY" if os.environ.get("OMUSE_IMAGE_API_KEY", "").strip() else (
+            "model key" if imagegen.auth_headers() else "none")
+        if listed is False:
+            return {"ok": False, "error": f"端点可达，但模型列表里没有 {model} (endpoint reachable, but it does not list {model})",
+                    "base": base, "model": model, "key": key}
+        return {"ok": True, "base": base, "model": model, "key": key, "listed": listed, "latency_s": round(time.time() - t0, 2)}
     except Exception as e:
         return {"ok": False, "error": str(e)[:500]}
 
@@ -538,6 +697,14 @@ async def file_raw(path: str, download: int = 0):
 @app.post("/internal/approval_resolved", dependencies=[Depends(internal_auth)])
 async def approval_resolved(req: Request):
     await rt.on_approval_resolved(await req.json())
+    return {"ok": True}
+
+
+@app.post("/internal/notify_user", dependencies=[Depends(internal_auth)])
+async def notify_user(req: Request):
+    b = await req.json()
+    n = rt.store.notify(str(b.get("title") or "")[:120], str(b.get("body") or "")[:1000], level="info")
+    await rt.publish({"kind": "notification", "notification": n})
     return {"ok": True}
 
 

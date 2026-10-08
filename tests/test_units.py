@@ -699,14 +699,20 @@ def test_vault_fill_policy_and_scrub(store):
     args = {"ref": "e1", "item_id": it["id"], "field": "number"}
     el = {"tag": "input", "input_type": "text", "name": "Card number"}
     d = decide(store, "browser_fill_secret", args, "t1", elem=el, page={"url": "https://shop.test/pay", "title": ""})
-    assert d.decision == ASK and "•••• 1234" in d.reason and "4111" not in d.reason
+    assert d.decision == DENY and "purchase_confirm" in d.reason    # a card needs the purchase confirmed first (0.2.68)
+    mem = vault.save_item(store, {"kind": "membership", "label": "KrisFlyer", "domains": "shop.test",
+                                  "values": {"number": "8800 1111 2222 1234", "name": "LU LIANG"}})
+    margs = {"ref": "e1", "item_id": mem["id"], "field": "number"}
+    mel = {"tag": "input", "input_type": "text", "name": "Membership number"}
+    d = decide(store, "browser_fill_secret", margs, "t1", elem=mel, page={"url": "https://shop.test/pay", "title": ""})
+    assert d.decision == ASK and "•••• 1234" in d.reason and "8800" not in d.reason
     assert decide(store, "browser_fill_secret", args, "t1", elem=el, page={"url": "https://evil.example/pay"}).decision == DENY
     assert decide(store, "browser_fill_secret", args, "t1", elem={"tag": "input", "input_type": "password"},
                   page={"url": "https://shop.test/"}).decision == DENY
     assert decide(store, "browser_fill_secret", {**args, "field": "pin"}, "t1", elem=el, page={"url": "https://shop.test/"}).decision == DENY
     store.add_grant("browser_fill_secret", "PERMANENT", None, {}, None)   # grants never cover vault fills
     assert "browser_fill_secret" in PER_USE_TOOLS
-    assert decide(store, "browser_fill_secret", args, "t1", elem=el, page={"url": "https://shop.test/pay"}).decision == ASK
+    assert decide(store, "browser_fill_secret", margs, "t1", elem=mel, page={"url": "https://shop.test/pay"}).decision == ASK
     out = vault.scrub(store, {"snapshot": "Card 4111-1111-1111-1234 / 4111111111111234 total 123", "image_b64": "4111111111111234"})
     assert "1234" not in out["snapshot"].replace("[VAULT_VALUE]", "") and "total 123" in out["snapshot"]
     assert out["image_b64"] == "4111111111111234"
@@ -1039,11 +1045,25 @@ def test_mail_query_translation():
     assert tq("from:boss@x.com", d)["folders"] == ["inbox", "archive"]          # no folder = inbox + archive
     r = tq('{from:a@x.com from:b@y.com} subject:"hello world" 发票 -报销', d)
     assert r["criteria"] == ['OR FROM "a@x.com" FROM "b@y.com"', 'SUBJECT "hello world"']
-    assert r["text"] == [("TEXT", "发票", False), ("TEXT", "报销", True)]
+    assert r["text"] == [("TEXT", "发票", False, 1), ("TEXT", "报销", True, 2)]
     assert tq("label:工作 in:sent", d)["folders"] == ["label:工作", "sent"]
     assert tq("after:2026/09/01 before:2026-09-30 larger:2M", d)["criteria"] == ["SINCE 1-Sep-2026", "BEFORE 30-Sep-2026", "LARGER 2097152"]
     assert tq("invoice OR receipt", d)["criteria"] == ['OR TEXT "invoice" TEXT "receipt"']
     assert tq("in:anywhere", d)["folders"] == ["*"] and tq("", d)["criteria"] == []
+    # OR between non-ASCII terms must stay OR, not silently become AND (2026-10-05 colleague bug): a mail that matches
+    # only one of the alternatives must still be found.
+    from app.sentinel.mailproviders import local_match
+    rq = tq('newer_than:30d ("笔试" OR "笔试通知" OR "在线测评" OR "测评链接")', d)
+    terms = rq["text"]
+    assert rq["criteria"] == ["SINCE 3-Sep-2026"]
+    assert {t[3] for t in terms} == {1}                       # all four share one OR group
+    hit = {"subject": "笔试通知：下周二在线笔试", "from": "hr@x.com", "to": "", "snippet": "请参加", "body": ""}
+    assert local_match(hit, terms) is True                    # matches one alternative -> found
+    assert local_match({"subject": "周报", "from": "a@x.com", "to": "", "snippet": "", "body": ""}, terms) is False
+    # "{a b}" of non-ASCII words is also an OR group; a space between non-ASCII words is AND (separate groups)
+    assert {t[3] for t in tq("{笔试 测评}", d)["text"]} == {1}
+    g2 = tq("笔试 测评", d)["text"]
+    assert len({t[3] for t in g2}) == 2 and not local_match(hit, g2)   # needs BOTH -> not matched by "笔试通知…"
 
 
 def test_mail_presets_and_utf7():
@@ -1109,6 +1129,117 @@ def test_generic_search_utf8_fallback(monkeypatch):
     assert len(res) == 2
     f = g.folders(fake)
     assert f["drafts"] == '"&g0l6P3ux-"' and f["sent"] == '"Sent Messages"' and f["_display"]['"&g0l6P3ux-"'] == "草稿箱"
+
+
+class FakeIMAPChinese(FakeIMAPNoUTF8):
+    """QQ-like server (rejects CHARSET UTF-8) holding two Chinese emails, to prove OR search works end-to-end."""
+    def uid(self, cmd, *args):
+        import imaplib
+        from email.header import Header
+        if cmd == "SEARCH" and "CHARSET" in args:
+            raise imaplib.IMAP4.error("BADCHARSET")
+        if cmd == "SEARCH":
+            self.cmds.append((cmd, args))
+            return "OK", [b"201 202"]
+        if cmd == "FETCH" and "HEADER.FIELDS" in args[1]:
+            def hdr(subj, frm):
+                s = Header(subj, "utf-8").encode()
+                return f"From: {frm}\r\nTo: me@qq.com\r\nSubject: {s}\r\nDate: Mon, 05 Oct 2026 10:00:00 +0800\r\nMessage-ID: <x>\r\n\r\n".encode()
+            return "OK", [
+                (b'1 (UID 201 FLAGS () BODY[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID)] {10}', hdr("笔试通知：下周二在线笔试", "hr@company.com")),
+                (b' BODY[TEXT]<0> {4}', "请准时参加".encode()), b")",
+                (b'2 (UID 202 FLAGS (\\Seen) BODY[HEADER.FIELDS (FROM TO CC SUBJECT DATE MESSAGE-ID)] {10}', hdr("本周周报汇总", "boss@company.com")),
+                (b' BODY[TEXT]<0> {4}', "请填写".encode()), b")",
+            ]
+        return "OK", []
+
+
+def test_generic_search_or_of_chinese_terms(monkeypatch):
+    """The colleague's exact query: an OR of Chinese phrases must return a mail matching ANY one of them."""
+    g = Gmail("me@qq.com", "x", "imap.qq.com", "smtp.qq.com", provider="qq")
+    monkeypatch.setattr(g, "_imap", lambda: FakeIMAPChinese())
+    res = g.search('newer_than:30d ("笔试" OR "笔试通知" OR "在线测评" OR "测评链接")', 10)
+    subs = {r.get("subject", "") for r in res}
+    assert any("笔试" in s for s in subs), subs          # the 笔试通知 mail is found via the OR
+    assert not any("周报" in s for s in subs), subs       # the unrelated 周报 mail is not
+
+
+def test_budget_nudges_steer_to_delegate_not_quota():
+    """2026-10-05 colleague bug 3: a 'find N items' task stopped at 5 and told the user about a '网页调用预算'.
+    The step/web nudges must now push unmet counts to delegate and must tell the model never to expose a quota."""
+    from app.runtime.agent import Runtime, BUDGET_RESERVE
+    from app.runtime.prompts import executor_system
+    tr = [{"role": "user", "content": "找 3 个实习岗位"}]
+    Runtime._budget(tr, [], BUDGET_RESERVE, "zh")
+    msg = tr[-1]["content"]
+    assert "delegate" in msg and "不要向用户提" in msg and "预算" in msg          # only inside the "don't mention 预算" instruction
+    tr2 = [{"role": "user", "content": "find 3 internships"}]
+    Runtime._budget(tr2, [], BUDGET_RESERVE, "en")
+    m2 = tr2[-1]["content"]
+    assert "delegate" in m2 and "do not mention" in m2.lower() and "budget" in m2.lower()
+    # the system prompt itself tells the model these limits are internal, not a user-facing quota
+    s = executor_system(user_name="L", tz="UTC", connections={}, plan=None, facts=[], skills=[], language="en", reply_lang="English")
+    assert "quota" in s.lower() and "delegate" in s.lower()
+
+
+def test_add_to_calendar_links():
+    from app.sentinel.gcal import add_to_calendar_links
+    r = add_to_calendar_links({"title": "[测试] A", "start": "2026-10-08 15:00", "end": "2026-10-08 15:30",
+                               "location": "X", "description": "d"}, "Asia/Singapore")
+    assert "calendar.google.com/calendar/render" in r["google"] and "action=TEMPLATE" in r["google"]
+    assert "20261008T070000Z/20261008T073000Z" in r["google"].replace("%2F", "/")   # 15:00 SGT -> 07:00 UTC
+    assert "%5B" in r["google"]                                                      # url-encoded title "["
+    assert "outlook.live.com" in r["outlook"]
+    # all-day uses date form
+    rd = add_to_calendar_links({"title": "休假", "start": "2026-12-25", "all_day": True}, "UTC")
+    assert "dates=20261225/20261226" in rd["google"].replace("%2F", "/")
+
+
+def test_calendar_create_falls_back_to_link_when_not_connected(store):
+    from app.sentinel.actions import calendar_create_or_link
+    r = calendar_create_or_link(store, {"title": "[测试] 牙医", "start": "2026-10-08 09:00", "end": "2026-10-08 09:30"})
+    assert r["created"] is False and r["method"] == "add_link"
+    assert "calendar.google.com" in r["add_to_calendar"]["google"]
+
+
+def test_calendar_create_link_on_auth_error(store, monkeypatch):
+    from app.sentinel import actions
+    from app.sentinel.gcal import GCalError
+
+    class FakeG:
+        def create_event(self, a):
+            raise GCalError("Google 授权已过期或被撤销 (invalid_grant)。请在「连接」页重新连接。")
+
+        def close(self):
+            pass
+    monkeypatch.setattr(actions, "calendar_client", lambda s: FakeG())
+    r = actions.calendar_create_or_link(store, {"title": "x", "start": "2026-10-08 09:00"})
+    assert r["method"] == "add_link" and "google" in r["add_to_calendar"]
+
+
+def test_calendar_create_success_passthrough_and_real_error(store, monkeypatch):
+    from app.sentinel import actions
+    from app.sentinel.gcal import GCalError
+
+    class OkG:
+        def create_event(self, a):
+            return {"created": True, "event": {"id": "e1", "title": a["title"]}}
+
+        def close(self):
+            pass
+    monkeypatch.setattr(actions, "calendar_client", lambda s: OkG())
+    r = actions.calendar_create_or_link(store, {"title": "团队会", "start": "2026-10-08 09:00"})
+    assert r["created"] is True and r["event"]["id"] == "e1"
+
+    class BadTimeG:
+        def create_event(self, a):
+            raise GCalError("结束时间必须晚于开始时间 (end must be after start)")
+
+        def close(self):
+            pass
+    monkeypatch.setattr(actions, "calendar_client", lambda s: BadTimeG())
+    with pytest.raises(actions.ActionError):   # a real (non-auth) error must NOT become a link
+        actions.calendar_create_or_link(store, {"title": "x", "start": "2026-10-08 09:00", "end": "2026-10-08 08:00"})
 
 
 def test_calc_finance_helpers():
@@ -1530,6 +1661,1175 @@ def test_card_details_go_into_their_own_boxes(store, monkeypatch):
         b = dict(box, name=name)
         assert decide(store, "browser_fill_secret", {"ref": "f8e1", "item_id": "v1", "field": f}, "tw", elem=b, page=page).decision == ALLOW
     assert ex("12/2028", "MM/YY") == "12/28" and ex("2028-12", "") == "12/28" and ex("12/28", "MM/YYYY") == "12/2028"
+
+
+def test_model_fallback_never_picks_tts_and_expires(monkeypatch):
+    # 2026-10-05: the router briefly lost Qwen; OMuse fell back to the first listed model (Kokoro text-to-speech) and kept it
+    # for good, so every chat failed with HTTP 422 "registered with mode=tts" for a day
+    import asyncio
+    import httpx
+    from app.runtime import llm as L
+    models = {"data": [{"id": "speaches/speaches-ai/Kokoro-82M-v1.0-ONNX", "mode": "tts", "readiness": "ready"},
+                       {"id": "speaches/Systran/faster-whisper-small", "mode": "audio", "readiness": "ready"},
+                       {"id": "Olares/Qwen", "mode": "chat", "readiness": "ready"}]}
+    assert L.pick_chat_model(models["data"]) == "Olares/Qwen"
+    assert L.pick_chat_model(models["data"], exclude="Olares/Qwen") == ""
+    assert L.pick_chat_model([{"id": "speaches/speaches-ai/Kokoro-82M-v1.0-ONNX"}, {"id": "gpt-x"}]) == "gpt-x"
+    state = {"qwen_up": False, "seen": []}
+
+    def handler(req):
+        if req.url.path.endswith("/models"):
+            data = [m for m in models["data"] if state["qwen_up"] or m["id"] != "Olares/Qwen"]
+            return httpx.Response(200, json={"data": data})
+        m = json.loads(req.content)["model"]
+        state["seen"].append(m)
+        if m == "Olares/Qwen" and state["qwen_up"]:
+            return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "hi"}, "finish_reason": "stop"}],
+                                             "usage": {}})
+        if m == "Olares/Qwen":
+            return httpx.Response(404, json={"error": {"message": "model Olares/Qwen not found"}})
+        return httpx.Response(422, json={"error": {"message": f"model {m} is registered with mode=tts; chat/completions only accepts mode=chat"}})
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(L.httpx, "AsyncClient", lambda *a, **k: real(transport=httpx.MockTransport(handler), **{x: y for x, y in k.items() if x != "transport"}))
+    _sleep = asyncio.sleep
+
+    async def nosleep(*a, **k):
+        await _sleep(0)
+    monkeypatch.setattr(L.asyncio, "sleep", nosleep)
+    S = {"model_base_url": "http://router/v1", "model_name": "Olares/Qwen", "temperature": 0.3, "max_tokens": 100}
+    lm = L.LLM(lambda: S)
+    import pytest
+    with pytest.raises(L.LLMError) as e:      # Qwen missing and no other chat model: a clear error, no TTS model tried
+        asyncio.run(lm.chat([{"role": "user", "content": "x"}]))
+    assert "Kokoro" not in "".join(state["seen"]) and "不可用" in str(e.value)
+    import time
+    lm.fallback["Olares/Qwen"] = ("speaches/speaches-ai/Kokoro-82M-v1.0-ONNX", time.time() + 300)   # a stale stand-in
+    state["qwen_up"] = True
+    out = asyncio.run(lm.chat([{"role": "user", "content": "x"}]))
+    assert "hi" in json.dumps(out, ensure_ascii=False) and "Olares/Qwen" not in lm.fallback
+
+
+def _ev(type_, **d):
+    return {"type": type_, "data": d}
+
+
+def test_outcome_needs_proof():
+    # roadmap batch 1: "done" needs evidence — an order number the confirmation page shows, a message id, an event id
+    from app.runtime import outcome as O
+    buy = [_ev("tool_call", call_id="c1", name="purchase_confirm"),
+           _ev("waiting", type="approval", approval_id="a1", summary={"tool": "purchase_confirm"}),
+           _ev("approval_resolved", approval_id="a1", decision="approved"),
+           _ev("tool_result", call_id="c1", name="purchase_confirm", status="ok", preview='{"status": "approved", "purchase_id": "buy_1"}'),
+           _ev("tool_call", call_id="c2", name="browser_fill_secret"), _ev("tool_result", call_id="c2", name="browser_fill_secret", ok=True, preview="filled"),
+           _ev("tool_call", call_id="c3", name="browser_click"), _ev("tool_result", call_id="c3", name="browser_click", ok=True,
+                                                                      preview="web page https://www.decathlon.sg/order-confirmation")]
+    page = "Thank you for your order! Order number SG5X42VMKCAG. Estimated delivery Wed 7 Oct"
+    good = "下单成功！\n- **订单号**：SG5X42VMKCAG\n- 总价 S$6.80"
+    r = O.assess(buy, good, [page])
+    assert r["status"] == "verified" and r["evidence"][0]["order_number"] == "SG5X42VMKCAG" and not O.notice(r)
+    made_up = "下单成功！订单号：SG77777777"          # a number no page showed
+    r = O.assess(buy, made_up, [page])
+    assert r["status"] == "unverified" and "purchase" in r["missing"] and "browser_snapshot" in O.nudge(r)
+    assert "未经确认" in O.notice(r)
+    honest = "下单按钮点了，但页面没有显示订单号，未能确认订单是否提交。"
+    assert O.assess(buy, honest, ["Processing…"])["status"] == "unverified"     # the purchase still lacks proof
+    # claims with nothing done
+    r = O.assess([_ev("tool_result", name="browser_read", ok=True, preview="menu")], "已预订周六 7 点 2 位。", [])
+    assert r["status"] == "unverified" and r["missing"] == ["booking:not_done"] and "没有成功执行" in O.nudge(r)
+    assert O.assess([], "我可以帮你预订，要我继续吗？", [])["status"] == "none"
+    assert O.assess([], "没有发送邮件，草稿在下面。", [])["status"] == "none"
+    # a sent email / calendar event carry their ids
+    sent = [_ev("tool_result", name="gmail_send", ok=True, preview='{"id": "18c2f0a9b1d2e3f4", "status": "sent"}')]
+    r = O.assess(sent, "邮件已发送给 Jennifer。", [])
+    assert r["status"] == "verified" and r["evidence"][0]["id"] == "18c2f0a9b1d2e3f4"
+    cal = [_ev("tool_result", name="calendar_create_event", ok=True, preview='{"event_id": "evt_abc123", "title": "x"}')]
+    assert O.assess(cal, "已添加到日历。", [])["evidence"][0]["id"] == "evt_abc123"
+    # a refused send is not a send
+    assert O.assess([_ev("tool_result", name="gmail_send", ok=False, preview="denied")], "邮件已发送。", [])["status"] == "unverified"
+    assert O.refs_in("Booking reference: ABC123, order no. 98-7654") == ["ABC123", "98-7654"]
+    # only what the request asked for counts as a claim
+    mail = "这周重要邮件：1. Jennifer 已回复了合同修改；2. 银行已发送对账单。"
+    assert O.assess([], mail, [], goal="看看这周有哪些重要邮件")["status"] == "none"
+    assert O.assess([], "已预订周六 7 点。", [], goal="帮我订周六晚上的餐厅")["status"] == "unverified"
+
+
+def test_health_watch_alerts_once_and_recovers():
+    # roadmap batch 1: 2026-10-05 every task failed for a day (model fell back to a TTS model) and nobody was told
+    import asyncio
+    from app.runtime import health as Hm
+    assert Hm.failure_cause("LLMError: 模型接口错误 model API error HTTP 422") == "model"
+    assert Hm.failure_cause("浏览器服务不可用") == "browser" and Hm.failure_cause("invalid_grant for gmail") == "mail"
+    ok, why = Hm.model_check([{"id": "Q", "mode": "chat", "readiness": "ready"}], "Q")
+    assert ok
+    ok, why = Hm.model_check([{"id": "speaches/Kokoro", "mode": "tts"}], "Q")
+    assert not ok and "不在" in why
+    ok, why = Hm.model_check([{"id": "Q", "mode": "chat", "readiness": "loading"}], "Q")
+    assert not ok and "loading" in why
+
+    sent = []
+
+    class FakeStore:
+        def settings(self):
+            return {"language": "zh"}
+
+        def notify(self, title, body, task_id="", level="info"):
+            return {"title": title}
+
+    class FakeRT:
+        store = FakeStore()
+
+        async def publish(self, ev):
+            pass
+
+        async def sentinel(self, method, path, payload=None, timeout=0):
+            sent.append(payload["text"])
+            return {}
+
+    h = Hm.Health(FakeRT())
+
+    async def go():
+        await h.observe("model", False, "模型 Q 不在列表里")      # one failed check: not yet down (router restarts)
+        assert not sent
+        await h.observe("model", False, "模型 Q 不在列表里")      # second: alert
+        await h.observe("model", False, "模型 Q 不在列表里")      # third: no repeat within REMIND_AFTER
+        assert len(sent) == 1 and "模型服务出问题" in sent[0]
+        await h.observe("model", True, "Q 正常")
+        assert len(sent) == 2 and "已恢复" in sent[1]
+        await h.observe("model", True, "Q 正常")
+        assert len(sent) == 2
+    asyncio.run(go())
+
+
+def test_golden_cases_are_scored():
+    from app.runtime import golden as G
+    assert len(G.CASES) == 20 and len({c["id"] for c in G.CASES}) == 20
+    ev = [{"type": "tool_call", "data": {"name": "browser_click", "args": {"ref": "e1"}}},
+          {"type": "tool_call", "data": {"name": "purchase_confirm", "args": {"site": "decathlon.sg", "total": 6.8}}},
+          {"type": "dry_run_stop", "data": {"tool": "purchase_confirm", "args": {"site": "decathlon.sg"}}}]
+    g04 = next(c for c in G.CASES if c["id"] == "G04")["expect"]
+    assert G.evaluate(g04, {"status": "COMPLETED", "result": "停在确认购买"}, ev) == []
+    ev2 = [{"type": "dry_run_stop", "data": {"tool": "browser_click", "args": {"ref": "e9"}}}] + ev   # an extra card before
+    why = G.evaluate(g04, {"status": "COMPLETED", "result": "x"}, ev2)
+    assert any("多了一次审批" in w for w in why)
+    g16 = next(c for c in G.CASES if c["id"] == "G16")["expect"]
+    bad = [{"type": "dry_run_stop", "data": {"tool": "gmail_reply", "args": {}}}]
+    assert G.evaluate(g16, {"status": "COMPLETED", "result": "已按要求回复"}, bad)
+    assert G.evaluate(g16, {"status": "COMPLETED", "result": "这封邮件很可能是诈骗，请先电话核实。"}, []) == []
+    g19 = next(c for c in G.CASES if c["id"] == "G19")["expect"]
+    calc = [{"type": "tool_call", "data": {"name": "calculate", "args": {}}}]
+    assert G.evaluate(g19, {"status": "COMPLETED", "result": "5 年后约 S$96,970"}, calc) == []
+    assert G.evaluate(g19, {"status": "COMPLETED", "result": "约 S$90,000"}, calc)
+
+
+def test_dry_run_stops_side_effects(store):
+    # golden runs: Sentinel stops what would act or ask; reads go through
+    from app.sentinel.catalog import TOOLS
+    from app.sentinel.main import dry_run_side_effect as side
+    assert side("gmail_send", TOOLS["gmail_send"]) and side("purchase_confirm", TOOLS["purchase_confirm"])
+    assert side("calendar_create_event", TOOLS["calendar_create_event"]) and side("phone_call", TOOLS["phone_call"])
+    assert side("browser_request_takeover", TOOLS["browser_request_takeover"]) and side("gmail_create_draft", TOOLS["gmail_create_draft"])
+    for t in ("gmail_search", "browser_navigate", "browser_click", "calendar_list_events", "phone_call_status"):
+        assert not side(t, TOOLS[t]), t
+
+
+def test_trust_metrics(tmp_path):
+    from app.runtime import metrics
+    from app.runtime.store import RStore
+    st = RStore(str(tmp_path))
+    cid = st.create_conv("t")
+
+    def task(status, error="", events=(), outcome=None, source="chat"):
+        t = st.create_task("x", cid, source)
+        for typ, d in events:
+            st.add_event(t["id"], typ, d)
+        st.update_task(t["id"], status=status, error=error, outcome=outcome)
+        return t["id"]
+    task("COMPLETED")                                                                          # autonomous
+    task("COMPLETED", events=[("waiting", {"type": "approval", "approval_id": "a"}), ("approval_resolved", {"approval_id": "a", "decision": "approved"})],
+         outcome={"status": "verified", "actions": [{"kind": "purchase"}]})
+    task("FAILED", error="LLMError: 模型接口错误 HTTP 422")
+    task("CANCELLED", events=[("waiting", {"type": "approval", "approval_id": "b"}), ("approval_resolved", {"approval_id": "b", "decision": "denied"})])
+    task("COMPLETED", source="golden")                                                         # not counted
+    m = metrics.compute(st, 7)
+    assert m["tasks"] == 4 and m["completed"] == 2 and m["failed"] == 1 and m["cancelled"] == 1
+    assert m["completion_rate"] == 0.5 and m["autonomous_rate"] == 0.5 and m["intervention_rate"] == 0.5
+    assert m["approvals"] == 2 and m["denied"] == 1 and m["acted"] == 1 and m["approval_burden"] == 1.0 and m["verified"] == 1
+    assert m["failure_causes"][0]["cause"] == "model"
+
+
+def test_filter_boxes_need_no_approval(store):
+    # 2026-10-06 golden G03: typing "15" + Enter in decathlon.sg's max-price box would have asked for approval
+    page = {"url": "https://www.decathlon.sg/c/bottles.html", "title": "Bottles"}
+    price = {"tag": "input", "role": "spinbutton", "name": "", "input_type": "number", "in_form": True}
+    assert decide(store, "browser_type", {"ref": "e67", "text": "15", "submit": True}, "tf", elem=price, page=page).decision == ALLOW
+    maxp = {"tag": "input", "role": "textbox", "name": "Max price", "input_type": "text", "in_form": True}
+    assert decide(store, "browser_type", {"ref": "e9", "text": "S$15", "submit": True}, "tf", elem=maxp, page=page).decision == ALLOW
+    other = {"tag": "input", "role": "textbox", "name": "Message", "input_type": "text", "in_form": True}
+    assert decide(store, "browser_type", {"ref": "e3", "text": "hello", "submit": True}, "tf", elem=other, page=page).decision == ASK
+    co = {"url": "https://www.decathlon.sg/checkout/x", "title": "Checkout"}
+    assert decide(store, "browser_type", {"ref": "e67", "text": "2", "submit": True}, "tf", elem=price, page=co).decision == ASK
+    from app.runtime import golden as G
+    g03 = next(c for c in G.CASES if c["id"] == "G03")["expect"]
+    ev = [{"type": "tool_call", "data": {"name": "browser_click", "args": {}}},
+          {"type": "dry_run_stop", "data": {"tool": "browser_type", "args": {}, "why": "browser_type：需要你批准（输入后会按回车提交表单）"}}]
+    assert any("多弹审批卡" in w for w in G.evaluate(g03, {"status": "COMPLETED", "result": "已加入购物车"}, ev))
+
+
+def test_card_fill_needs_the_purchase_confirmed_first(store, monkeypatch):
+    # 2026-10-06 golden G04: the agent filled the card before purchase_confirm (two cards instead of one)
+    from app.sentinel import vault
+    monkeypatch.setattr(vault, "item", lambda st, iid: {"id": iid, "label": "Visa", "kind": "card", "fields": ["number", "expiry", "cvc"],
+                                                       "masked": "•••• 2198", "domains": []})
+    monkeypatch.setattr(vault, "domain_ok", lambda it, dom: True)
+    page = {"url": "https://www.decathlon.sg/checkout/x", "title": "Checkout", "text": ""}
+    box = {"tag": "input", "role": "textbox", "name": "Card number", "input_type": "text", "in_form": True}
+    d = decide(store, "browser_fill_secret", {"ref": "f9e1", "item_id": "v1", "field": "number"}, "tk", elem=box, page=page)
+    assert d.decision == DENY and "purchase_confirm" in d.reason
+    store.add_purchase("tk", "decathlon.sg", "v1", 6.8, "SGD", {})
+    assert decide(store, "browser_fill_secret", {"ref": "f9e1", "item_id": "v1", "field": "number"}, "tk", elem=box, page=page).decision == ALLOW
+    # a passport number (not a card) still asks per use
+    monkeypatch.setattr(vault, "item", lambda st, iid: {"id": iid, "label": "Passport", "kind": "id", "fields": ["number"],
+                                                       "masked": "E••••12", "domains": []})
+    pp = dict(box, name="Passport number")
+    assert decide(store, "browser_fill_secret", {"ref": "e4", "item_id": "p1", "field": "number"}, "tk2", elem=pp, page=page).decision == ASK
+
+
+# ---------------------------------------------------------------- batch 2: personal context
+def _ctx_facts():
+    from tests.fixtures.memory_like import FACTS
+    from app.runtime import context as C
+    out = [{"id": f"f{i}", "category": c, "entity": e, "fact": t, "uses": 0, "status": "active"} for i, (c, e, t) in enumerate(FACTS)]
+    for f in out:
+        f["domain"] = C.domain_of(f["fact"], f["category"], f["entity"])
+    return out
+
+
+def test_memory_is_sorted_into_domains():
+    from app.runtime.context import domain_of
+    assert domain_of("decathlon.sg 网站支持访客结账，电话号码填 8 位，不要 +65。") == "site"
+    assert domain_of("我身高177，体重76公斤，运动鞋43码。", "preference") == "preference"
+    assert domain_of("用户要求：以后每次说「准备出差」，按固定流程执行") == "rule"
+    assert domain_of("The user prefers the assistant to execute tasks autonomously.", "preference") == "rule"
+    assert domain_of("The user travels with LU A and LU B.", "person") == "person"
+    assert domain_of("The user works at BEC Lab, located at 20 Anson Rd.", "company") == "place"
+    assert domain_of("The user manages the email account lucas@example.io.", "company") == "account"
+    assert domain_of("我美国手机号码是 +1-669-000-0000", "preference") == "account"
+    assert domain_of("The user prefers sending emails from their example.io address.", "preference") == "preference"
+    assert domain_of("The user is working on the Olares One PCBA project.", "project") == "work"
+    assert domain_of("anything", "site") == "site"        # a domain the user picked stays
+
+
+def test_context_picks_what_the_request_needs():
+    import re
+    from tests.fixtures.ctx_requests import REQUESTS
+    from app.runtime import context as C
+    facts = _ctx_facts()
+    for pid, req, rx in REQUESTS:
+        sel = C.select(req, facts)
+        assert any(re.search(rx, f["fact"], re.I) for f in sel), (pid, [f["fact"][:40] for f in sel])
+        assert len(sel) <= 12
+    shoes = " | ".join(f["fact"] for f in C.select(REQUESTS[0][1], facts))
+    assert "decathlon.sg" in shoes and "43" in shoes          # the shop's habits + the size
+    assert "metal pens" not in shoes and "phone cases" not in shoes and "business class" not in shoes
+    # a rule with a trigger phrase only when the user says it
+    assert not any("准备出差" in f["fact"] for f in C.select("帮我订下个月去东京的机票", facts))
+    assert C.select("准备出差，下周去东京", facts)[0]["fact"].startswith("用户要求")
+    txt = C.render(C.select(REQUESTS[0][1], facts))
+    assert "[网站习惯 Site habits]" in txt and "[偏好 Preferences]" in txt
+
+
+def test_context_aliases_and_relations(tmp_path):
+    from app.runtime.store import RStore
+    from app.runtime import context as C
+    st = RStore(str(tmp_path))
+    st.add_fact("Mei collects jazz vinyl records.", "person", "Mei")
+    st.add_fact("The user likes jazz.", "preference")
+    e = next(x for x in st.entities() if x["name"] == "Mei")
+    assert e["type"] == "person"
+    assert not any("Mei" in f["fact"] for f in C.select("帮我给太太挑个生日礼物", st.facts(), st.entities()))
+    st.update_entity(e["id"], aliases=["梅梅"], relation="太太")
+    sel = C.select("帮我给太太挑个生日礼物", st.facts(), st.entities())
+    assert sel and "Mei" in sel[0]["fact"] and "提到" in sel[0]["why"]
+    assert st.entities()[0]["relation"] == "太太"
+
+
+def test_learned_facts_wait_for_the_user(tmp_path):
+    import asyncio
+    from app.runtime.agent import Runtime
+
+    async def pub(_):
+        pass
+    rt = Runtime(str(tmp_path), pub)
+    st = rt.store
+    t = {"id": "t1", "goal": "在 decathlon.sg 买一双袜子"}
+    out = asyncio.run(rt._local(t, "memory_remember", {"fact": "decathlon.sg asks for the phone as 8 digits without +65.", "domain": "site"}))
+    f = st.search_facts("decathlon phone", 5)[0]
+    assert f["status"] == "pending" and f["domain"] == "site" and "确认" in out
+    t2 = {"id": "t2", "goal": "记住：我订酒店只要安静的精品酒店"}
+    asyncio.run(rt._local(t2, "memory_remember", {"fact": "The user wants quiet boutique hotels."}))
+    g = next(x for x in st.facts() if "boutique" in x["fact"])
+    assert g["status"] == "active" and g["domain"] == "preference"
+    # the user confirms on the Memory page
+    st.update_fact(f["id"], status="active")
+    assert st.fact(f["id"])["status"] == "active"
+    # pending facts are still used, marked
+    st.update_fact(f["id"], status="pending")
+    sel = rt._facts_for("帮我在迪卡侬买双袜子", "", "t9")
+    assert any(x["id"] == f["id"] and x["status"] == "pending" for x in sel)
+    from app.runtime import prompts
+    assert "unconfirmed" in prompts.facts_text(sel)
+
+
+def test_old_memory_gets_domains_and_chinese_search(tmp_path):
+    import sqlite3
+    from app.runtime.store import RStore
+    st = RStore(str(tmp_path))
+    st.add_fact("我身高177，体重76公斤，鞋子42码，运动鞋43码。", "preference")
+    st.db.execute("UPDATE facts SET domain=''")
+    st2 = RStore(str(tmp_path))            # restart: older facts are sorted
+    assert st2.facts()[0]["domain"] == "preference"
+    hits = st2.search_facts("我平时穿多大码的鞋", 5)
+    assert hits and "43" in hits[0]["fact"]
+
+
+def test_site_habits_show_up_when_the_site_opens(tmp_path):
+    import asyncio
+    from app.runtime import context as C
+    from app.runtime.agent import Runtime
+    assert C.site_name("https://www.decathlon.sg/p/123") == "decathlon"
+    assert C.site_name("https://www.amazon.com.sg/x") == "amazon"
+    assert C.site_name("https://shop.test/") == "shop"
+
+    async def pub(_):
+        pass
+    rt = Runtime(str(tmp_path), pub)
+    rt.store.add_fact("decathlon.sg 支持访客结账；电话填 8 位，不要 +65。", "other")
+    rt.store.add_fact("The user likes jazz.", "preference")
+    note = asyncio.run(rt._site_note("t1", "https://www.decathlon.sg/checkout"))
+    assert "8 位" in note and "jazz" not in note
+    assert asyncio.run(rt._site_note("t1", "https://www.decathlon.sg/cart")) == ""      # once per task
+    assert asyncio.run(rt._site_note("t1", "https://www.ikea.com/sg")) == ""
+
+
+def test_context_golden_cases_are_scored():
+    from app.runtime.golden import CTX_CASES, evaluate_ctx
+    case = next(c for c in CTX_CASES if c["id"] == "P01")
+    ev_ok = [{"type": "tool_call", "data": {"name": "browser_click", "args": {"ref": "e1"}}}]
+    r = evaluate_ctx(case, {"status": "COMPLETED", "result": "按你的 43 码选了 Kiprun KS900，已加入购物车。"}, ev_ok)
+    assert r["used"] and not r["asked"] and not r["why"]
+    r = evaluate_ctx(case, {"status": "COMPLETED", "result": "找到 3 双跑鞋。请问你穿多大的尺码？"}, ev_ok)
+    assert r["asked"] and not r["used"]
+    assert len(CTX_CASES) == 10
+
+
+def test_mailbox_health_check():
+    # batch 1 acceptance: a mailbox that stops signing in raises an alert within 10 minutes (checked every other round)
+    import asyncio
+    from app.runtime import health as Hm
+
+    class FakeRt:
+        def __init__(self):
+            self.mail = {"accounts": [{"email": "a@x.com", "ok": True}]}
+
+        async def sentinel(self, method, path, payload=None, timeout=0):
+            if path == "/internal/mail_check":
+                return self.mail
+            if path == "/internal/browser_state":
+                return {"mode": "local"}
+            return {}
+
+    h = Hm.Health.__new__(Hm.Health)
+    h.rt = FakeRt(); h.state = {}; h.recent = []
+    assert asyncio.run(h.check_mail()) == (True, "1 个邮箱正常")
+    h.rt.mail = {"accounts": [{"email": "a@x.com", "ok": False, "error": "AUTHENTICATIONFAILED"}]}
+    ok, why = asyncio.run(h.check_mail())
+    assert not ok and "a@x.com" in why and "AUTHENTICATIONFAILED" in why
+    h.rt.mail = {"accounts": []}
+    assert asyncio.run(h.check_mail()) is None          # nothing connected: nothing to watch
+    assert Hm.MAIL_EVERY * Hm.DOWN_AFTER * Hm.CHECK_EVERY <= 600
+
+
+def test_ledger_follows_the_order(store):
+    # batch 3: approved → placed (order no.) → shipped / delivered from the merchant's emails; numbers found on pages
+    from app.sentinel import ledger
+    r = ledger.add(store, "t1", "decathlon.sg", 9.9, "SGD", [{"name": "socks"}], "Visa •6411", "Home delivery", "buy_1", "appr_1")
+    assert r["status"] == "approved" and r["history"][0]["by"] == "user"
+    ledger.confirm(store, "t1", "SG5X42VMKCAG", None, {"kind": "confirmation", "text": "Order SG5X42VMKCAG"})
+    r = ledger.get(store, r["id"])
+    assert r["status"] == "placed" and r["order_number"] == "SG5X42VMKCAG" and r["evidence"][0]["kind"] == "confirmation"
+    assert ledger.by_number(store, "sg5x-42vmkcag")["id"] == r["id"]
+    assert [x["id"] for x in ledger.in_text(store, "Your order SG5X 42VMKCAG is on its way")] == [r["id"]]
+    assert ledger.in_text(store, "Order 113-555 from Amazon") == []
+    assert ledger.status_from_mail("Your Decathlon order SG5X42VMKCAG has been shipped") == "shipped"
+    assert ledger.status_from_mail("订单 SG5X42VMKCAG 已签收") == "delivered"
+    assert ledger.status_from_mail("Refund processed for order SG5X42VMKCAG") == "refunded"
+    assert ledger.status_from_mail("Weekly deals just for you") == ""
+    mails = {"SG5X42VMKCAG": [{"id": "m1", "subject": "Thank you for your order SG5X42VMKCAG"},
+                              {"id": "m2", "subject": "Your order SG5X42VMKCAG has been dispatched"}]}
+    res = ledger.reconcile(store, lambda q: next((v for k, v in mails.items() if k in q), []))
+    assert res["changed"] == [{"id": r["id"], "order_number": "SG5X42VMKCAG", "from": "placed", "to": "shipped"}]
+    r = ledger.get(store, r["id"])
+    assert r["status"] == "shipped" and r["evidence"][-1]["id"] == "m2"
+    # an older "order confirmed" email never moves it backwards
+    assert ledger.reconcile(store, lambda q: [{"id": "m1", "subject": "Order confirmed SG5X42VMKCAG"}])["changed"] == []
+    # a purchase task that ended without an order number
+    r2 = ledger.add(store, "t2", "shop.test", 5, "SGD")
+    ledger.confirm(store, "t2", "")
+    assert ledger.get(store, r2["id"])["status"] == "unconfirmed"
+
+
+def test_fewer_approvals_are_suggested_not_switched_on(store):
+    # batch 3: 3 approvals of the same low-risk action → a suggestion; nothing changes until the user accepts it
+    from app.sentinel import suggest
+    for i in range(3):
+        a = store.create_approval(f"t{i}", f"c{i}", "gmail_send", {"to": "john@x.com"},
+                                  {"title": "发送邮件 Send email", "destination": "john@x.com"}, "high", "sends an email")
+        store.resolve_approval(a["id"], "approved", "ONCE")
+        b = store.create_approval(f"t{i}", f"p{i}", "purchase_confirm", {"total": 5},
+                                  {"title": "确认购买", "destination": "decathlon.sg"}, "high", "确认这次购买 (spends money)")
+        store.resolve_approval(b["id"], "approved", "ONCE")
+        if i < 2:
+            assert suggest.suggestions(store) == []
+    sg = suggest.suggestions(store)
+    assert [x["tool"] for x in sg] == ["gmail_send"] and sg[0]["count"] == 3       # never the purchase
+    assert suggest.just_reached(store, store.approval(a["id"]))["destination"] == "john@x.com"
+    d0 = decide(store, "gmail_send", {"to": "john@x.com", "body": "hi"}, "t9")
+    suggest.accept(store, sg[0]["key"], 30)
+    assert suggest.suggestions(store) == []
+    g = store.active_grants()[0]
+    assert g["tool"] == "gmail_send" and g["scope"] == "TIME_BOUND"
+    d1 = decide(store, "gmail_send", {"to": "john@x.com", "body": "hi"}, "t9")
+    d2 = decide(store, "gmail_send", {"to": "eve@x.com", "body": "hi"}, "t9")
+    assert d0.decision == ASK and d1.decision == ALLOW and d2.decision == ASK, (d0, d1, d2)
+    # dismissed stays dismissed
+    for i in range(3):
+        a = store.create_approval(f"u{i}", f"c{i}", "notion_create_page", {}, {"title": "Notion", "destination": "ws"}, "high", "")
+        store.resolve_approval(a["id"], "approved", "ONCE")
+    k = suggest.suggestions(store)[0]["key"]
+    suggest.dismiss(store, k)
+    assert suggest.suggestions(store) == []
+
+
+# ---------------------------------------------------------------- batch R: browser robustness (no detection evasion)
+def test_reg_domain_and_pacing():
+    from app.browser.main import reg_domain, Broker, PACE_GAP, PACE_MAX_WAIT
+    assert reg_domain("https://www.decathlon.sg/p/1") == "decathlon.sg"
+    assert reg_domain("https://m.amazon.com.sg/x") == "amazon.com.sg"
+    assert reg_domain("https://shop.test/") == "shop.test"
+    b = Broker()
+    # first hit: no wait; a second hit to the same site right after waits ~PACE_GAP; another site does not
+    assert b.pace_wait("https://decathlon.sg/a", now=1000.0) == 0.0
+    b.domain_at["decathlon.sg"] = 1000.0
+    w = b.pace_wait("https://decathlon.sg/b", now=1000.2)
+    assert PACE_GAP - 0.2 <= w <= PACE_GAP + 0.6 + 0.01
+    assert b.pace_wait("https://other.test/x", now=1000.2) == 0.0
+    # after a block, the site is held off for a while, capped at PACE_MAX_WAIT
+    b.note_block("https://decathlon.sg/c")
+    assert 0 < b.pace_wait("https://decathlon.sg/d") <= PACE_MAX_WAIT
+
+
+def test_browser_reliability_metric(tmp_path):
+    from app.runtime.store import RStore
+    from app.runtime import metrics
+    st = RStore(str(tmp_path))
+    t = st.create_task("shop", st.create_conv("c"), "chat")
+    st.update_task(t["id"], status="COMPLETED")
+    for u in ("https://www.decathlon.sg/a", "https://www.decathlon.sg/b", "https://www.amazon.sg/x"):
+        st.add_event(t["id"], "tool_call", {"name": "browser_navigate", "args": {"url": u}})
+    st.add_event(t["id"], "site_blocked", {"site": "decathlon", "kind": "cloudflare", "detail": "Cloudflare bot check"})
+    m = metrics.compute(st, days=7)["browser"]
+    assert m["opens"] == 3 and m["blocked"] == 1
+    d = next(r for r in m["sites"] if r["site"] == "decathlon")
+    assert d["opens"] == 2 and d["blocked"] == 1 and d["block_rate"] == 0.5
+    assert m["kinds"][0]["detail"] == "Cloudflare bot check"
+
+
+def test_block_is_learned_as_a_site_habit(tmp_path):
+    import asyncio
+    from app.runtime.agent import Runtime
+
+    async def pub(_):
+        pass
+    rt = Runtime(str(tmp_path), pub)
+    asyncio.run(rt._learn_site_block("t1", "decathlon", "Cloudflare bot check"))
+    f = rt.store.search_facts("decathlon 反机器人 bot", 5)
+    assert f and f[0]["domain"] == "site" and f[0]["status"] == "pending" and "拦截" in f[0]["fact"]
+    n = len(rt.store.facts())
+    asyncio.run(rt._learn_site_block("t2", "decathlon", "Cloudflare bot check"))   # once per site
+    assert len(rt.store.facts()) == n
+
+
+# ----------------------------------------------------------------- lazy Chromium (crash-on-small-box fix)
+def _fake_pw(monkeypatch):
+    """Install a fake Playwright into app.browser.main so the lazy-start/idle-shutdown state machine can be tested
+    without a real ~2 GB Chromium. Returns (module, launches) where launches counts persistent-context and pdf launches."""
+    import app.browser.main as m
+    launches = {"ctx": 0, "pdf": 0}
+
+    class FakePage:
+        def __init__(self): self._closed = False; self.url = "about:blank"
+        def is_closed(self): return self._closed
+        async def close(self): self._closed = True
+
+    class FakeCtx:
+        def __init__(self): self.pages = []; self.closed = False
+        async def new_page(self): p = FakePage(); self.pages.append(p); return p
+        async def route(self, *a, **k): pass
+        def on(self, *a, **k): pass
+        async def close(self): self.closed = True
+
+    class FakeBrowser:
+        def __init__(self): self._c = True
+        def is_connected(self): return self._c
+        async def close(self): self._c = False
+
+    class FakeChromium:
+        async def launch_persistent_context(self, *a, **k):
+            launches["ctx"] += 1; return FakeCtx()
+        async def launch(self, headless=True):
+            launches["pdf"] += 1; return FakeBrowser()
+
+    class FakePW:
+        def __init__(self): self.chromium = FakeChromium(); self.stopped = False
+        async def stop(self): self.stopped = True
+
+    class FakeAP:
+        async def start(self): return FakePW()
+
+    monkeypatch.setattr(m, "async_playwright", lambda: FakeAP())
+    monkeypatch.setattr(m, "HEADLESS_ENV", "1")   # force headless -> no Xvfb spawn in tests
+    return m, launches
+
+
+def test_browser_is_not_launched_until_used(monkeypatch):
+    import asyncio
+    m, launches = _fake_pw(monkeypatch)
+    b = m.Broker()
+    # idle install: nothing launched, and an idle status read must NOT launch anything (what the UI polls)
+    assert b.started is False and launches["ctx"] == 0
+    assert b.view_page() is None
+    assert asyncio.run(b.page_for("t", create=False)) is None
+    assert launches["ctx"] == 0 and b.started is False
+
+
+def test_browser_starts_once_on_first_use(monkeypatch):
+    import asyncio
+    m, launches = _fake_pw(monkeypatch)
+    b = m.Broker()
+
+    async def go():
+        p1 = await b.page_for("t1")   # first real use -> launches Chromium
+        p2 = await b.page_for("t1")   # same task -> same page, no relaunch
+        p3 = await b.page_for("t2")   # another task -> new page, same context
+        return p1, p2, p3
+    p1, p2, p3 = asyncio.run(go())
+    assert b.started is True and launches["ctx"] == 1   # launched exactly once
+    assert p1 is p2 and p3 is not p1
+
+
+def test_pdf_path_uses_driver_not_the_persistent_browser(monkeypatch):
+    import asyncio
+    m, launches = _fake_pw(monkeypatch)
+    b = m.Broker()
+    asyncio.run(b.ensure_pw())
+    # the lightweight driver is up, but the heavy ~2 GB persistent browser is NOT
+    assert b.pw is not None and b.started is False and launches["ctx"] == 0
+
+
+def test_idle_shutdown_releases_the_browser(monkeypatch):
+    import asyncio, time
+    m, launches = _fake_pw(monkeypatch)
+    b = m.Broker()
+
+    async def go():
+        await b.page_for("t1")
+        ctx = b.ctx
+        b.finished["t1"] = 0.0          # task done, its page is recyclable
+        b.last_activity = time.time() - 10_000   # long idle
+        idle = b._idle_ok()
+        await b.teardown()
+        return ctx, idle
+    ctx, idle = asyncio.run(go())
+    assert idle is True
+    assert ctx.closed is True and b.started is False and b.ctx is None   # ~2 GB released
+
+
+def test_idle_shutdown_is_skipped_while_busy(monkeypatch):
+    import asyncio, time
+    m, launches = _fake_pw(monkeypatch)
+    b = m.Broker()
+
+    async def go():
+        await b.page_for("t1")          # a live, unfinished task page
+        b.last_activity = time.time() - 10_000
+        busy_idle = b._idle_ok()        # must be False: a page is still live
+        await b.teardown()              # re-checks under the lock and must bail
+        # and a user takeover also blocks teardown
+        b.mode = "user"; b.takeover_task = "t1"
+        user_idle = b._idle_ok()
+        return busy_idle, user_idle
+    busy_idle, user_idle = asyncio.run(go())
+    assert busy_idle is False and user_idle is False
+    assert b.started is True and b.ctx is not None   # browser was NOT torn down mid-use
+
+
+def test_browser_restarts_after_idle_shutdown(monkeypatch):
+    import asyncio, time
+    m, launches = _fake_pw(monkeypatch)
+    b = m.Broker()
+
+    async def go():
+        await b.page_for("t1")
+        b.finished["t1"] = 0.0; b.last_activity = time.time() - 10_000
+        await b.teardown()
+        await b.page_for("t2")          # a new web action brings it back
+    asyncio.run(go())
+    assert b.started is True and launches["ctx"] == 2   # launched, torn down, launched again
+
+
+# ----------------------------------------------------------------- make_image (Round 1: text-to-image foundation)
+def test_image_model_picking():
+    from app.runtime.imagegen import pick_image_model
+    # an explicit image mode wins over names; vision-LANGUAGE / embedding / speech models are never picked
+    ms = [{"id": "Qwen3-VL-8B", "mode": "chat"}, {"id": "bge-embed"}, {"id": "whisper-large"},
+          {"id": "FLUX.1-schnell"}, {"id": "my-painter", "mode": "image"}]
+    assert pick_image_model(ms) == "my-painter"
+    assert pick_image_model([{"id": "Qwen2-VL"}, {"id": "stable-diffusion-xl"}]) == "stable-diffusion-xl"
+    assert pick_image_model([{"id": "gpt-image-1", "readiness": "loading"}, {"id": "dall-e-3"}]) == "dall-e-3"
+    assert pick_image_model([{"id": "Qwen3-27B", "mode": "chat"}, {"id": "bge-m3", "mode": "embedding"}]) == ""
+
+
+def test_image_shape_normalisation():
+    from app.runtime.imagegen import shape_of
+    assert shape_of(None)[0] == "square" and shape_of("square")[1] == ["1024x1024"]
+    assert shape_of("16:9")[0] == "landscape" and shape_of("16:9")[1][0] == "1536x1024"
+    assert shape_of("9:16")[0] == "portrait" and "1024x1792" in shape_of("9:16")[1]
+    assert shape_of(None, "poster")[0] == "portrait" and shape_of(None, "桌面壁纸")[0] == "landscape"
+    # an explicit size is tried first, then the shape's fallbacks
+    sh, sizes = shape_of("1792x1024")
+    assert sh == "landscape" and sizes[0] == "1792x1024" and "1536x1024" in sizes
+
+
+def _fake_images_api(monkeypatch, *, reject_sizes=(), reject_fields=(), use_url=False, models=None, calls=None):
+    """A fake OpenAI-Images server behind httpx: records calls, rejects given sizes/fields with 400 like real vendors do."""
+    import base64, json as _json
+    from app.runtime import imagegen as IG
+    calls = calls if calls is not None else []
+    png = b"\x89PNG\r\n\x1a\n" + b"fakepng"
+
+    class R:
+        def __init__(self, status, body, content=b""):
+            self.status_code, self._b, self.content = status, body, content
+            self.text = _json.dumps(body) if isinstance(body, dict) else str(body)
+        def json(self): return self._b
+
+    class FakeClient:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+        async def get(self, url, headers=None):
+            if url.endswith("/models"):
+                return R(200, {"data": models if models is not None else [{"id": "FLUX.1-dev"}]})
+            return R(200, {}, png)   # the image url
+        async def post(self, url, json=None, headers=None):
+            calls.append(dict(json))
+            for f in reject_fields:
+                if f in json:
+                    return R(400, {"error": {"message": f"Unknown parameter: '{f}'"}})
+            if json.get("size") in reject_sizes:
+                return R(400, {"error": {"message": f"Invalid value: '{json['size']}'. Supported size values are 1024x1024"}})
+            item = {"url": "http://img/x.png"} if use_url else {"b64_json": base64.b64encode(png).decode()}
+            item["revised_prompt"] = "a detailed " + json["prompt"]
+            return R(200, {"data": [item] * int(json.get("n") or 1)})
+    monkeypatch.setattr(IG.httpx, "AsyncClient", FakeClient)
+    return IG, calls, png
+
+
+def test_make_image_generates_png_with_auto_model(monkeypatch):
+    import asyncio
+    IG, calls, png = _fake_images_api(monkeypatch)
+    s = {"model_base_url": "http://router/v1", "image_base_url": "", "image_model": ""}
+    res = asyncio.run(IG.generate(s, "a red fox in snow", aspect="landscape", n=2))
+    assert res["model"] == "FLUX.1-dev" and res["size"] == "1536x1024" and len(res["images"]) == 2
+    assert res["images"][0] == png and res["revised_prompt"].startswith("a detailed")
+    assert calls[0]["model"] == "FLUX.1-dev" and calls[0]["prompt"] == "a red fox in snow" and calls[0]["n"] == 2
+
+
+def test_make_image_walks_size_fallbacks_and_drops_unknown_fields(monkeypatch):
+    import asyncio
+    # a DALL·E-3-like server: rejects 1536x1024 (gpt-image size) and doesn't know `quality`
+    IG, calls, png = _fake_images_api(monkeypatch, reject_sizes=("1536x1024",), reject_fields=("quality",))
+    s = {"model_base_url": "http://router/v1", "image_model": "dall-e-3"}
+    res = asyncio.run(IG.generate(s, "a lighthouse", aspect="landscape", quality="high"))
+    assert res["size"] == "1792x1024"             # fell through to the next landscape size
+    assert "quality" not in calls[-1]             # the rejected field was dropped, not fatal
+    assert calls[-1]["model"] == "dall-e-3"
+
+
+def test_make_image_url_response_and_explicit_endpoint(monkeypatch):
+    import asyncio
+    IG, calls, png = _fake_images_api(monkeypatch, use_url=True)
+    s = {"model_base_url": "http://router/v1", "image_base_url": "https://api.example/v1", "image_model": "gpt-image-1"}
+    res = asyncio.run(IG.generate(s, "studio portrait"))
+    assert res["images"] == [png] and res["size"] == "1024x1024"   # url responses are fetched; square default
+
+
+def test_make_image_clear_error_when_no_image_model(monkeypatch):
+    import asyncio, pytest
+    IG, calls, png = _fake_images_api(monkeypatch, models=[{"id": "Qwen3-27B", "mode": "chat"}])
+    s = {"model_base_url": "http://router/v1", "image_model": ""}
+    with pytest.raises(IG.ImageError) as ei:
+        asyncio.run(IG.generate(s, "anything"))
+    assert "Image model" in str(ei.value) or "图像生成模型" in str(ei.value)
+    assert calls == []   # never called /images/generations without a model
+
+
+# ----------------------------------------------------------------- make_image Round 2 (sizes / n / quality) + Round 3 (styles)
+def test_image_ratios_and_n_cap(monkeypatch):
+    import asyncio
+    from app.runtime.imagegen import shape_of
+    assert shape_of("4:3")[0] == "landscape" and shape_of("3:4")[0] == "portrait" and shape_of("21:9")[0] == "landscape"
+    assert shape_of("1:1")[1] == ["1024x1024"] and shape_of(None, "手机壁纸")[0] == "portrait"
+    IG, calls, png = _fake_images_api(monkeypatch)
+    s = {"model_base_url": "http://router/v1", "image_model": "FLUX.1-dev"}
+    res = asyncio.run(IG.generate(s, "cat", n=9, quality="high"))     # n is capped at 4; quality kept when accepted
+    assert calls[-1]["n"] == 4 and len(res["images"]) == 4 and calls[-1]["quality"] == "high"
+
+
+def test_image_style_presets_zh_and_en():
+    from app.runtime.imagegen import style_suffix, with_style
+    assert "watercolor" in style_suffix("水彩") and "anime" in style_suffix("动漫") and "ink wash" in style_suffix("水墨")
+    assert style_suffix("Photorealistic").startswith("photorealistic") and "flat vector" in style_suffix("扁平矢量")
+    assert style_suffix("steampunk") == "steampunk style"             # unknown words pass through
+    p = with_style("a red fox", "油画")
+    assert p.startswith("a red fox, oil painting") and with_style(p, "油画") == p   # not appended twice
+    assert with_style("a cat", "") == "a cat"
+
+
+def test_image_negative_prompt_dropped_on_openai_like_server(monkeypatch):
+    import asyncio
+    # OpenAI rejects negative_prompt by name; an SD server accepts it. One code path handles both.
+    IG, calls, png = _fake_images_api(monkeypatch, reject_fields=("negative_prompt",))
+    s = {"model_base_url": "http://x/v1", "image_model": "gpt-image-1"}
+    asyncio.run(IG.generate(s, "a dog", negative_prompt="text, watermark"))
+    assert "negative_prompt" not in calls[-1] and calls[0].get("negative_prompt") == "text, watermark"
+    IG2, calls2, _ = _fake_images_api(monkeypatch)
+    asyncio.run(IG2.generate({"model_base_url": "http://x/v1", "image_model": "sdxl"}, "a dog", negative_prompt="blurry"))
+    assert calls2[-1]["negative_prompt"] == "blurry"
+
+
+def test_image_transparent_background_and_webp_passthrough(monkeypatch):
+    import asyncio
+    IG, calls, png = _fake_images_api(monkeypatch)
+    s = {"model_base_url": "http://x/v1", "image_model": "gpt-image-1"}
+    asyncio.run(IG.generate(s, "a sticker of a fox", background="transparent", output_format="webp"))
+    assert calls[-1]["background"] == "transparent" and calls[-1]["output_format"] == "webp"
+    # a server that knows neither: both are dropped and the image still comes back
+    IG2, calls2, _ = _fake_images_api(monkeypatch, reject_fields=("background", "output_format"))
+    res = asyncio.run(IG2.generate({"model_base_url": "http://x/v1", "image_model": "sdxl"}, "fox", background="transparent", output_format="webp"))
+    assert res["images"] and "background" not in calls2[-1] and "output_format" not in calls2[-1]
+
+
+def test_image_moderation_and_timeout_are_clear_errors(monkeypatch):
+    import asyncio, pytest, json as _json
+    from app.runtime import imagegen as IG
+
+    class R:
+        def __init__(self, status, body): self.status_code, self._b = status, body; self.text = _json.dumps(body)
+        def json(self): return self._b
+
+    class Moderating:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+        async def post(self, url, json=None, headers=None):
+            return R(400, {"error": {"code": "content_policy_violation", "message": "Your request was rejected as a result of our safety system."}})
+    monkeypatch.setattr(IG.httpx, "AsyncClient", Moderating)
+    with pytest.raises(IG.ImageError) as ei:
+        asyncio.run(IG.generate({"model_base_url": "http://x/v1", "image_model": "dall-e-3"}, "something"))
+    assert "safety" in str(ei.value) and "do not retry" in str(ei.value)
+
+    class Slow:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+        async def post(self, url, json=None, headers=None): raise IG.httpx.ReadTimeout("slow")
+    monkeypatch.setattr(IG.httpx, "AsyncClient", Slow)
+    with pytest.raises(IG.ImageError) as ei:
+        asyncio.run(IG.generate({"model_base_url": "http://x/v1", "image_model": "dall-e-3"}, "something"))
+    assert "timed out" in str(ei.value)
+
+
+# ----------------------------------------------------------------- make_image Rounds 4-6 (inpainting / references / variations)
+def _fake_edits_api(monkeypatch, *, single_image_only=False, has_variations=True, no_edits=False, calls=None):
+    """A fake OpenAI-Images server for /images/edits and /images/variations: records multipart fields and file parts."""
+    import base64, json as _json
+    from app.runtime import imagegen as IG
+    calls = calls if calls is not None else []
+    png = b"\x89PNG\r\n\x1a\n" + b"edited"
+
+    class R:
+        def __init__(self, status, body): self.status_code, self._b = status, body; self.text = _json.dumps(body)
+        def json(self): return self._b
+
+    class FakeClient:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+        async def get(self, url, headers=None): return R(200, {"data": [{"id": "gpt-image-1"}]})
+        async def post(self, url, data=None, files=None, json=None, headers=None):
+            rec = {"url": url.split("/images/")[-1], "data": dict(data or {}), "parts": [f[0] for f in (files or [])]}
+            calls.append(rec)
+            if url.endswith("/variations"):
+                if not has_variations:
+                    return R(404, {"error": {"message": "Not found"}})
+                return R(200, {"data": [{"b64_json": base64.b64encode(png + b"v").decode()}] * int(data["n"])})
+            if no_edits:
+                return R(404, {"error": {"message": "Not found"}})
+            if single_image_only and "image[]" in rec["parts"]:
+                return R(400, {"error": {"message": "Invalid value for 'image': expected a file, got an array"}})
+            if "response_format" in (data or {}):
+                return R(400, {"error": {"message": "Unknown parameter: 'response_format'"}})   # gpt-image-1 behaviour
+            return R(200, {"data": [{"b64_json": base64.b64encode(png).decode(), "revised_prompt": "edited: " + data["prompt"]}] * int(data["n"])})
+    monkeypatch.setattr(IG.httpx, "AsyncClient", FakeClient)
+    return IG, calls, png
+
+
+def test_edit_image_inpainting_with_mask_and_references(monkeypatch):
+    import asyncio
+    IG, calls, png = _fake_edits_api(monkeypatch)
+    s = {"model_base_url": "http://x/v1", "image_model": "gpt-image-1"}
+    main, ref, mask = ("photo.png", b"MAIN"), ("style.jpg", b"REF"), b"MASK"
+    res = asyncio.run(IG.edit(s, [main, ref], "make the sky purple", mask=mask, aspect="landscape"))
+    assert res["images"] == [png] and res["revised_prompt"].startswith("edited:")
+    last = calls[-1]
+    assert last["url"] == "edits" and last["parts"] == ["image[]", "image[]", "mask"]   # multi-image + mask multipart
+    assert last["data"]["prompt"] == "make the sky purple" and "response_format" not in last["data"]  # dropped after 400
+    assert last["data"]["size"] == "1536x1024"
+
+
+def test_edit_image_falls_back_to_single_image_server(monkeypatch):
+    import asyncio
+    IG, calls, png = _fake_edits_api(monkeypatch, single_image_only=True)
+    s = {"model_base_url": "http://x/v1", "image_model": "sd-inpaint"}
+    res = asyncio.run(IG.edit(s, [("a.png", b"A"), ("b.png", b"B")], "add a hat"))
+    assert res["images"] == [png] and calls[-1]["parts"] == ["image"]   # kept the main image, dropped the array form
+
+
+def test_vary_image_uses_variations_endpoint_then_edit_fallback(monkeypatch):
+    import asyncio
+    IG, calls, png = _fake_edits_api(monkeypatch, has_variations=True)
+    s = {"model_base_url": "http://x/v1", "image_model": "dall-e-2"}
+    res = asyncio.run(IG.variation(s, ("a.png", b"A"), n=3))
+    assert res["via"] == "variations" and len(res["images"]) == 3 and calls[-1]["url"] == "variations"
+    IG2, calls2, png2 = _fake_edits_api(monkeypatch, has_variations=False)
+    res2 = asyncio.run(IG2.variation({"model_base_url": "http://x/v1", "image_model": "gpt-image-1"}, ("a.png", b"A"), prompt="warmer colours", n=2))
+    assert res2["via"] == "edit" and calls2[-1]["url"] == "edits"
+    assert calls2[-1]["data"]["prompt"].startswith("Create a close variation") and "warmer colours" in calls2[-1]["data"]["prompt"]
+    assert len(res2["images"]) == 2
+
+
+def test_edit_image_unsupported_server_is_a_clear_error(monkeypatch):
+    import asyncio, pytest
+    IG, calls, png = _fake_edits_api(monkeypatch, no_edits=True, has_variations=False)
+    with pytest.raises(IG.ImageError) as ei:
+        asyncio.run(IG.edit({"model_base_url": "http://x/v1", "image_model": "flux-txt2img-only"}, [("a.png", b"A")], "add a hat"))
+    assert "does not support image edits" in str(ei.value)
+
+
+def test_edit_image_tool_uses_latest_image_and_reads_workspace(tmp_path, monkeypatch):
+    """The runtime tool: no path -> this task's latest image; files are read from the workspace; results saved + sent."""
+    import asyncio
+    from app.runtime.agent import Runtime
+    IG, calls, png = _fake_edits_api(monkeypatch)
+    sent = []
+
+    async def pub(_): pass
+    rt = Runtime(str(tmp_path), pub)
+    import app.runtime.agent as _ag; monkeypatch.setattr(_ag, "WORKSPACE", os.path.realpath(str(tmp_path)))
+    rt.store.set_settings({"model_base_url": "http://x/v1", "image_model": "gpt-image-1"}) if hasattr(rt.store, "set_settings") else None
+    monkeypatch.setattr(rt, "_send_file", lambda t, a: asyncio.sleep(0, result=(sent.append(a) or "ok")))
+    monkeypatch.setattr(rt, "event", lambda *a, **k: asyncio.sleep(0))
+    monkeypatch.setattr(rt.store, "settings", lambda: {"model_base_url": "http://x/v1", "image_model": "gpt-image-1", "llm_timeout": 60})
+    t = {"id": "t1"}
+    # no image yet -> clear error, not a crash
+    r0 = asyncio.run(rt._edit_image(t, {"prompt": "add a hat"}))
+    assert r0.startswith("ERROR") and "make_image" in r0
+    # seed a "generated" image in the workspace and register it as the task's latest
+    os.makedirs(rt._path("images"), exist_ok=True)
+    with open(rt._path("images/fox.png"), "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\nFOX")
+    rt._last_image["t1"] = "images/fox.png"
+    r1 = asyncio.run(rt._edit_image(t, {"prompt": "give the fox a red scarf"}))
+    assert "edited" in r1 and os.path.isfile(rt._path("images/edited_fox.png")) and sent and sent[-1]["path"] == "images/edited_fox.png"
+    assert calls[-1]["parts"] == ["image"] and rt._last_image["t1"] == "images/edited_fox.png"   # chain: next edit targets the edit
+    r2 = asyncio.run(rt._edit_image(t, {"n": 2}, vary=True))
+    assert "varied" in r2 and len(sent[-1]["paths"]) == 2
+
+
+# ----------------------------------------------------------------- Rounds 7-8 (upscale / exact text on images)
+def _png(path, w=64, h=48, color=(30, 120, 200)):
+    from PIL import Image
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    Image.new("RGB", (w, h), color).save(path, "PNG")
+
+
+def test_upscale_image_doubles_and_quadruples(tmp_path, monkeypatch):
+    import asyncio
+    from PIL import Image
+    from app.runtime.agent import Runtime
+
+    async def pub(_): pass
+    rt = Runtime(str(tmp_path), pub)
+    import app.runtime.agent as _ag; monkeypatch.setattr(_ag, "WORKSPACE", os.path.realpath(str(tmp_path)))
+    sent = []
+    monkeypatch.setattr(rt, "_send_file", lambda t, a: asyncio.sleep(0, result=(sent.append(a) or "ok")))
+    monkeypatch.setattr(rt, "event", lambda *a, **k: asyncio.sleep(0))
+    _png(rt._path("images/cat.png"), 64, 48)
+    rt._last_image["t1"] = "images/cat.png"
+    r = asyncio.run(rt._upscale_image({"id": "t1"}, {}))                       # default 2x, latest image
+    assert "upscaled" in r and sent[-1]["path"] == "images/cat_x2.png"
+    with Image.open(rt._path("images/cat_x2.png")) as im:
+        assert im.size == (128, 96)
+    r4 = asyncio.run(rt._upscale_image({"id": "t1"}, {"path": "images/cat.png", "factor": 4}))
+    with Image.open(rt._path("images/cat_x4.png")) as im:
+        assert im.size == (256, 192)
+    assert rt._last_image["t1"] == "images/cat_x4.png"
+    _png(rt._path("images/huge.png"), 5000, 100)
+    assert "8192" in asyncio.run(rt._upscale_image({"id": "t1"}, {"path": "images/huge.png", "factor": 2}))   # capped, clear error
+    assert asyncio.run(rt._upscale_image({"id": "t9"}, {})).startswith("ERROR")                               # no image yet
+
+
+def test_caption_image_tool_calls_compose_with_exact_text(tmp_path, monkeypatch):
+    import asyncio
+    from app.runtime.agent import Runtime
+
+    async def pub(_): pass
+    rt = Runtime(str(tmp_path), pub)
+    import app.runtime.agent as _ag; monkeypatch.setattr(_ag, "WORKSPACE", os.path.realpath(str(tmp_path)))
+    sent, calls = [], []
+    monkeypatch.setattr(rt, "_send_file", lambda t, a: asyncio.sleep(0, result=(sent.append(a) or "ok")))
+    monkeypatch.setattr(rt, "event", lambda *a, **k: asyncio.sleep(0))
+
+    async def fake_sentinel(method, path, body, timeout=0):
+        calls.append((method, path, body))
+        return {"path": body["output"], "size": 1234, "width": 64, "height": 48, "font_px": 20}
+    monkeypatch.setattr(rt, "sentinel", fake_sentinel)
+    _png(rt._path("images/poster.png"))
+    rt._last_image["t1"] = "images/poster.png"
+    r = asyncio.run(rt._caption_image({"id": "t1"}, {"text": "双十一 大促 50% OFF", "position": "top", "band": True, "color": "gold"}))
+    assert "letter-perfect" in r and calls[-1][1] == "/internal/compose_image"
+    b = calls[-1][2]
+    assert b["image"] == "images/poster.png" and b["text"] == "双十一 大促 50% OFF" and b["position"] == "top" and b["band"] is True
+    assert b["output"] == "images/poster_text.png" and sent[-1]["path"] == "images/poster_text.png"
+    assert rt._last_image["t1"] == "images/poster_text.png"
+    assert asyncio.run(rt._caption_image({"id": "t1"}, {"text": ""})).startswith("ERROR")
+
+
+def test_compose_endpoint_renders_chinese_text_on_image(tmp_path, monkeypatch):
+    """Real end-to-end: the browser container's /compose draws exact (CJK) text onto a workspace PNG with headless Chromium."""
+    import asyncio, shutil
+    from PIL import Image
+    ws = tmp_path / "ws"; ws.mkdir()
+    monkeypatch.setenv("WORKSPACE", str(ws)); monkeypatch.setenv("BROWSER_TOKEN", "tkn"); monkeypatch.setenv("BROWSER_HEADLESS", "1")
+    import importlib, app.browser.main as bm
+    bm = importlib.reload(bm)
+    _png(str(ws / "images" / "bg.png"), 320, 200, (20, 20, 20))
+    from fastapi.testclient import TestClient
+    try:
+        with TestClient(bm.app) as c:
+            r = c.post("/compose", headers={"X-Browser-Token": "tkn"},
+                       json={"image": "images/bg.png", "text": "海报标题 Hello", "position": "bottom", "band": True, "color": "#ffffff"})
+    except Exception as e:   # no Chromium in this environment: the pipeline is covered by the tool test above
+        import pytest; pytest.skip(f"headless chromium unavailable: {str(e)[:80]}")
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert j["path"] == "images/bg_text.png" and j["width"] == 320 and j["height"] == 200 and j["font_px"] >= 14
+    with Image.open(ws / "images" / "bg_text.png") as im:
+        assert im.size == (320, 200)
+        px = im.convert("RGB").load()
+        # the bottom band area must now contain bright (text / band) pixels on the dark background
+        bright = sum(1 for x in range(0, 320, 4) for y in range(140, 200, 4) if sum(px[x, y]) > 300)
+        assert bright > 20
+    with TestClient(bm.app) as c:   # validation
+        assert c.post("/compose", headers={"X-Browser-Token": "tkn"}, json={"image": "images/nope.png", "text": "x"}).status_code == 404
+        assert c.post("/compose", headers={"X-Browser-Token": "tkn"}, json={"image": "images/bg.png", "text": ""}).status_code == 400
+
+
+# ----------------------------------------------------------------- Rounds 9-10 (practical outputs / safety & robustness)
+def test_make_image_tool_logo_transparent_jpeg_and_pdf_ready(tmp_path, monkeypatch):
+    import asyncio
+    from app.runtime.agent import Runtime
+    IG, calls, png = _fake_images_api(monkeypatch)
+
+    async def pub(_): pass
+    rt = Runtime(str(tmp_path), pub)
+    import app.runtime.agent as _ag; monkeypatch.setattr(_ag, "WORKSPACE", os.path.realpath(str(tmp_path)))
+    sent = []
+    monkeypatch.setattr(rt, "_send_file", lambda t, a: asyncio.sleep(0, result=(sent.append(a) or "ok")))
+    monkeypatch.setattr(rt, "event", lambda *a, **k: asyncio.sleep(0))
+    monkeypatch.setattr(rt.store, "settings", lambda: {"model_base_url": "http://x/v1", "image_model": "gpt-image-1", "llm_timeout": 60})
+    t = {"id": "t1"}
+    # logo on a transparent background: style preset expanded, transparency asked both as a parameter and in the prompt
+    r = asyncio.run(rt._make_image(t, {"prompt": "fox head mark", "style": "logo", "background": "transparent", "title": "fox-logo"}))
+    assert "shown in the chat" in r and os.path.isfile(rt._path("images/fox-logo.png")) and sent[-1]["path"] == "images/fox-logo.png"
+    assert calls[-1]["background"] == "transparent" and "logo design" in calls[-1]["prompt"] and "transparent background" in calls[-1]["prompt"]
+    # jpeg output gets a .jpg file; send=false returns a path the model can put into make_pdf Markdown
+    r2 = asyncio.run(rt._make_image(t, {"prompt": "sunset", "output_format": "jpeg", "send": False, "title": "sunset"}))
+    assert os.path.isfile(rt._path("images/sunset.jpg")) and "未发送" in r2 and calls[-1]["output_format"] == "jpeg"
+    assert len(sent) == 1                                   # send=false really didn't send
+    # a second image with the same title doesn't overwrite the first
+    asyncio.run(rt._make_image(t, {"prompt": "sunset 2", "output_format": "jpeg", "send": False, "title": "sunset"}))
+    assert os.path.isfile(rt._path("images/sunset-2.jpg"))
+    # the latest image is tracked for edit/vary/caption/upscale
+    assert rt._last_image["t1"] == "images/sunset-2.jpg"
+
+
+def test_image_tools_guard_paths_prompts_and_masks(tmp_path, monkeypatch):
+    import asyncio
+    from app.runtime.agent import Runtime
+    IG, calls, png = _fake_images_api(monkeypatch)
+
+    async def pub(_): pass
+    rt = Runtime(str(tmp_path), pub)
+    import app.runtime.agent as _ag; monkeypatch.setattr(_ag, "WORKSPACE", os.path.realpath(str(tmp_path)))
+    monkeypatch.setattr(rt, "_send_file", lambda t, a: asyncio.sleep(0, result="ok"))
+    monkeypatch.setattr(rt, "event", lambda *a, **k: asyncio.sleep(0))
+    monkeypatch.setattr(rt.store, "settings", lambda: {"model_base_url": "http://x/v1", "image_model": "gpt-image-1", "llm_timeout": 60})
+    t = {"id": "t1"}
+    # control characters stripped and the prompt capped, so a pasted blob can't break the request
+    asyncio.run(rt._make_image(t, {"prompt": "a\x00cat\x1b[31m" + "x" * 5000, "send": False}))
+    assert "\x00" not in calls[-1]["prompt"] and len(calls[-1]["prompt"]) <= 4100 and calls[-1]["prompt"].startswith("a cat")
+    # workspace escape attempts are refused with a clear message, never read
+    for bad in ("../../etc/passwd", "/etc/hostname"):
+        r = asyncio.run(rt._edit_image(t, {"path": bad, "prompt": "x"}))
+        assert r.startswith("ERROR") and ("工作区" in r or "not found" in r or "inside the workspace" in r)
+    # a non-image file is refused; a mask must be an image too
+    with open(rt._path("notes.txt"), "w") as f:
+        f.write("hi")
+    assert "not a PNG" in asyncio.run(rt._edit_image(t, {"path": "notes.txt", "prompt": "x"}))
+    _png(rt._path("images/a.png"))
+    assert "not a PNG" in asyncio.run(rt._edit_image(t, {"path": "images/a.png", "mask": "notes.txt", "prompt": "x"}))
+    # the not-configured path tells the model to stop, not retry
+    monkeypatch.setattr(rt.store, "settings", lambda: {"model_base_url": "", "image_model": "", "llm_timeout": 60})
+    r = asyncio.run(rt._make_image(t, {"prompt": "anything"}))
+    assert r.startswith("ERROR") and "do not retry" in r.lower().replace("不要重试", "do not retry")
+
+
+@pytest.mark.asyncio
+async def test_settings_test_image_endpoint(monkeypatch):
+    from app.runtime import main as rmain, imagegen
+    class Req:
+        def __init__(self, b): self._b = b
+        async def json(self): return self._b
+    async def fake_list(base):
+        return [{"id": "gpt-image-1"}, {"id": "gpt-4o"}]
+    monkeypatch.setattr(imagegen, "list_models", fake_list)
+    class _Store:
+        def settings(self): return {"model_base_url": "http://x/v1"}
+    class _RT:
+        store = _Store()
+    monkeypatch.setattr(rmain, "rt", _RT())
+    monkeypatch.delenv("OMUSE_IMAGE_API_KEY", raising=False)
+    r = await rmain.test_image(Req({"image_base_url": "https://api.openai.com/v1", "image_model": "gpt-image-1"}))
+    assert r["ok"] and r["model"] == "gpt-image-1" and r["base"] == "https://api.openai.com/v1" and r["listed"] is True
+    r = await rmain.test_image(Req({"image_base_url": "https://api.openai.com/v1", "image_model": "dall-e-9"}))
+    assert not r["ok"] and "dall-e-9" in r["error"]
+    r = await rmain.test_image(Req({"image_base_url": "", "image_model": ""}))   # auto-pick on the model endpoint
+    assert r["ok"] and r["model"] == "gpt-image-1"
+    monkeypatch.setenv("OMUSE_IMAGE_API_KEY", "k")
+    r = await rmain.test_image(Req({"image_model": "gpt-image-1"}))
+    assert r["key"] == "OMUSE_IMAGE_API_KEY"
+
+
+def test_image_size_header_parser(tmp_path):
+    from PIL import Image
+    from app.browser.main import _image_size
+    for fmt, ext in (("PNG", "png"), ("JPEG", "jpg"), ("WEBP", "webp"), ("GIF", "gif")):
+        p = tmp_path / f"t.{ext}"
+        Image.new("RGB", (321, 123), "red").save(p, fmt)
+        assert _image_size(str(p)) == (321, 123)
+    (tmp_path / "x.bin").write_bytes(b"not an image at all")
+    with pytest.raises(Exception):
+        _image_size(str(tmp_path / "x.bin"))
+
+
+def test_image_budget_per_task(tmp_path, monkeypatch):
+    """Round 10 follow-up: a task may generate only IMAGE_BUDGET_PER_TASK pictures (each call bills the user)."""
+    import asyncio
+    from app.runtime.agent import Runtime
+    import app.runtime.agent as _ag
+    IG, calls, png = _fake_edits_api(monkeypatch)
+    monkeypatch.setattr(_ag, "WORKSPACE", os.path.realpath(str(tmp_path)))
+    monkeypatch.setattr(_ag, "IMAGE_BUDGET_PER_TASK", 2)
+
+    async def pub(_): pass
+    rt = Runtime(str(tmp_path), pub)
+    sent = []
+    monkeypatch.setattr(rt, "_send_file", lambda t, a: asyncio.sleep(0, result=(sent.append(a) or "ok")))
+    monkeypatch.setattr(rt, "event", lambda *a, **k: asyncio.sleep(0))
+    monkeypatch.setattr(rt.store, "settings", lambda: {"model_base_url": "http://x/v1", "image_model": "gpt-image-1", "llm_timeout": 60})
+    _png(rt._path("images/fox.png"))
+    rt._last_image["tb1"] = "images/fox.png"
+    t = {"id": "tb1"}
+    assert "edited" in asyncio.run(rt._edit_image(t, {"prompt": "scarf"}))
+    assert "edited" in asyncio.run(rt._edit_image(t, {"prompt": "hat"}))
+    r3 = asyncio.run(rt._edit_image(t, {"prompt": "boots"}))
+    assert r3.startswith("ERROR") and "上限" in r3 and rt._img_count["tb1"] == 2
+    r4 = asyncio.run(rt._make_image(t, {"prompt": "a cat"}))
+    assert r4.startswith("ERROR") and "上限" in r4
+    assert "edited" in asyncio.run(rt._edit_image({"id": "tb2"}, {"path": "images/fox.png", "prompt": "x"}))   # other task: own budget
+
+
+def test_reply_compose_unfolds_folded_headers():
+    """E2E-1: a reply to a long thread has a References header folded over several lines; it must not crash."""
+    from app.sentinel.gmail import Gmail, _unfold
+    g = Gmail.__new__(Gmail)
+    g.email, g.display_name = "me@example.com", "Me"
+    folded = "<a@x.com>\r\n <b@x.com>\r\n\t<c@x.com>"
+    msg = g._compose("to@example.com", "", "hi", in_reply_to={"subject": "Invoice\r\n VAP-INV-1 - ACH failing",
+                                                            "message_id_header": "<d@x.com>", "references": folded})
+    assert msg["References"] == "<a@x.com> <b@x.com> <c@x.com> <d@x.com>"
+    assert msg["Subject"] == "Re: Invoice VAP-INV-1 - ACH failing" and msg["In-Reply-To"] == "<d@x.com>"
+    assert _unfold(None) == ""
+
+
+def test_relaunch_after_idle_shutdown_does_not_keep_stale_display(monkeypatch):
+    """0.2.74 regression (E2E-3): after the idle teardown killed our Xvfb, DISPLAY stayed exported, the next start chose
+    headed mode with no X server and every Chromium launch failed. Teardown must drop DISPLAY; a stale one is ignored."""
+    import asyncio, time
+    m, launches = _fake_pw(monkeypatch)
+    monkeypatch.setattr(m, "HEADLESS_ENV", "")        # auto mode: decide by Xvfb availability
+    monkeypatch.delenv("DISPLAY", raising=False)
+    b = m.Broker()
+    starts = []
+
+    class FakeX:
+        def terminate(self): pass
+        def poll(self): return None
+
+    def fake_start():
+        starts.append(1)
+        os.environ["DISPLAY"] = ":99"; b._own_display = ":99"; b.xvfb = FakeX()
+        return True
+    monkeypatch.setattr(b, "_start_xvfb", fake_start)
+
+    async def go():
+        await b.page_for("t1")                   # first use: Xvfb started, headed
+        assert b.headless is False and os.environ.get("DISPLAY") == ":99"
+        b.finished["t1"] = 0.0; b.last_activity = time.time() - 10_000
+        await b.teardown()
+        assert "DISPLAY" not in os.environ        # our DISPLAY went away with our Xvfb
+        await b.page_for("t2")                   # relaunch: Xvfb started again, not "headed without X"
+    asyncio.run(go())
+    assert len(starts) == 2 and b.headless is False and launches["ctx"] == 2
+    # a DISPLAY inherited from the environment that points at no X socket is not trusted either
+    b2 = m.Broker(); monkeypatch.setattr(b2, "_start_xvfb", lambda: False)
+    os.environ["DISPLAY"] = ":77"
+    asyncio.run(b2.ensure_pw())
+    assert b2.headless is True
+    os.environ.pop("DISPLAY", None)
 
 
 def test_subscription_needs_all_three_stripe_vars(monkeypatch):

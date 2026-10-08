@@ -30,6 +30,16 @@ WORKSPACE = os.path.realpath(os.environ.get("WORKSPACE", "/workspace"))
 # ("This browser may not be secure"), which breaks "Sign in with Google" during a user takeover.
 HEADLESS_ENV = os.environ.get("BROWSER_HEADLESS", "")          # "1" force headless, "0" force headed, "" auto
 VIEWPORT = {"width": 1280, "height": 800}
+# Be a polite client, not a hammering one: a minimum gap between requests to the same site, with a little jitter, and a
+# longer cool-off after that site returns a block / 429. This lowers rate-triggered blocks; it is NOT fingerprint evasion.
+PACE_GAP = float(os.environ.get("BROWSER_PACE_GAP", "1.3"))     # min seconds between hits to one registered domain
+PACE_JITTER = 0.6                                               # up to this much extra, random
+PACE_MAX_WAIT = 8.0                                             # never pace-wait longer than this on one request
+PACE_BLOCK_HOLD = 45.0                                          # after a block / 429 on a site, hold further hits this long
+# Lazy Chromium: it is NOT launched at startup (that held ~2 GB even on an idle install, which OOM-crashed small
+# boxes). It starts on the first real web action and is shut down again after this many idle seconds (0 disables the
+# idle shutdown but keeps the lazy start). PDF/chart rendering use a separate small headless Chromium, unaffected.
+IDLE_SHUTDOWN = float(os.environ.get("BROWSER_IDLE_SHUTDOWN", "600"))   # close the browser after 10 min idle
 UA_ENV = os.environ.get("BROWSER_UA", "")
 UA_HEADLESS = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
 BLOCKED_EXT = {".exe", ".msi", ".dmg", ".pkg", ".app", ".bat", ".cmd", ".com", ".scr", ".sh", ".ps1", ".vbs", ".jar",
@@ -57,6 +67,28 @@ def format_feed(feed: dict, url: str) -> str:
     return "\n".join(out)
 
 
+_LOADING = re.compile(r"^\s*(?:\[e\d+\]\s*)?(?:\w+\s+\")?(?:Loading(?:\.{1,3}|…)?|加载中(?:\.{1,3}|…)?|正在加载(?:\.{1,3}|…)?)\"?\s*$", re.M | re.I)
+
+_CC_SLD2 = {"com", "co", "net", "org", "gov", "edu", "ac"}
+
+
+def reg_domain(url: str) -> str:
+    """The registered domain used for pacing — decathlon.sg, amazon.com.sg → one key per site."""
+    try:
+        host = (urlparse(url if "://" in (url or "") else "https://" + (url or "")).hostname or "").lower().strip(".")
+    except Exception:
+        return ""
+    parts = [p for p in host.split(".") if p]
+    if len(parts) >= 3 and len(parts[-1]) == 2 and parts[-2] in _CC_SLD2:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+
+def _display_alive(disp: str) -> bool:
+    """True when an X server socket exists for DISPLAY (":99" -> /tmp/.X11-unix/X99); a stale DISPLAY must not pick headed mode."""
+    n = str(disp or "").split(".")[0].lstrip(":")
+    return bool(n) and (os.path.exists(f"/tmp/.X11-unix/X{n}") or not n.isdigit())
+
+
 class Broker:
     def __init__(self):
         self.pw = None
@@ -77,40 +109,132 @@ class Broker:
         self.finished: dict[str, float] = {}     # task_id -> when the task ended (its page may be recycled)
         self.temp_pages: set = set()             # short-lived pages of browser_search / browser_read (not a task's page)
         self.last_used: dict[str, float] = {}
+        self.domain_at: dict[str, float] = {}     # registered domain -> when it was last requested (pacing)
+        self.domain_hold: dict[str, float] = {}   # registered domain -> don't hit before this time (block / 429 cool-off)
         self.parent: dict = {}                    # popup page -> opener page (e.g. "Sign in with Google" windows)
         self.xvfb = None
         self.headless = True
+        self.started = False                     # is the persistent Chromium (self.ctx) currently up?
+        self.last_activity = 0.0                 # last real web action, for the idle-shutdown reaper
 
+    async def ensure_pw(self):
+        """Start just the Playwright driver (a lightweight node process). Needed by PDF/chart rendering, which launch
+        their own small headless Chromium, and by ensure_ctx(). Cheap compared with the persistent browser."""
+        if self.pw is not None:
+            return
+        async with self.lock:
+            if self.pw is not None:
+                return
+            if HEADLESS_ENV == "1":
+                self.headless = True
+            elif HEADLESS_ENV == "0" or (os.environ.get("DISPLAY") and _display_alive(os.environ["DISPLAY"])):
+                self.headless = False
+            else:
+                self.headless = not self._start_xvfb()   # must happen before the Playwright driver starts (env)
+            self.pw = await async_playwright().start()
+
+    async def ensure_ctx(self):
+        """Start the persistent Chromium (self.ctx) on demand — the heavy, ~2 GB part. Idempotent and safe to call on
+        every web action; if the browser is already up it returns at once. Launching here (not at startup) is what lets
+        an idle install sit at near-zero memory instead of OOM-crashing small boxes."""
+        if self.started and self.ctx is not None:
+            return
+        await self.ensure_pw()
+        async with self.lock:
+            if self.started and self.ctx is not None:
+                return
+            os.makedirs(PROFILE_DIR, exist_ok=True)
+            for lock in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+                try:
+                    os.remove(os.path.join(PROFILE_DIR, lock))
+                except FileNotFoundError:
+                    pass
+            kw = {"env": dict(os.environ)}
+            ua = UA_ENV or (UA_HEADLESS if self.headless else "")
+            if ua:
+                kw["user_agent"] = ua
+            self.ctx = await self.pw.chromium.launch_persistent_context(
+                PROFILE_DIR, headless=self.headless, viewport=VIEWPORT, accept_downloads=True, locale="en-US",
+                ignore_default_args=["--enable-automation"],
+                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled",
+                      "--window-size=1280,900", "--no-first-run", "--no-default-browser-check", "--password-store=basic"],
+                **kw,
+            )
+            print(f"[browser] chromium started headless={self.headless} display={os.environ.get('DISPLAY', '')}", flush=True)
+            await self.ctx.route("**/*", self._egress_filter)
+            self.ctx.on("page", self._on_page)
+            for p in self.ctx.pages:
+                self._on_page(p)
+            self.started = True
+            self.last_activity = time.time()
+
+    # backwards-compatible alias (tests / any external caller): start == bring the persistent browser up
     async def start(self):
-        if HEADLESS_ENV == "1":
-            self.headless = True
-        elif HEADLESS_ENV == "0" or os.environ.get("DISPLAY"):
-            self.headless = False
-        else:
-            self.headless = not self._start_xvfb()   # must happen before the Playwright driver starts (env)
-        self.pw = await async_playwright().start()
-        os.makedirs(PROFILE_DIR, exist_ok=True)
-        for lock in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+        await self.ensure_ctx()
+
+    def touch(self):
+        """Mark a real web action, so the idle-shutdown reaper doesn't close the browser while it's in use."""
+        self.last_activity = time.time()
+
+    def _idle_ok(self) -> bool:
+        """True when it is safe to shut the persistent browser down: agent mode, nobody taking over or waiting, the
+        user isn't watching a pinned view, no task page is still live, and we've been idle past the threshold."""
+        if not self.started or IDLE_SHUTDOWN <= 0:
+            return False
+        if self.mode == "user" or self.takeover_task or self.requests:
+            return False
+        now = time.time()
+        if now < self.view_pinned_until:
+            return False
+        for k, p in self.pages.items():
             try:
-                os.remove(os.path.join(PROFILE_DIR, lock))
-            except FileNotFoundError:
+                if k not in self.finished and not p.is_closed():
+                    return False
+            except Exception:
                 pass
-        kw = {"env": dict(os.environ)}
-        ua = UA_ENV or (UA_HEADLESS if self.headless else "")
-        if ua:
-            kw["user_agent"] = ua
-        self.ctx = await self.pw.chromium.launch_persistent_context(
-            PROFILE_DIR, headless=self.headless, viewport=VIEWPORT, accept_downloads=True, locale="en-US",
-            ignore_default_args=["--enable-automation"],
-            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled",
-                  "--window-size=1280,900", "--no-first-run", "--no-default-browser-check", "--password-store=basic"],
-            **kw,
-        )
-        print(f"[browser] chromium started headless={self.headless} display={os.environ.get('DISPLAY', '')}", flush=True)
-        await self.ctx.route("**/*", self._egress_filter)
-        self.ctx.on("page", self._on_page)
-        for p in self.ctx.pages:
-            self._on_page(p)
+        return (now - self.last_activity) > IDLE_SHUTDOWN
+
+    async def teardown(self):
+        """Release the persistent Chromium (and the driver / Xvfb) so an idle install drops back to near-zero memory.
+        The next web action calls ensure_ctx() and brings it back. Guarded by the same lock as startup."""
+        async with self.lock:
+            if not self._idle_ok():   # a task grabbed the browser between the reaper's check and this lock
+                return
+            ctx, self.ctx, self.started = self.ctx, None, False
+            self.pages.clear(); self.frame_maps.clear(); self.last_used.clear()
+            self.finished.clear(); self.temp_pages.clear(); self.parent.clear(); self.nav_status.clear()
+            self.view_task = ""
+            if ctx is not None:
+                try:
+                    await ctx.close()
+                except Exception:
+                    pass
+            pb = _pdf.get("browser")
+            if pb is not None:
+                try:
+                    await pb.close()
+                except Exception:
+                    pass
+                _pdf["browser"] = None
+            pw, self.pw = self.pw, None
+            if pw is not None:
+                try:
+                    await pw.stop()
+                except Exception:
+                    pass
+            if self.xvfb is not None:
+                try:
+                    self.xvfb.terminate()
+                except Exception:
+                    pass
+                self.xvfb = None
+                # the DISPLAY we exported for our own Xvfb must go with it: left behind, the next ensure_pw() would
+                # pick "headed" mode with no X server and every Chromium launch would fail (0.2.74 regression)
+                if os.environ.get("DISPLAY") == self._own_display:
+                    os.environ.pop("DISPLAY", None)
+            print("[browser] chromium shut down (idle)", flush=True)
+
+    _own_display: str = ""
 
     def _start_xvfb(self) -> bool:
         if not shutil.which("Xvfb"):
@@ -130,6 +254,7 @@ class Broker:
         for _ in range(50):
             if os.path.exists(f"/tmp/.X11-unix/X{n}"):
                 os.environ["DISPLAY"] = disp
+                self._own_display = disp
                 return True
             if self.xvfb.poll() is not None:
                 return False
@@ -138,9 +263,11 @@ class Broker:
 
     async def stop(self):
         try:
-            await self.ctx.close()
+            if self.ctx is not None:
+                await self.ctx.close()
         finally:
-            await self.pw.stop()
+            if self.pw is not None:
+                await self.pw.stop()
             if self.xvfb:
                 self.xvfb.terminate()
 
@@ -230,6 +357,11 @@ class Broker:
     # ------------------------------------------------------------ pages
     async def page_for(self, task_id: str, create=True):
         task_id = task_id or "default"
+        if create:
+            await self.ensure_ctx()
+        elif not self.started:
+            return None
+        self.touch()
         p = self.pages.get(task_id)
         if p is not None and not p.is_closed():
             self.last_used[task_id] = time.time()
@@ -302,7 +434,51 @@ class Broker:
             pass
         await asyncio.sleep(ms / 1000)
 
+    def pace_wait(self, url: str, now: float | None = None) -> float:
+        """How long to wait before hitting this site, so we don't hammer it (pure function, for testing)."""
+        import random
+        dom = reg_domain(url)
+        if not dom:
+            return 0.0
+        now = now if now is not None else time.time()
+        hold = self.domain_hold.get(dom, 0.0)
+        if hold > now:
+            return min(hold - now, PACE_MAX_WAIT)
+        last = self.domain_at.get(dom, 0.0)
+        gap = PACE_GAP + random.random() * PACE_JITTER
+        return max(0.0, min(last + gap - now, PACE_MAX_WAIT))
+
+    async def pace(self, url: str):
+        w = self.pace_wait(url)
+        if w > 0:
+            await asyncio.sleep(w)
+        dom = reg_domain(url)
+        if dom:
+            self.domain_at[dom] = time.time()
+
+    def note_block(self, url: str):
+        """A site returned a bot wall / 429: cool off before hitting it again this session."""
+        dom = reg_domain(url)
+        if dom:
+            self.domain_hold[dom] = time.time() + PACE_BLOCK_HOLD
+
     async def snapshot(self, task_id: str, max_chars=12000, near: bool = False) -> dict:
+        """The page as text. A list still showing "Loading..." gets up to ~8 s more (2026-10-06 golden G04: decathlon.sg's
+        search results were still loading, the agent re-opened the URL five times and gave up)."""
+        snap = await self._snapshot_once(task_id, max_chars, near)
+        for _ in range(2):
+            if snap.get("feed") or not _LOADING.search(snap.get("snapshot") or ""):
+                break
+            page = await self.page_for(task_id)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=3000)
+            except Exception:
+                pass
+            await asyncio.sleep(1.0)
+            snap = await self._snapshot_once(task_id, max_chars, near)
+        return snap
+
+    async def _snapshot_once(self, task_id: str, max_chars=12000, near: bool = False) -> dict:
         page = await self.page_for(task_id)
         await self.settle(page, 200)
         try:
@@ -613,11 +789,34 @@ class Broker:
 broker = Broker()
 
 
+async def _idle_reaper():
+    """Shut the persistent Chromium down after it has been idle, so an unused install doesn't hold ~2 GB."""
+    while True:
+        try:
+            await asyncio.sleep(60)
+            if broker._idle_ok():
+                await broker.teardown()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"[browser] idle reaper error: {str(e)[:150]}", flush=True)
+
+
 @asynccontextmanager
 async def lifespan(app):
-    await broker.start()
-    yield
-    await broker.stop()
+    # Chromium is NOT launched here anymore — it starts lazily on the first web action (ensure_ctx). The browser
+    # service itself stays up and /health answers immediately, so the pod is Ready even before/without a browser.
+    reaper = asyncio.create_task(_idle_reaper()) if IDLE_SHUTDOWN > 0 else None
+    try:
+        yield
+    finally:
+        if reaper is not None:
+            reaper.cancel()
+            try:
+                await reaper
+            except (asyncio.CancelledError, Exception):
+                pass
+        await broker.stop()
 
 
 app = FastAPI(lifespan=lifespan, title="OMuse Browser Broker")
@@ -630,7 +829,7 @@ def auth(x_browser_token: str | None = Header(default=None)):
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "mode": broker.mode, "headless": broker.headless}
+    return {"ok": True, "mode": broker.mode, "headless": broker.headless, "started": broker.started}
 
 
 # ================================================================== local PDF export
@@ -669,6 +868,8 @@ def _img_data(base_dir: str):
 
 
 async def _print_pdf(doc: str) -> bytes:
+    await broker.ensure_pw()
+    broker.touch()
     async with _pdf["lock"]:
         b = _pdf["browser"]
         if b is None or not b.is_connected():
@@ -747,6 +948,8 @@ async def make_png(req: Request):
     if not out_rel.lower().endswith(".png"):
         out_rel += ".png"
     op = _ws(out_rel)
+    await broker.ensure_pw()
+    broker.touch()
     async with _pdf["lock"]:
         br = _pdf["browser"]
         if br is None or not br.is_connected():
@@ -769,6 +972,154 @@ async def make_png(req: Request):
     with open(op, "wb") as f:
         f.write(data)
     return {"path": os.path.relpath(op, WORKSPACE), "size": len(data)}
+
+
+# ================================================================== compose: exact text on an image (Round 8)
+def _css_color(s: str, default: str) -> str:
+    s = str(s or "").strip()
+    return s if re.fullmatch(r"#[0-9a-fA-F]{3,8}|[a-zA-Z]{3,20}|rgba?\([0-9., %]+\)", s) else default
+
+
+def _image_size(path: str) -> tuple[int, int]:
+    """(width, height) from the file header of a PNG / JPEG / GIF / WebP — no imaging library needed."""
+    import struct
+    with open(path, "rb") as f:
+        head = f.read(32)
+        if head[:8] == b"\x89PNG\r\n\x1a\n":
+            w, h = struct.unpack(">II", head[16:24])
+            return int(w), int(h)
+        if head[:6] in (b"GIF87a", b"GIF89a"):
+            w, h = struct.unpack("<HH", head[6:10])
+            return int(w), int(h)
+        if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+            tag = head[12:16]
+            f.seek(12)
+            chunk = f.read(30)
+            if tag == b"VP8X":
+                w = 1 + int.from_bytes(chunk[12:15], "little"); h = 1 + int.from_bytes(chunk[15:18], "little")
+                return w, h
+            if tag == b"VP8L":
+                b0, b1, b2, b3 = chunk[9:13]
+                return 1 + (((b1 & 0x3F) << 8) | b0), 1 + (((b3 & 0xF) << 10) | (b2 << 2) | ((b1 & 0xC0) >> 6))
+            if tag == b"VP8 ":
+                w, h = struct.unpack("<HH", chunk[14:18])
+                return int(w & 0x3FFF), int(h & 0x3FFF)
+        if head[:2] == b"\xff\xd8":
+            f.seek(2)
+            while True:
+                marker = f.read(2)
+                if len(marker) < 2 or marker[0] != 0xFF:
+                    break
+                m = marker[1]
+                if m in (0xD8, 0x01) or 0xD0 <= m <= 0xD7:
+                    continue
+                (ln,) = struct.unpack(">H", f.read(2))
+                if m in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                    data = f.read(5)
+                    h, w = struct.unpack(">HH", data[1:5])
+                    return int(w), int(h)
+                f.seek(ln - 2, 1)
+    try:
+        from PIL import Image as _Img
+        with _Img.open(path) as im:
+            return im.size
+    except ImportError:
+        raise ValueError("unsupported image format (png/jpeg/gif/webp only)")
+
+
+
+@app.post("/compose", dependencies=[Depends(auth)])
+async def compose_image(req: Request):
+    """Overlay exact text on a workspace image and save a PNG: JavaScript off, no network, the image is loaded from the
+    workspace file, the text is laid out by the browser's own (CJK-capable) fonts, then the composed element is
+    screenshotted at 1:1. Image models misspell text; this guarantees the letters a poster / caption / wordmark needs."""
+    import html as _html
+    b = await req.json()
+    src = _ws(str(b.get("image") or ""))
+    if not os.path.isfile(src):
+        raise HTTPException(404, "图片不存在 image not found")
+    text = str(b.get("text") or "").strip()
+    if not text or len(text) > 400:
+        raise HTTPException(400, "需要 1-400 字的文字 text required (1-400 chars)")
+    pos = str(b.get("position") or "bottom").lower()
+    if pos not in ("top", "bottom", "center", "top-left", "top-right", "bottom-left", "bottom-right"):
+        pos = "bottom"
+    try:
+        size = int(b.get("size") or 0)
+    except (TypeError, ValueError):
+        size = 0
+    if size:
+        size = max(12, min(size, 400))   # a given size is clamped; 0 = auto-size below
+    color = _css_color(b.get("color"), "#ffffff")
+    band = _css_color(b.get("band"), "") if b.get("band") not in (None, "", False) else ""
+    if b.get("band") is True:
+        band = "rgba(0,0,0,0.45)"
+    weight = str(b.get("weight") or "700")
+    if weight not in ("300", "400", "500", "600", "700", "800", "900"):
+        weight = "700"
+    align = str(b.get("align") or ("center" if pos in ("top", "bottom", "center") else ("left" if "left" in pos else "right"))).lower()
+    if align not in ("left", "center", "right"):
+        align = "center"
+    font = str(b.get("font") or "").strip()[:80]
+    try:
+        pad = max(0, min(int(b.get("padding") or 24), 200))
+    except (TypeError, ValueError):
+        pad = 24
+    out_rel = str(b.get("output") or "")
+    if not out_rel:
+        stem, _ = os.path.splitext(os.path.relpath(src, WORKSPACE))
+        out_rel = stem + "_text.png"
+    if not out_rel.lower().endswith(".png"):
+        out_rel += ".png"
+    op = _ws(out_rel)
+    # size the text to the picture when not given: ~1/12 of the shorter side, smaller for long text
+    try:
+        w, h = _image_size(src)   # header parse, no Pillow (the playwright image does not ship it)
+    except Exception as e:
+        raise HTTPException(400, f"无法读取图片 cannot read image: {str(e)[:100]}")
+    if not size:
+        size = max(14, int(min(w, h) / 12 * (1.0 if len(text) <= 16 else 0.75 if len(text) <= 40 else 0.55)))
+    v = "top" if pos.startswith("top") else "bottom" if pos.startswith("bottom") else "center"
+    just = {"top": "flex-start", "bottom": "flex-end", "center": "center"}[v]
+    fam = (_html.escape(font) + ", ") if font else ""
+    cap_bg = f"background:{band};" if band else ""
+    page_html = f"""<!doctype html><html><head><meta charset="utf-8"><style>
+html,body{{margin:0;background:#fff}}
+#w{{position:relative;width:{w}px;height:{h}px;overflow:hidden}}
+#w img{{display:block;width:{w}px;height:{h}px}}
+#c{{position:absolute;left:0;top:0;width:{w}px;height:{h}px;display:flex;flex-direction:column;justify-content:{just};align-items:stretch;box-sizing:border-box;padding:{pad}px}}
+#t{{{cap_bg}color:{color};font:{weight} {size}px/1.25 {fam}"Noto Sans CJK SC","Noto Sans SC","PingFang SC","Microsoft YaHei","Helvetica Neue",Arial,sans-serif;text-align:{align};padding:{int(size*0.35)}px {int(size*0.6)}px;white-space:pre-wrap;word-break:break-word;text-shadow:{'none' if band else '0 2px 6px rgba(0,0,0,.6), 0 0 2px rgba(0,0,0,.8)'};border-radius:{int(size*0.25)}px}}
+</style></head><body><div id="w"><img src="file://{src}"><div id="c"><div id="t">{_html.escape(text)}</div></div></div></body></html>"""
+    tmp = os.path.join("/tmp", f"compose_{int(time.time()*1000)}_{os.getpid()}.html")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(page_html)
+    await broker.ensure_pw()
+    broker.touch()
+    async with _pdf["lock"]:
+        br = _pdf["browser"]
+        if br is None or not br.is_connected():
+            br = _pdf["browser"] = await broker.pw.chromium.launch(headless=True)
+        ctx = await br.new_context(java_script_enabled=False, device_scale_factor=1, viewport={"width": w, "height": h})
+        try:
+            async def block(route):
+                if route.request.url.startswith(("file://", "data:")):
+                    await route.continue_()
+                else:
+                    await route.abort()
+            await ctx.route("**/*", block)
+            page = await ctx.new_page()
+            await page.goto("file://" + tmp, wait_until="load", timeout=30000)
+            data = await page.locator("#w").screenshot(type="png", timeout=30000)
+        finally:
+            await ctx.close()
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+    os.makedirs(os.path.dirname(op), exist_ok=True)
+    with open(op, "wb") as f:
+        f.write(data)
+    return {"path": os.path.relpath(op, WORKSPACE), "size": len(data), "width": w, "height": h, "font_px": size}
 
 
 # ================================================================== fast search / read (no snapshot round trips)
@@ -800,6 +1151,8 @@ READ_JS = r"""(limit) => {
 
 
 async def _temp_page():
+    await broker.ensure_ctx()
+    broker.touch()
     p = await broker.ctx.new_page()
     broker.temp_pages.add(p)
     return p
@@ -845,6 +1198,7 @@ async def web_read(urls: list[str], limit: int = 6000) -> dict:
             return {"url": u, "error": why}
         p = await _temp_page()
         try:
+            await broker.pace(u)
             resp = await p.goto(u, wait_until="domcontentloaded", timeout=25000)
             await asyncio.sleep(1.2)
             r = await p.evaluate(READ_JS, limit)
@@ -854,6 +1208,7 @@ async def web_read(urls: list[str], limit: int = 6000) -> dict:
                 blk = None
             if blk:
                 r["blocked"] = blk
+                broker.note_block(u)
             r["status"] = resp.status if resp else 0
             return r
         except Exception as e:
@@ -872,6 +1227,8 @@ async def web_read(urls: list[str], limit: int = 6000) -> dict:
 async def agent_action(action: str, req: Request):
     body = await req.json()
     task_id = body.get("task_id") or "default"
+    await broker.ensure_ctx()   # every agent web action needs the persistent browser (lazy start)
+    broker.touch()
     if action == "describe":
         return await broker.describe(task_id, body.get("ref", ""))
     if action == "page_text":   # Sentinel: the order total shown on the page before a pre-approved "Place order" click
@@ -930,13 +1287,23 @@ async def agent_action(action: str, req: Request):
                 ok, why = check_url(url)
                 if not ok:
                     raise HTTPException(403, why)
+                await broker.pace(url)
                 try:
                     resp = await page.goto(url, wait_until="domcontentloaded", timeout=45000)
                     broker.nav_status[task_id] = resp.status if resp else 0
                 except Exception as e:
                     if "ERR_BLOCKED_BY_CLIENT" in str(e):
                         raise HTTPException(403, "该地址被安全策略拦截 (blocked by egress policy)")
-                    raise HTTPException(502, f"打开页面失败 navigation failed: {str(e)[:200]}")
+                    # a plain load timeout is often transient: wait a moment and try once more before giving up
+                    if "imeout" in str(e):
+                        try:
+                            await asyncio.sleep(2.0)
+                            resp = await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                            broker.nav_status[task_id] = resp.status if resp else 0
+                        except Exception as e2:
+                            raise HTTPException(502, f"打开页面失败 navigation failed (retried once): {str(e2)[:180]}")
+                    else:
+                        raise HTTPException(502, f"打开页面失败 navigation failed: {str(e)[:200]}")
                 await broker.settle(page, 1200)
             elif action == "snapshot":
                 pass
@@ -1067,6 +1434,7 @@ async def agent_action(action: str, req: Request):
                 blk = None
             if blk:
                 snap["blocked"] = blk
+                broker.note_block(snap.get("url") or page.url)
         return snap
 
 

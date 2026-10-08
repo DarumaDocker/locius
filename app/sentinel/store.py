@@ -27,6 +27,10 @@ CREATE TABLE IF NOT EXISTS task_ctx (
 CREATE TABLE IF NOT EXISTS purchases (
     id TEXT PRIMARY KEY, task_id TEXT, domain TEXT, card_item TEXT, max_total REAL, currency TEXT, summary TEXT,
     clicks_left INTEGER, fills_left INTEGER, created_at REAL, expires_at REAL, status TEXT);
+CREATE TABLE IF NOT EXISTS ledger (
+  id TEXT PRIMARY KEY, task_id TEXT, purchase_id TEXT, approval_id TEXT, merchant TEXT, order_number TEXT, items TEXT,
+  total REAL, currency TEXT, card TEXT, delivery TEXT, status TEXT, evidence TEXT, history TEXT, created_at REAL,
+  updated_at REAL);
 CREATE TABLE IF NOT EXISTS user_requests (
   task_id TEXT PRIMARY KEY, text TEXT, created_at REAL
 );

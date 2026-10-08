@@ -786,8 +786,57 @@ def calendar_event(store, event_id: str, calendar_id=None) -> dict:
         g.close()
 
 
+_CAL_AUTH_HINTS = ("invalid_grant", "过期", "撤销", "尚未连接", "not connected", "managed client missing",
+                   "重新连接", "refresh", "unauthor", "401", "access_denied", "没有返回 refresh")
+
+
+def _cal_auth_problem(msg: str) -> bool:
+    m = str(msg).lower()
+    return any(h.lower() in m for h in _CAL_AUTH_HINTS)
+
+
+def _cal_link_result(args: dict, tz: str, reason: str) -> dict:
+    """日历连不上时的兜底：生成一键『添加到日历』链接，交给 Agent 发给用户。"""
+    from app.sentinel import gcal
+    links = gcal.add_to_calendar_links(args, tz)
+    return {"created": False, "method": "add_link", "add_to_calendar": links,
+            "note": ("日历未连接或授权失效，没有直接写入日历。已生成一键『添加到日历』链接——"
+                     "请把 add_to_calendar.google 链接发给用户，用户点一下即可把事件加入日历"
+                     "（Outlook 用户用 add_to_calendar.outlook）。这不是错误，不要重试，直接把链接给用户。"),
+            "reason": str(reason)[:200]}
+
+
+def calendar_create_or_link(store, args: dict) -> dict:
+    """Create via the Calendar API when connected; otherwise (or on auth failure) return a one-click add link."""
+    from app.sentinel.gcal import GCalError
+    tz = "UTC"
+    try:
+        tz = ((store.connection("calendar") or {}).get("config") or {}).get("time_zone") or tz
+    except Exception:
+        pass
+    try:
+        g = calendar_client(store)
+    except ActionError as e:
+        if _cal_auth_problem(str(e)):
+            return _cal_link_result(args, tz, str(e))
+        raise
+    try:
+        return g.create_event(args)
+    except GCalError as e:
+        if _cal_auth_problem(str(e)):
+            return _cal_link_result(args, tz, str(e))
+        raise ActionError(str(e))
+    finally:
+        try:
+            g.close()
+        except Exception:
+            pass
+
+
 def calendar_call(store, tool: str, args: dict, task_id: str) -> dict:
     from app.sentinel.gcal import GCalError
+    if tool == "calendar_create_event":
+        return calendar_create_or_link(store, args)
     g = calendar_client(store)
     try:
         if tool == "calendar_list_events":
@@ -798,8 +847,6 @@ def calendar_call(store, tool: str, args: dict, task_id: str) -> dict:
         if tool == "calendar_free_slots":
             return g.free_slots(args.get("time_min"), args.get("time_max"), int(args.get("duration_minutes") or 30),
                                 str(args.get("day_start") or "09:00"), str(args.get("day_end") or "18:00"))
-        if tool == "calendar_create_event":
-            return g.create_event(args)
         if tool == "calendar_update_event":
             return g.update_event(args)
         if tool == "calendar_delete_event":

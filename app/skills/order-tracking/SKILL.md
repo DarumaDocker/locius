@@ -4,6 +4,10 @@ description: 定期检查订单/网页状态变化并通知 Monitor an order or 
 ---
 # Order / page monitoring / 订单监控
 
+Orders OMuse placed itself are in the ledger: call **orders_list** first ("那个订单", "my socks order", cancel, return,
+where is it). Use exactly that merchant and order number — never pick an order from another shop's emails. The ledger is
+also updated from the merchants' emails every few hours (shipped / delivered / refunded).
+
 Setup (when the user asks "每天检查…如果…告诉我"):
 1. Confirm the URL or how to find the order (email search or site). Do one check now to see the current state.
 2. Call schedule_create with a clear goal that includes the URL and the condition, e.g.

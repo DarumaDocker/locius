@@ -25,8 +25,8 @@ spec:
 
     Runs on the local models served by your Olares by default — any OpenAI-compatible endpoint works. English and 中文 interface.
   upgradeDescription: |
-    0.2.65: Going to checkout and moving between checkout steps no longer asks for approval; the one purchase confirmation covers the order. Browser takeover no longer waits on a stuck agent action; typing works right after taking over, including Chinese input methods; scrolling no longer delays clicks and keys; card number, expiry and CVC boxes in separate payment iframes are all found and typed key by key
-    0.2.64: One approval for a whole purchase: confirm item, total, card and delivery once, then checkout, card fill and place-order go through (30 min, same site, total checked); learned form habits such as phone formats are remembered
-    0.2.63: Follow-ups see what an earlier (even cancelled) task did; cancelling or returning an order always needs its own approval; address and store steps at checkout are not payments; clickable text gets a ref
-    0.2.62: Money answers must come from calculate (also without a prior calculation); answers that correct themselves half-way are rewritten; shopping lists match size and quantity
-    0.2.61: Shopping: cheapest-item searches skip accessories; a login wall no longer stops the read-only part of a shopping task
+    0.2.76: Fixes: browser relaunch after idle shutdown; reply drafts on long threads; caption without Pillow; per-task image budget
+    0.2.75: Images: make_image (text-to-image via any OpenAI-Images-compatible endpoint: Olares Router / gpt-image-1 / DALL-E / FLUX / SD; auto model pick, aspect/size fallbacks, styles, negative prompt, transparent background, formats), edit_image (inpainting by mask, prompt edits, reference images), vary_image (variations), caption_image (letter-perfect text on images, CJK), upscale_image (2x/4x local); clear not-configured / moderation / timeout handling
+    0.2.74: Browser: Chromium now launches lazily on first web use and shuts down after idle, instead of holding ~2GB at startup (fixes OOM crashes on small-RAM boxes); browser service stays up and healthy even if Chromium cannot start
+    0.2.73: Calendar: when Google Calendar is not connected or sign-in expired, calendar_create_event returns a one-tap add-to-calendar link instead of erroring
+    0.2.72: Fix OR email search on non-Gmail mailboxes; clearer calendar access-denied message; internal step budgets no longer surfaced to users

@@ -115,7 +115,7 @@ const S = {
 const VIEWS = [
   ['chat', '💬', T('对话'), 'Chat'], ['tasks', '🗂', T('任务'), 'Tasks'], ['browser', '🌐', T('浏览器'), 'Browser'],
   ['schedules', '⚡', T('自动化'), 'Automations'], ['connections', '🔌', T('连接'), 'Connections'], ['memory', '🧠', T('记忆'), 'Memory'],
-  ['activity', '📜', T('活动审计'), 'Audit'], ['settings', '⚙️', T('设置'), 'Settings'],
+  ['trust', '📈', T('可信度'), 'Trust'], ['activity', '📜', T('活动审计'), 'Audit'], ['settings', '⚙️', T('设置'), 'Settings'],
 ];
 
 function renderNav() {
@@ -142,7 +142,7 @@ function route() {
   renderNav();
   const view = $('#view'); view.innerHTML = '';
   ({ chat: viewChat, tasks: viewTasks, browser: viewBrowser, schedules: viewSchedules, connections: viewConnections,
-     memory: viewMemory, activity: viewActivity, settings: viewSettings })[S.view](view);
+     memory: viewMemory, trust: viewTrust, activity: viewActivity, settings: viewSettings })[S.view](view);
 }
 
 // ================================================================== CHAT
@@ -590,9 +590,13 @@ function evLine(e) {
       (d.facts || []).length ? T('🧠 记住了：') + d.facts.join(T('；')) : '',
       (d.recent || []).length ? ' ' + T('⏳ 近期记忆：') + d.recent.join(T('；')) : '',
       (d.profile_suggestions || []).length ? ' ' + T('📝 档案修改待你确认（记忆页）：') + d.profile_suggestions.join(T('；')) : ''].join('').trim()); break;
+    case 'context_used': body = h('details', null, h('summary', null, Tf("🧠 带上了 {0} 条相关记忆", (d.facts || []).length)),
+      h('ul', { class: 'small' }, (d.facts || []).map(f => h('li', null, f.fact, f.status === 'pending' ? T('（未确认）') : '', h('span', { class: 'faint' }, f.why ? ' — ' + f.why : ''))))); break;
+    case 'context_site': body = h('span', null, Tf("🧠 记得在 {0} 的习惯：{1}", d.site, (d.facts || []).join(T('；')))); break;
     case 'profile_read': body = h('span', { class: 'muted' }, Tf("🪪 读取档案：{0}", (d.fields || []).join(', ') || T('全部'))); break;
     case 'replanning': body = h('span', { style: 'color:var(--warn)' }, T('🔄 重新规划 Re-plan')); break;
     case 'chart': body = h('span', null, Tf("📊 图表：{0}", (d.title || d.path || ''))); break;
+    case 'image': body = h('span', null, Tf("🎨 生成图片：{0}", ((d.paths || []).join(', ') || d.path || '') + (d.model ? '  (' + d.model + ', ' + (d.size || '') + ', ' + (d.latency_s || '') + 's)' : ''))); break;
     case 'gave_up': body = h('span', { style: 'color:var(--warn)' }, T('🛑 同样的来源反复失败，停止重试，按已有信息作答')); break;
     case 'error': case 'planner_error': body = h('span', { style: 'color:var(--danger)' }, '❌ ' + (d.message || '')); break;
     default: body = h('span', { class: 'muted' }, e.type + ' ' + JSON.stringify(d).slice(0, 200));
@@ -607,16 +611,19 @@ function fillTimeline(tl, events) {
 
 // ================================================================== TASKS
 async function viewTasks(root) {
-  const r = await api('tasks' + (S.taskFilter ? '?status=' + S.taskFilter : ''));
+  const golden = S.taskFilter === 'golden';
+  const r = await api('tasks' + (S.taskFilter && !golden ? '?status=' + S.taskFilter : ''));
+  // golden (weekly test) runs live on the Trust page; the task list shows them only under their own filter
+  r.tasks = r.tasks.filter(t => golden ? t.source === 'golden' : t.source !== 'golden');
   r.tasks.forEach(t => { S.tasks[t.id] = { ...(S.tasks[t.id] || {}), ...t }; });
   const filters = [['', T('全部 All')], ['RUNNING,PLANNING,CREATED', T('执行中 Running')], ['WAITING_APPROVAL,WAITING_EXTERNAL,PAUSED', T('等待中 Waiting')],
-    ['COMPLETED', T('已完成 Done')], ['FAILED,CANCELLED', T('失败 Failed')]];
+    ['COMPLETED', T('已完成 Done')], ['FAILED,CANCELLED', T('失败 Failed')], ['golden', T('🧪 黄金测试')]];
   const left = h('div', null, h('div', { class: 'filters' }, filters.map(([v, l]) => h('button', { class: S.taskFilter === v ? 'on' : '', onclick: () => { S.taskFilter = v; route(); } }, l))));
   const list = h('div', { class: 'list' });
   if (!r.tasks.length) list.append(h('div', { class: 'empty' }, T('还没有任务。去「对话」里给 OMuse 布置一个吧。')));
   for (const t of r.tasks) list.append(h('button', { class: 'item' + (S.selTask === t.id ? ' active' : ''), onclick: () => { location.hash = 'tasks/' + t.id; } },
     h('div', { class: 'top' }, pill(t.status), h('span', { class: 'title' }, t.goal)),
-    h('div', { class: 'small muted' }, Tf("{0} · {1} · {2} 步", (fmtTime(t.created_at)), (t.source === 'schedule' ? T('⏰ 定时') : T('💬 对话')), (t.steps || 0)))));
+    h('div', { class: 'small muted' }, Tf("{0} · {1} · {2} 步", (fmtTime(t.created_at)), (t.source === 'schedule' ? T('⏰ 定时') : t.source === 'golden' ? T('🧪 黄金测试') : T('💬 对话')), (t.steps || 0)))));
   left.append(list);
   const right = h('div', { id: 'taskDetail' });
   root.append(h('div', { class: 'split' + (S.selTask ? ' has-sel' : '') }, left, right));
@@ -637,9 +644,10 @@ async function renderTaskDetail(box, id) {
     h('div', { class: 'row' }, pill(t.status), h('b', { style: 'flex:1' }, t.goal)),
     h('dl', { class: 'kv' },
       h('dt', null, T('任务 ID')), h('dd', { class: 'mono' }, t.id),
-      h('dt', null, T('来源 Source')), h('dd', null, t.source === 'schedule' ? T('⏰ 定时任务 schedule') : T('💬 对话 chat')),
+      h('dt', null, T('来源 Source')), h('dd', null, t.source === 'schedule' ? T('⏰ 定时任务 schedule') : t.source === 'golden' ? T('🧪 黄金测试（演练，不真正执行）') : T('💬 对话 chat')),
       h('dt', null, T('创建 Created')), h('dd', null, fmtTime(t.created_at)),
       h('dt', null, T('步数 Steps')), h('dd', null, t.steps || 0),
+      t.outcome && t.outcome.status !== 'none' ? [h('dt', null, T('结果证据 Evidence')), h('dd', null, outcomeBadge(t.outcome))] : null,
       t.waiting ? [h('dt', null, T('等待 Waiting')), h('dd', null, t.waiting.type === 'approval' ? '🛡 ' + B((t.waiting.summary || {}).title || T('审批')) : '🖐 ' + (t.waiting.reason || t.waiting.type))] : null),
     h('div', { class: 'row' },
       t.status === 'WAITING_APPROVAL' && t.waiting ? h('button', { class: 'btn approve small', onclick: () => openApproval(t.waiting.approval_id) }, T('🛡 去审批')) : null,
@@ -652,6 +660,135 @@ async function renderTaskDetail(box, id) {
     t.result ? h('div', null, h('b', null, T('结果 Result')), mdEl(t.result)) : null,
     t.error ? h('p', { style: 'color:var(--danger)' }, t.error) : null,
     h('div', null, h('b', null, T('执行过程 Timeline')), tl)));
+}
+
+// Proof that a task which changed something really finished (order number, message id …) — app/runtime/outcome.py
+function outcomeBadge(o) {
+  const ev = (o.evidence || []).map(e => e.order_number ? Tf("订单号 {0}", e.order_number) : e.reference ? Tf("预订号 {0}", e.reference)
+    : e.id ? `${e.kind} ${e.id}` : e.kind).join('，');
+  return o.status === 'verified'
+    ? h('span', { class: 'chip ok' }, T('✓ 已核实 verified') + (ev ? ' · ' + ev : ''))
+    : h('span', { class: 'chip bad', title: (o.missing || []).join(', ') }, T('⚠ 未确认 not confirmed'));
+}
+
+// ================================================================== TRUST (metrics, health, golden runs)
+async function viewTrust(root) {
+  S.trustDays = S.trustDays || 7;
+  const r = await api('metrics?days=' + S.trustDays);
+  const m = r.metrics, hs = r.health || {}, g = r.golden || {};
+  const pct = x => x == null ? '—' : Math.round(x * 100) + '%';
+  const kpi = (label, value, note, cls) => h('div', { class: 'kpi' + (cls ? ' ' + cls : '') }, h('div', { class: 'kpi-v' }, value),
+    h('div', { class: 'kpi-l' }, label), note ? h('div', { class: 'kpi-n' }, note) : null);
+  const days = h('div', { class: 'filters' }, [7, 30].map(d => h('button', { class: S.trustDays === d ? 'on' : '', onclick: () => { S.trustDays = d; route(); } },
+    Tf("最近 {0} 天", d))));
+  const checkBtn = h('button', { class: 'btn small', onclick: safe(async () => { await api('health/check', { method: 'POST', body: {} }); route(); }) }, T('立即检查 Check now'));
+  const runBtn = h('button', { class: 'btn small primary', disabled: !!g.running, onclick: safe(async () => {
+    await api('golden/run', { method: 'POST', body: {} }); toast(T('黄金测试已开始，大约需要 30–60 分钟，完成后会通知你')); route(); }) },
+    g.running ? T('黄金测试运行中…') : T('▶ 运行黄金测试 Run golden tasks'));
+  // health
+  const comps = Object.entries(hs.components || {});
+  const names = { model: T('模型服务'), browser: T('浏览器'), sentinel: T('安全网关 Sentinel'), tasks: T('任务执行') };
+  const health = h('div', { class: 'card stack' }, h('h3', null, T('🩺 运行状态 Health')),
+    comps.length ? h('div', { class: 'stack' }, comps.map(([k, c]) => h('div', { class: 'row' },
+      h('span', { class: 'chip ' + (c.ok ? 'ok' : 'bad') }, c.ok ? '✓' : '✕'), h('b', null, names[k] || k),
+      h('span', { class: 'small muted', style: 'flex:1' }, c.detail || ''), c.down ? h('span', { class: 'small' }, Tf("自 {0}", fmtTime(c.since))) : null)))
+      : h('p', { class: 'small muted' }, T('启动后约 1 分钟完成第一次检查。')),
+    (hs.alerts || []).length ? h('details', null, h('summary', { class: 'small' }, Tf("最近告警 {0} 条", hs.alerts.length)),
+      hs.alerts.slice().reverse().map(a => h('div', { class: 'small' }, `${fmtTime(a.ts)} ${a.title} — ${a.body.split('\n')[0]}`))) : null,
+    h('div', { class: 'row' }, checkBtn));
+  // metrics
+  const tiles = h('div', { class: 'kpis' },
+    kpi(T('完成率'), pct(m.completion_rate), Tf("{0}/{1} 个任务完成", m.completed, m.finished)),
+    kpi(T('自主完成率'), pct(m.autonomous_rate), T('完成且不需要你批准、接管或回答')),
+    kpi(T('需要你介入'), pct(m.intervention_rate), Tf("审批 {0} 次 · 接管 {1} 次", m.approvals, m.takeovers)),
+    kpi(T('每个结果的审批次数'), m.approval_burden == null ? '—' : m.approval_burden.toFixed(1), Tf("{0} 个任务改变了外部世界", m.acted)),
+    kpi(T('有证据 / 未确认'), `${m.verified} / ${m.unverified}`, T('订单号、邮件 ID 等证据'), m.unverified ? 'warn' : ''),
+    kpi(T('失败'), m.failed, Tf("取消 {0}", m.cancelled), m.failed ? 'warn' : ''));
+  const maxDay = Math.max(1, ...m.per_day.map(d => d.total));
+  const perDay = h('div', { class: 'card stack' }, h('h3', null, T('📅 每天的任务')),
+    h('div', { class: 'tablewrap' }, h('table', { class: 'data' },
+      h('thead', null, h('tr', null, [T('日期'), T('总数'), T('完成'), T('失败'), T('取消'), ''].map(x => h('th', null, x)))),
+      h('tbody', null, m.per_day.slice().reverse().map(d => h('tr', null, h('td', { class: 'mono' }, d.day), h('td', null, d.total),
+        h('td', null, d.completed), h('td', { style: d.failed ? 'color:var(--danger)' : '' }, d.failed), h('td', null, d.cancelled),
+        h('td', { style: 'width:40%' }, h('div', { class: 'bar' }, h('span', { class: 'ok', style: `width:${100 * d.completed / maxDay}%` }),
+          h('span', { class: 'bad', style: `width:${100 * d.failed / maxDay}%` })))))))),
+    m.failure_causes.length ? h('div', { class: 'small' }, T('失败原因：'), m.failure_causes.map(c => `${c.label} ${c.count}`).join(' · ')) : null,
+    m.top_errors.length ? h('details', null, h('summary', { class: 'small' }, T('最常见的错误')),
+      m.top_errors.map(e => h('div', { class: 'small mono' }, `${e.count}× ${e.error}`))) : null);
+  // golden runs
+  const last = (g.runs || [])[0];
+  const golden = h('div', { class: 'card stack' }, h('h3', null, T('🧪 黄金测试任务 Golden tasks')),
+    h('p', { class: 'sub' }, T('20 个日常任务，每周日凌晨 3 点自动演练一次：真实读邮件、浏览网页，但在发送、下单、改日历、打电话之前停下，不打扰你。')),
+    h('div', { class: 'row' }, runBtn),
+    (g.runs || []).length ? h('div', { class: 'small' }, g.runs.map(x => `${fmtTime(x.started_at)} ${x.version || ''}：${x.passed}/${x.total}` + (x.status === 'running' ? T('（运行中）') : '')).join('  ·  ')) : null,
+    last ? h('div', { class: 'tablewrap' }, h('table', { class: 'data' },
+      h('thead', null, h('tr', null, ['', T('任务'), T('用时'), T('没通过的原因')].map(x => h('th', null, x)))),
+      h('tbody', null, (last.results || []).map(x => h('tr', null, h('td', null, x.passed ? '✅' : '❌'),
+        h('td', null, x.task_id ? h('a', { href: '#tasks/' + x.task_id }, `${x.id} ${x.title}`) : `${x.id} ${x.title}`),
+        h('td', { class: 'mono' }, x.seconds != null ? x.seconds + 's' : ''), h('td', { class: 'small' }, (x.why || []).join('；'))))))) : null);
+  const ledgerCard = h('div', { class: 'card stack' }, h('h3', null, T('🧾 交易账本 Ledger')));
+  const fewer = h('div', { class: 'stack' });
+  root.append(h('div', { class: 'stack' }, h('div', { class: 'row' }, days), tiles, fewer, h('div', { class: 'grid2' }, health, golden), browserCard(m.browser || {}), ledgerCard, perDay));
+  fillLedger(ledgerCard).catch(() => ledgerCard.append(h('div', { class: 'muted small' }, T('账本暂时打不开'))));
+  fillSuggestions(fewer).catch(() => {});
+}
+
+function browserCard(b) {
+  const pct = x => x == null ? '—' : Math.round(x * 100) + '%';
+  const rows = b.sites || [];
+  return h('div', { class: 'card stack' }, h('h3', null, T('🌐 浏览器打开情况 Browsing')),
+    h('p', { class: 'sub' }, T('OMuse 打开网页的成功率，以及哪些网站用反机器人拦截挡住了自动浏览器。被挡的网站会记进「网站习惯」，下次优先换别的来源或请你接管。')),
+    h('div', { class: 'row', style: 'gap:16px' },
+      h('div', null, h('b', null, String(b.opens || 0)), ' ', h('span', { class: 'muted small' }, T('次打开'))),
+      h('div', null, h('b', null, String(b.blocked || 0)), ' ', h('span', { class: 'muted small' }, T('次被拦')),
+        b.block_rate != null ? h('span', { class: 'muted small' }, ` (${pct(b.block_rate)})`) : null)),
+    rows.length ? h('div', { class: 'tablewrap' }, h('table', { class: 'data' },
+      h('thead', null, h('tr', null, [T('网站'), T('打开'), T('被拦'), T('拦截率')].map(x => h('th', null, x)))),
+      h('tbody', null, rows.map(r => h('tr', null, h('td', null, r.site), h('td', { class: 'mono' }, String(r.opens)),
+        h('td', { class: 'mono' }, String(r.blocked)),
+        h('td', null, h('span', { class: 'chip' + (r.block_rate > 0.5 ? ' bad' : '') }, pct(r.block_rate)))))))) :
+      h('div', { class: 'muted small' }, T('最近没有网站拦截记录。')),
+    (b.kinds || []).length ? h('div', { class: 'small muted' }, T('拦截类型：') + b.kinds.map(k => `${k.detail} ×${k.count}`).join('、')) : null);
+}
+
+async function fillSuggestions(box) {
+  const r = await sapi('grant_suggestions');
+  const list = r.suggestions || [];
+  if (!list.length) return;
+  const go = (k, body) => safe(async () => { await sapi('grant_suggestions', { method: 'POST', body: { key: k, ...body } }); route(); });
+  box.append(h('div', { class: 'card stack' }, h('h3', null, T('🔁 可以少批的操作 Fewer approvals')),
+    h('p', { class: 'sub' }, T('这些操作你已经批准过 3 次以上。开启后同样的操作不再弹审批卡（可随时在「连接」页撤销）。付款、填卡、打电话、取消/退货和网页点击永远逐次审批。')),
+    list.map(x => h('div', { class: 'row', style: 'border-bottom:1px solid var(--line-2);padding-bottom:6px' },
+      h('div', { style: 'flex:1;min-width:0' }, h('b', null, T(x.title)), x.destination ? h('span', { class: 'muted small' }, ' → ' + x.destination) : null,
+        h('div', { class: 'small muted' }, Tf("最近 30 天批准了 {0} 次", x.count))),
+      h('button', { class: 'btn approve small', onclick: go(x.key, { accept: true, days: 30 }) }, T('自动允许 30 天')),
+      h('button', { class: 'btn small', onclick: go(x.key, { accept: true, days: 0 }) }, T('一直允许')),
+      h('button', { class: 'btn small', onclick: go(x.key, { accept: false }) }, T('不用了'))))));
+}
+
+function ledgerProof(o) {
+  const ev = (o.evidence || []).slice(-1)[0] || {};
+  const proof = String(ev.subject || ev.text || '').slice(0, 80);
+  return [o.approval_id ? T('你批准的') : '', proof].filter(Boolean).join(' · ');
+}
+
+async function fillLedger(card) {
+  const r = await sapi('ledger');
+  const rows = r.orders || [];
+  const sync = h('button', { class: 'btn small', onclick: safe(async () => {
+    const x = await sapi('ledger/reconcile', { method: 'POST', body: {} });
+    toast(Tf("核对了 {0} 个订单，更新 {1} 个", x.checked, (x.changed || []).length)); route(); }) }, T('用邮件核对 Check emails'));
+  card.append(h('p', { class: 'sub' }, T('OMuse 替你下的每一笔订单：商家、订单号、金额、卡、状态，以及谁批准的、凭什么证据。取消或退货时只认这里的订单。')),
+    h('div', { class: 'row' }, sync),
+    rows.length ? h('div', { class: 'tablewrap' }, h('table', { class: 'data' },
+      h('thead', null, h('tr', null, [T('日期'), T('商家'), T('订单号'), T('金额'), T('卡'), T('状态'), T('批准 / 证据')].map(x => h('th', null, x)))),
+      h('tbody', null, rows.map(o => h('tr', null,
+        h('td', { class: 'mono small' }, fmtTime(o.created_at)), h('td', null, o.merchant),
+        h('td', { class: 'mono' }, o.order_number || '—'),
+        h('td', { class: 'mono' }, `${o.currency} ${Number(o.total || 0).toFixed(2)}`), h('td', { class: 'small' }, o.card || '—'),
+        h('td', null, h('span', { class: 'chip' + (['placed', 'shipped', 'delivered'].includes(o.status) ? ' ok' : (['unconfirmed'].includes(o.status) ? ' bad' : '')) }, T(o.status_label))),
+        h('td', { class: 'small' }, ledgerProof(o))))))) :
+      h('div', { class: 'muted small' }, T('还没有订单。')));
 }
 
 // ================================================================== APPROVALS
@@ -1700,9 +1837,68 @@ const CAT_LABEL = { preference: T('偏好'), person: T('人物'), company: T('�
 async function viewMemory(root) {
   const [r, v] = await Promise.all([api('memory'), sapi('vault').catch(() => ({ items: [], kinds: {}, field_labels: {} }))]);
   root.append(
-    h('div', { class: 'grid2' }, memProfileCard(r), h('div', { class: 'stack' }, memPendingCard(r), memTidyCard(r))),
-    h('div', { class: 'grid2', style: 'margin-top:16px' }, memFactsCard(r), memRecentCard(r)),
-    h('div', { class: 'grid2', style: 'margin-top:16px' }, memVaultCard(v), memEpisodesCard(r)));
+    h('div', { class: 'grid2' }, memProfileCard(r), h('div', { class: 'stack' }, memLearnedCard(r), memPendingCard(r), memTidyCard(r))),
+    h('div', { style: 'margin-top:16px' }, memFactsCard(r)),
+    h('div', { class: 'grid2', style: 'margin-top:16px' }, memTryCard(r), memEntitiesCard(r)),
+    h('div', { class: 'grid2', style: 'margin-top:16px' }, memRecentCard(r), memVaultCard(v)),
+    h('div', { style: 'margin-top:16px' }, memEpisodesCard(r)));
+}
+
+const domLabel = (r, k) => { const d = (r.domains || []).find(x => x.key === k); return d ? (LANG === 'en' ? d.en : d.zh) : (k || ''); };
+
+function memDomainSelect(r, value, onchange) {
+  const sel = h('select', { 'aria-label': T('域 Domain'), style: 'width:auto;flex:0 0 auto;padding:2px 6px;font-size:12px' },
+    (r.domains || []).map(d => h('option', { value: d.key }, LANG === 'en' ? d.en : d.zh)));
+  sel.value = value || 'work';
+  if (onchange) sel.onchange = () => onchange(sel.value);
+  return sel;
+}
+
+function memLearnedCard(r) {
+  const list = (r.facts || []).filter(f => f.status === 'pending');
+  const go = (f, body) => safe(async () => { await api('memory/' + f.id, { method: body ? 'PUT' : 'DELETE', body }); route(); });
+  return h('div', { class: 'card stack' },
+    h('div', { class: 'row' }, h('h3', { style: 'flex:1' }, T('🌱 OMuse 学到的，待你确认 Learned')), list.length ? h('span', { class: 'chip bad' }, String(list.length)) : h('span', { class: 'chip ok' }, T('无 None'))),
+    h('p', { class: 'sub' }, T('任务中 OMuse 自己发现的习惯（比如某个网站电话要填 8 位）。确认之前也会用，但会标明「未确认」。')),
+    list.length ? list.map(f => h('div', { class: 'row', style: 'border-bottom:1px solid var(--line-2);padding-bottom:6px;align-items:flex-start' },
+      h('div', { style: 'flex:1;min-width:0' }, f.fact, h('div', { class: 'small muted' }, domLabel(r, f.domain))),
+      h('button', { class: 'btn approve small', onclick: go(f, { status: 'active' }) }, T('✓ 对 Confirm')),
+      h('button', { class: 'btn danger small', onclick: go(f, null) }, T('✕ 不对 Forget')))) : h('div', { class: 'muted small' }, T('暂无')));
+}
+
+function memTryCard(r) {
+  const inp = h('input', { type: 'text', placeholder: T('输入一个请求，例如：帮我在迪卡侬买双跑鞋') });
+  const out = h('div', { class: 'stack' });
+  const run = safe(async () => {
+    if (!inp.value.trim()) return;
+    const x = await api('context/preview?q=' + encodeURIComponent(inp.value));
+    out.replaceChildren(...(x.facts.length ? x.facts.map(f => h('div', { class: 'small', style: 'border-bottom:1px solid var(--line-2);padding:4px 0' },
+      h('span', { class: 'chip', style: 'margin-right:6px' }, domLabel(r, f.domain)), f.fact,
+      f.status === 'pending' ? h('span', { class: 'muted' }, T('（未确认）')) : null,
+      h('div', { class: 'faint' }, f.why || ''))) : [h('div', { class: 'muted small' }, T('记忆里没有和这个请求相关的内容。'))]));
+  });
+  inp.onkeydown = (e) => { if (e.key === 'Enter') run(); };
+  return h('div', { class: 'card stack' }, h('h3', null, T('🔎 试一试：这个请求会用到哪些记忆 Try it')),
+    h('p', { class: 'sub' }, T('每个任务开始时，OMuse 只带上和这个请求相关的几条记忆（尺码、舱位、口味、网站习惯…），不用你再说一遍。')),
+    h('div', { class: 'row' }, inp, h('button', { class: 'btn primary', onclick: run }, T('看看 Preview'))), out);
+}
+
+function memEntitiesCard(r) {
+  const ents = r.entities || [];
+  const edit = (e) => safe(async () => {
+    const al = prompt(Tf("「{0}」的别名，用逗号分隔（例如：迪卡侬, Decathlon）", e.name), ((e.attrs || {}).aliases || []).join(', '));
+    if (al === null) return;
+    let rel = e.relation || '';
+    if (e.type === 'person') { const x = prompt(Tf("「{0}」和你的关系（例如：同事、太太、旅伴；可留空）", e.name), rel); if (x !== null) rel = x; }
+    await api('entities/' + e.id, { method: 'PUT', body: { aliases: al, relation: rel } }); route();
+  });
+  const groups = ['person', 'place', 'account', 'site'].map(k => [k, ents.filter(e => e.type === k)]).filter(([, l]) => l.length);
+  return h('div', { class: 'card stack' }, h('h3', null, T('👥 人物、地点、账户、网站 Entities')),
+    h('p', { class: 'sub' }, T('记忆里提到的人和地方。加上别名或关系后（如「太太」「迪卡侬」），你换个说法 OMuse 也能对上。')),
+    groups.length ? groups.map(([k, l]) => h('div', { class: 'stack', style: 'gap:4px' }, h('b', { class: 'small' }, domLabel(r, k)),
+      h('div', { class: 'row', style: 'flex-wrap:wrap;gap:6px' }, l.map(e => h('button', { class: 'chip', style: 'cursor:pointer', onclick: edit(e), title: T('点击编辑别名 / 关系') },
+        e.name + (e.relation ? ` · ${e.relation}` : '') + (((e.attrs || {}).aliases || []).length ? ` (${e.attrs.aliases.join(', ')})` : '')))))) :
+      h('div', { class: 'muted small' }, T('暂无')));
 }
 
 function memProfileCard(r) {
@@ -1787,7 +1983,7 @@ function memPlanView(rep) {
     h('div', { class: 'small muted' }, Tf("过期清理：记忆 {0} 条，经历 {1} 条", (L.prune_facts || []).length, L.prune_episodes || 0)));
 }
 
-function memFactRow(f, recent) {
+function memFactRow(f, recent, r) {
   const edit = safe(async () => {
     const t = prompt(T('修改这条记忆'), f.fact); if (t === null || !t.trim()) return;
     await api('memory/' + f.id, { method: 'PUT', body: { fact: t } }); route();
@@ -1795,8 +1991,10 @@ function memFactRow(f, recent) {
   const move = safe(async () => { await api('memory/' + f.id, { method: 'PUT', body: { tier: recent ? 'long' : 'recent' } }); route(); });
   const del = safe(async () => { await api('memory/' + f.id, { method: 'DELETE' }); route(); });
   const left = recent && f.expires_at ? Math.max(0, Math.ceil((f.expires_at * 1000 - Date.now()) / 86400000)) : null;
-  return h('tr', null, h('td', null, f.fact, f.history ? h('div', { class: 'small faint', title: f.history }, T('（有修改记录）')) : null),
-    h('td', { class: 'small' }, CAT_LABEL[f.category] || f.category || ''),
+  const dom = r ? memDomainSelect(r, f.domain, safe(async (v) => { await api('memory/' + f.id, { method: 'PUT', body: { domain: v } }); toast(T('已改 Saved')); })) : (CAT_LABEL[f.category] || f.category || '');
+  return h('tr', null, h('td', null, f.fact, f.status === 'pending' ? h('span', { class: 'chip bad', style: 'margin-left:6px' }, T('待确认')) : null,
+      f.history ? h('div', { class: 'small faint', title: f.history }, T('（有修改记录）')) : null),
+    h('td', { class: 'small' }, dom),
     h('td', { class: 'small muted', style: 'white-space:nowrap' }, recent ? Tf("{0} 天后过期", left ?? '?') : String(f.uses || 0)),
     h('td', { class: 'row', style: 'gap:4px;flex-wrap:nowrap;white-space:nowrap' },
       h('button', { class: 'btn small', onclick: edit }, T('改')),
@@ -1805,14 +2003,24 @@ function memFactRow(f, recent) {
 }
 
 function memFactsCard(r) {
-  const inp = h('input', { type: 'text', placeholder: T('例如：我偏好直飞航班；John Smith 是 Acme 的 CFO') });
-  const cat = h('select', { 'aria-label': T('类别'), style: 'width:auto;flex:0 0 auto' }, MEM_CATS.map(c => h('option', { value: c }, CAT_LABEL[c])));
+  const inp = h('input', { type: 'text', placeholder: T('例如：我穿 43 码运动鞋；订餐厅优先湘菜；James Zhan 是我的合作伙伴') });
+  const dom = memDomainSelect(r, 'preference');
+  const body = h('tbody');
+  const counts = {}; for (const f of r.facts) counts[f.domain || 'work'] = (counts[f.domain || 'work'] || 0) + 1;
+  let cur = S.memDomain || '';
+  const chips = h('div', { class: 'row', style: 'flex-wrap:wrap;gap:6px' });
+  const draw = () => {
+    chips.replaceChildren(...[['', T('全部 All'), r.facts.length], ...(r.domains || []).map(d => [d.key, LANG === 'en' ? d.en : d.zh, counts[d.key] || 0])]
+      .map(([k, label, n]) => h('button', { class: 'chip' + (k === cur ? ' ok' : ''), style: 'cursor:pointer', onclick: () => { cur = k; S.memDomain = k; draw(); } }, `${label} ${n}`)));
+    body.replaceChildren(...r.facts.filter(f => !cur || (f.domain || 'work') === cur).map(f => memFactRow(f, false, r)));
+  };
+  draw();
   return h('div', { class: 'card stack' }, h('h3', null, Tf("🧠 长期记忆 Long-term（{0}）", r.facts.length)),
-    h('p', { class: 'sub' }, T('偏好、人物、公司、项目、习惯。Agent 只从你自己说的话里提取，不会从邮件或网页里学习；需要时按相关度取用，不会每次全部带上。')),
-    h('div', { class: 'row' }, inp, cat, h('button', { class: 'btn primary', onclick: safe(async () => { await api('memory', { method: 'POST', body: { fact: inp.value, category: cat.value } }); route(); }) }, T('记住 Remember'))),
+    h('p', { class: 'sub' }, T('按 7 个域整理：人物与关系、偏好、地点、账户与会员、网站习惯、默认规则、工作与其他。域可以直接改；每个任务只取相关的几条。')),
+    h('div', { class: 'row' }, inp, dom, h('button', { class: 'btn primary', onclick: safe(async () => { await api('memory', { method: 'POST', body: { fact: inp.value, domain: dom.value } }); route(); }) }, T('记住 Remember'))),
+    chips,
     r.facts.length ? h('div', { class: 'tablewrap' }, h('table', { class: 'data memtable' },
-      h('thead', null, h('tr', null, [T('事实 Fact'), T('类别'), T('用过'), ''].map(x => h('th', null, x)))),
-      h('tbody', null, r.facts.map(f => memFactRow(f, false))))) : h('div', { class: 'muted small' }, T('还没有记忆。')));
+      h('thead', null, h('tr', null, [T('事实 Fact'), T('域'), T('用过'), ''].map(x => h('th', null, x)))), body)) : h('div', { class: 'muted small' }, T('还没有记忆。')));
 }
 
 function memRecentCard(r) {
@@ -1902,6 +2110,7 @@ async function viewSettings(root) {
     return h('label', { class: 'field' }, h('span', null, `${zh} `, LANG === 'en' ? null : h('span', { class: 'muted' }, en)), i, help ? h('span', null, help) : null); };
   const tog = (k, zh) => { const i = h('input', { type: 'checkbox', checked: !!s[k] }); f[k] = i; return h('label', { class: 'toggle' }, i, zh); };
   const testOut = h('span', { class: 'small muted' });
+  const imgOut = h('span', { class: 'small muted' });
   root.append(h('div', { class: 'grid2' },
     h('div', { class: 'card stack' }, h('h3', null, T('🧠 模型 Model（通过 Olares Router）')),
       h('p', { class: 'sub' }, T('默认全部使用本机 Qwen3.8-27B，数据不出 Olares One。任何 OpenAI 兼容接口都可替换。')),
@@ -1914,7 +2123,14 @@ async function viewSettings(root) {
       tog('disable_thinking', T('关闭思考模式（更快，复杂任务效果可能下降）Disable thinking')),
       field('extra_body', T('额外请求参数 JSON'), 'Extra body'),
       h('div', { class: 'row' }, h('button', { class: 'btn small', onclick: safe(async () => { testOut.textContent = T('测试中…'); const t = await api('settings/test-model', { method: 'POST', body: {} });
-        testOut.textContent = t.ok ? Tf("✓ {0}s：{1}", (t.latency_s), (t.reply)) : '✕ ' + t.error; }) }, T('测试模型 Test model')), testOut)),
+        testOut.textContent = t.ok ? Tf("✓ {0}s：{1}", (t.latency_s), (t.reply)) : '✕ ' + t.error; }) }, T('测试模型 Test model')), testOut),
+      h('h3', { style: 'margin-top:12px' }, T('🎨 图片生成 Images')),
+      h('p', { class: 'sub' }, T('留空 = 用上面的接口地址并自动寻找图像模型。接 OpenAI 时填 https://api.openai.com/v1 + gpt-image-1；密钥只能通过环境变量 OMUSE_IMAGE_API_KEY 提供，不在这里填。')),
+      field('image_base_url', T('图片接口地址（留空=同上）'), 'Image base URL'),
+      field('image_model', T('图像模型（留空=自动）'), 'Image model'),
+      h('div', { class: 'row' }, h('button', { class: 'btn small', onclick: safe(async () => { imgOut.textContent = T('检查中…');
+        const t = await api('settings/test-image', { method: 'POST', body: { image_base_url: f.image_base_url.value, image_model: f.image_model.value } });
+        imgOut.textContent = t.ok ? Tf("✓ {0} @ {1}（密钥：{2}）", t.model, t.base, t.key) : '✕ ' + t.error; }) }, T('检查图片接口 Check image endpoint')), imgOut)),
     h('div', { class: 'card stack' }, h('h3', null, '🤖 Agent'),
       langField(s, f),
       field('user_name', T('你的名字'), 'Your name'), field('timezone', T('时区（定时任务）'), 'Timezone'),

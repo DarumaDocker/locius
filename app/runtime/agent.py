@@ -21,13 +21,14 @@ import httpx
 
 from app.common.util import dumps, new_id, now_ts, truncate
 from app.runtime import attachments as AT
-from app.runtime import prompts
+from app.runtime import outcome, prompts
 from app.runtime.llm import LLM, LLMContextError, LLMError, extract_json, strip_tool_markup
 from app.runtime.store import RStore
 
 SENTINEL_URL = os.environ.get("SENTINEL_URL", "http://127.0.0.1:8080")
 RUNTIME_TOKEN = os.environ.get("RUNTIME_TOKEN", "")
 WORKSPACE = os.path.realpath(os.environ.get("WORKSPACE", "/workspace"))
+IMAGE_BUDGET_PER_TASK = int(os.environ.get("OMUSE_IMAGE_BUDGET", "6"))   # generated pictures per task (each one is billed)
 APP_ID = os.environ.get("APP_ID", "omuse")   # Olares app id: the workspace shows up in Files under Data/<APP_ID>/workspace
 SKILLS_DIR = os.environ.get("SKILLS_DIR", os.path.join(os.path.dirname(os.path.dirname(__file__)), "skills"))
 
@@ -491,6 +492,82 @@ LOCAL_TOOLS = [
          "output": {"type": "string", "description": "保存路径，默认 charts/<标题>.png output .png path"},
          "send": {"type": "boolean", "description": "是否发到对话里（默认 true）show it in the chat (default true)"}},
         ["type", "title"]),
+    _fn("make_image", "用 AI 根据文字描述生成一张图片（像 Midjourney / DALL·E）并直接显示在对话里：插画、海报、头像、产品图、"
+        "场景、概念图、logo 草稿、壁纸等。用户说「画一张…、生成一张…图、做个海报/头像/壁纸、来张…的图」时就用它——"
+        "不要去打开在线作图网站，也不要用 make_chart（那是数据图表）。prompt 用英文写得具体：主体、场景、风格、光线、构图、"
+        "颜色；用户给的中文描述你翻译并补全细节。aspect 按用途选：海报/手机壁纸 portrait，横幅/桌面壁纸 landscape，头像/logo square。"
+        "生成后图片自动发到对话；用户要改时（换风格、换颜色、加东西）用新的 prompt 再调一次。"
+        " Generate an image from a text description with an AI image model (like Midjourney / DALL·E) and show it in the "
+        "chat: illustrations, posters, avatars, product shots, scenes, concept art, logo drafts, wallpapers. Use it whenever "
+        "the user asks to draw / generate / make a picture, poster, avatar or wallpaper — never open an online image site, "
+        "and not make_chart (that is for data charts). Write the prompt in English and concretely (subject, setting, "
+        "style, lighting, composition, colours); translate and enrich a Chinese request. Pick aspect by use. The image is "
+        "sent to the chat automatically; to change it, call again with a new prompt.",
+        {"prompt": {"type": "string", "description": "英文、具体的画面描述 a concrete English description of the picture"},
+         "aspect": {"type": "string", "enum": ["square", "landscape", "portrait"],
+                    "description": "画幅：square 方形(头像/logo)，landscape 横向(横幅/桌面)，portrait 竖向(海报/手机)"},
+         "size": {"type": "string", "description": "或明确尺寸 or an explicit size like 1024x1024 / 1536x1024 / 1024x1536"},
+         "n": {"type": "integer", "description": "张数 1-4（默认 1）how many variations"},
+         "quality": {"type": "string", "enum": ["low", "medium", "high"], "description": "质量（支持时）quality when the model supports it"},
+         "style": {"type": "string", "description": "风格（中英皆可，会展开成具体提示词）：写实 photorealistic / 电影感 cinematic / 动漫 anime / 水彩 watercolor / 油画 oil painting / 3D render / 扁平矢量 flat vector / 像素 pixel art / 素描 sketch / 水墨 ink wash / 线稿 line art / 等距 isometric / 极简 minimalist / logo / 产品图 product"},
+         "negative_prompt": {"type": "string", "description": "不想出现的东西（支持的模型才生效）things to avoid, e.g. 'text, watermark, blurry, extra fingers'"},
+         "background": {"type": "string", "enum": ["transparent", "opaque"], "description": "透明背景（logo/贴纸/产品抠图；支持的模型才生效）transparent background when the model supports it"},
+         "output_format": {"type": "string", "enum": ["png", "jpeg", "webp"], "description": "输出格式，默认 png"},
+         "title": {"type": "string", "description": "文件名用的短标题 short title for the file name"},
+         "output": {"type": "string", "description": "保存路径，默认 images/<标题>.png output .png path"},
+         "send": {"type": "boolean", "description": "是否发到对话里（默认 true）show it in the chat (default true)"}},
+        ["prompt"]),
+    _fn("edit_image", "用 AI 修改一张已有图片（像 Midjourney 编辑器 / ChatGPT 选区编辑）：换颜色、加/去掉东西、换背景、改风格、"
+        "按参考图改。path 是工作区里的图（刚生成的、用户附件、browser_save_media 存的）；不给 path 就改本任务最近那张。"
+        "mask 可选：一张 PNG，透明的地方就是要重画的区域（局部重绘 inpainting）；不给 mask 就整张按 prompt 改。"
+        "references 可选：几张参考图（风格/人物/物体一致，对标 Midjourney --sref / --oref）。"
+        "用户说「把这张图…改成/换成/加上/去掉」「按这张的风格」时用它；不要重新 make_image 从头生成。"
+        " Edit an existing image with the AI model: recolour, add/remove things, swap background, restyle, or follow "
+        "reference images. `path` = a workspace image (just generated, a user attachment, or saved from a page); omit it "
+        "to edit this task's latest image. Optional `mask` PNG: transparent pixels = the region to repaint (inpainting); "
+        "without a mask the whole image is edited by prompt. Optional `references`: images to keep style/character/object "
+        "consistent (like --sref / --oref). Use it when the user wants an existing picture changed — don't regenerate.",
+        {"path": {"type": "string", "description": "要改的图片 workspace path of the image to edit (default: latest image of this task)"},
+         "prompt": {"type": "string", "description": "英文、具体地说明改什么 what to change, concretely, in English"},
+         "mask": {"type": "string", "description": "可选：遮罩 PNG 的工作区路径，透明区域=重画区域 optional mask PNG (transparent = repaint here)"},
+         "references": {"type": "array", "items": S, "description": "可选：参考图路径 optional reference images (style / character / object)"},
+         "aspect": {"type": "string", "enum": ["square", "landscape", "portrait"]},
+         "size": {"type": "string", "description": "或明确尺寸 or an explicit size"},
+         "n": {"type": "integer", "description": "张数 1-4"},
+         "title": {"type": "string", "description": "文件名用的短标题"},
+         "send": {"type": "boolean", "description": "是否发到对话里（默认 true）"}},
+        ["prompt"]),
+    _fn("vary_image", "基于一张图再生成几张「差不多但不一样」的变体（像 Midjourney 的 Vary / 再来几张）：主体、构图、风格不变，细节有变化。"
+        "不给 path 就用本任务最近那张。用户说「再来几张类似的」「换几个版本」「微调一下」时用它。"
+        " Make close variations of an image (like Midjourney Vary): same subject, composition and style with small "
+        "differences. Omit `path` for this task's latest image. Use when the user asks for more versions / similar ones.",
+        {"path": {"type": "string", "description": "原图 workspace path (default: latest image of this task)"},
+         "prompt": {"type": "string", "description": "可选：变化方向 optional direction, e.g. 'warmer colours', 'from the side'"},
+         "n": {"type": "integer", "description": "张数 1-4（默认 2）"},
+         "title": {"type": "string"}, "send": {"type": "boolean"}}),
+    _fn("caption_image", "把一段**准确的文字**压到图片上（海报标题、口号、价格、logo 字样、字幕）。AI 图像模型写字经常拼错或乱码，"
+        "这个工具由本机排版、字对字保证正确，支持中文。不给 path 就用本任务最近那张图。用户要「海报上写…」「加标题/文字/口号」"
+        "「logo 下面写公司名」时：先 make_image 生成不带文字的底图，再用它加字。"
+        " Put EXACT text on an image (poster title, slogan, price, wordmark, caption). Image models misspell or garble "
+        "text; this lays it out locally, letter-perfect, Chinese included. Omit `path` for this task's latest image. For "
+        "'write … on the poster', generate the picture without text first (make_image), then add the words with this.",
+        {"path": {"type": "string", "description": "底图 workspace image (default: latest image of this task)"},
+         "text": {"type": "string", "description": "要写的文字（可多行）the exact text, line breaks allowed"},
+         "position": {"type": "string", "enum": ["top", "bottom", "center", "top-left", "top-right", "bottom-left", "bottom-right"],
+                      "description": "位置，默认 bottom"},
+         "size": {"type": "integer", "description": "字号 px（默认按图片大小自动）font size in px (auto by default)"},
+         "color": {"type": "string", "description": "文字颜色，如 #ffffff / #111 / gold（默认白）"},
+         "band": {"type": "boolean", "description": "文字下垫半透明色带，复杂背景上更清楚 a translucent band behind the text"},
+         "weight": {"type": "string", "enum": ["400", "500", "600", "700", "800", "900"], "description": "字重，默认 700"},
+         "title": {"type": "string"}, "send": {"type": "boolean"}},
+        ["text"]),
+    _fn("upscale_image", "把图片放大 2 倍或 4 倍（本机像素放大 + 锐化，不联网）。用户要「放大」「高清一点」「做成大图/打印尺寸」时用。"
+        "注意：这是像素放大，不会凭空生成新细节（真正的 AI 超分需要专门模型，目前没有）。不给 path 就用本任务最近那张。"
+        " Enlarge an image 2x or 4x locally (resampling + sharpening, offline). Use for 'make it bigger / higher-res / print "
+        "size'. Note: pixel upscaling, it does not invent new detail (true AI super-resolution needs a dedicated model, "
+        "not available). Omit `path` for this task's latest image.",
+        {"path": {"type": "string"}, "factor": {"type": "integer", "enum": [2, 4], "description": "放大倍数，默认 2"},
+         "title": {"type": "string"}, "send": {"type": "boolean"}}),
     _fn("present_choices", "把几个选项做成卡片给用户挑（餐厅、商品、航班、方案等）。kind=comparison 时，每个选项的 label 和 details "
         "必须是你在本任务里读过的网页/邮件的原文摘录（照抄原文，不要翻译或改写），source_url 是读过的那个页面（或其中的链接）；"
         "系统会逐条核对，找不到原文就拒绝显示。你的翻译、评价写在 note 里（不核对）。kind=clarify 用于简单的澄清选项（不核对）。"
@@ -518,8 +595,10 @@ LOCAL_TOOLS = [
     _fn("memory_remember", "记住用户明确要求记住的事实 Save a durable fact the user explicitly asked to remember, or a site's form habit you just learned at checkout "
         "(e.g. \"decathlon.sg accepts the phone number as 8 digits without +65\"). Not for profile "
         "fields (name, phone, email, address… → profile_suggest) and never for ID / membership / card numbers or passwords "
-        "(those live in the Sentinel vault, which the user manages).",
-        {"fact": S, "category": S, "entity": S}, ["fact"]),
+        "(those live in the Sentinel vault, which the user manages). domain: person | preference | place | account | site "
+        "(how a website works for the user) | rule (a standing instruction) | work. Something you learned yourself (not "
+        "said by the user) is kept as 'to confirm' until the user OKs it on the Memory page — it is still used meanwhile.",
+        {"fact": S, "category": S, "entity": S, "domain": S}, ["fact"]),
     _fn("profile_get", "读取用户档案 Read the user's profile (name as on passport, phone, emails, addresses, company, title, "
         "birthday, nationality…). Call it ONLY when filling in a form or writing an email/message that needs these details; "
         "use just the fields you need.", {"fields": {"type": "array", "items": S, "description": "optional: only these fields"}}),
@@ -531,6 +610,11 @@ LOCAL_TOOLS = [
         "cards) — labels and the last 4 characters only, never the values. Use with browser_fill_secret to fill one into a "
         "web form; each fill needs the user's approval.", {}),
     _fn("memory_forget", "删除一条记忆 Forget a memory by id (from memory_search).", {"id": S}, ["id"]),
+    _fn("orders_list", "交易账本：OMuse 替用户下过的订单（商家、订单号、金额、卡尾号、状态、谁批准的）。用户说「取消/退货/查一下那个订单」时先查这里，"
+        "用账本里那一单的商家和订单号去操作，不要凭邮件或别的网站猜。"
+        " The ledger of orders OMuse placed for the user (merchant, order number, amount, card, status, who approved). "
+        "For cancel / return / track requests look the order up here first and act on exactly that merchant and number.",
+        {"query": {"type": "string", "description": "optional: merchant or order number"}}),
     _fn("schedule_create", "创建定时/周期任务 Create a recurring background task. kind=cron (spec like '0 8 * * *') or "
         "interval (spec = minutes). goal = full standalone instruction for each run.",
         {"name": S, "goal": S, "kind": {"type": "string", "enum": ["cron", "interval"]}, "spec": S}, ["name", "goal", "kind", "spec"]),
@@ -579,6 +663,10 @@ LOCAL_TOOLS = [
     _fn("load_skill", "加载技能说明 Load a skill's detailed instructions by name.", {"name": S}, ["name"]),
 ]
 LOCAL_NAMES = {t["function"]["name"] for t in LOCAL_TOOLS}
+# local tools that change something lasting: a golden (test) run stops at them instead of running them
+DRY_RUN_LOCAL = {"memory_remember", "memory_forget", "profile_suggest", "schedule_create", "trigger_create", "watch_create",
+                 "goal_create", "goal_update", "goal_delete", "schedule_delete", "schedule_state_set", "notify_user",
+                 "files_write", "make_pdf", "make_docx", "make_xlsx", "pdf_form_fill"}
 
 # step budget: keep the last steps for producing / sending what the user asked for
 BUDGET_RESERVE = 5
@@ -588,7 +676,7 @@ BUDGET_MARK_PAGES = "research check"
 TIME_MARK = "time budget"
 WEB_MARK = "web budget"
 WEB_NUDGE = 18        # web tool calls in one task before the agent is told to wrap up
-REMAKE_TOOLS = {"make_xlsx", "make_pdf", "make_docx", "make_chart"}
+REMAKE_TOOLS = {"make_xlsx", "make_pdf", "make_docx", "make_chart", "make_image", "edit_image", "vary_image", "caption_image", "upscale_image"}
 REMAKE_MAX = 4   # the 2026-10-02 itinerary run re-made the same Excel file 9 times (≈5 minutes of generation)
 
 
@@ -596,7 +684,7 @@ def _out_key(args: dict) -> str:
     return str(args.get("output") or args.get("title") or "").strip().lower()
 
 
-FINISH_TOOLS = {"update_plan", "files_write", "files_read", "file_look", "files_list", "make_pdf", "make_xlsx", "make_docx", "make_chart", "market_data", "stock_fundamentals", "calculate", "data_query", "send_file", "notify_user",
+FINISH_TOOLS = {"update_plan", "files_write", "files_read", "file_look", "files_list", "make_pdf", "make_xlsx", "make_docx", "make_chart", "make_image", "edit_image", "vary_image", "caption_image", "upscale_image", "market_data", "stock_fundamentals", "calculate", "data_query", "send_file", "notify_user",
                 "memory_remember", "goal_update", "schedule_state_set", "gmail_send", "gmail_reply", "gmail_create_draft",
                 "slack_send_message", "notion_create_page", "notion_append", "calendar_create_event"}
 
@@ -702,6 +790,8 @@ class Runtime:
         self.store = RStore(data_dir)
         self.publish = publish            # async fn(event: dict)
         self.llm = LLM(self.store.settings, on_call=self._on_llm_call)
+        self._last_image: dict[str, str] = {}   # task_id -> latest generated/edited image (edit_image / vary_image default)
+        self._img_count: dict[str, int] = {}    # task_id -> pictures generated so far (cost guard, IMAGE_BUDGET_PER_TASK)
         self.running: dict[str, asyncio.Task] = {}
         self._remakes: dict[tuple, int] = {}   # (task, tool, output) -> files made, see REMAKE_MAX
         self._seen_ids: dict[str, set] = {}   # task -> id-like tokens seen in its tool results (survives compression)
@@ -712,6 +802,13 @@ class Runtime:
         self.pause_flags: set[str] = set()
         self._catalog_cache = (0.0, None)
         self.evidence: dict[str, list[dict]] = {}   # task_id -> pages/emails actually read (for present_choices)
+        self.ctx_mode: dict[str, str] = {}          # task_id -> "legacy" (golden A/B of personal context)
+        self.site_noted: dict[str, set] = {}        # task_id -> sites whose remembered habits were shown
+        self._tool_texts: dict[str, list[str]] = {}   # task_id -> full tool results, newest last (outcome evidence)
+        from app.runtime.golden import Golden
+        from app.runtime.health import Health
+        self.health = Health(self)
+        self.golden = Golden(self)
         os.makedirs(WORKSPACE, exist_ok=True)
 
     # ================================================================ sentinel client
@@ -742,6 +839,19 @@ class Runtime:
         self._catalog_cache = (time.time(), cat)
         return cat
 
+    async def _dry_run_stop(self, task_id: str, name: str, args: dict, why: str) -> str:
+        """Golden (test) runs stop where a real run would change something or need the user; the stop is the result."""
+        await self.event(task_id, "dry_run_stop", {"tool": name, "args": _preview_args(args), "why": truncate(why, 200)})
+        return ("（演练模式）到这一步会真正执行操作或需要用户批准，演练到此为止，没有执行：" + (why or name) +
+                "。不要重试这一步，也不要换别的方法绕过；直接写最终回答，说明准备怎么做、做到了哪一步。"
+                " (Dry run: this step would act for real or need the user's approval, so it was not run. Do not retry it or "
+                "work around it; write the final answer saying what you would do and how far you got.)")
+
+    def _note_tool_text(self, task_id: str, content) -> None:
+        log = self._tool_texts.setdefault(task_id, [])
+        log.append(str(content)[:20000])
+        del log[:-40]
+
     # ================================================================ events
     async def event(self, task_id: str, type_: str, data: dict):
         ev = self.store.add_event(task_id, type_, data)
@@ -752,6 +862,11 @@ class Runtime:
         t = self.store.task(task_id)
         await self.publish({"kind": "task_update", "task": self.task_brief(t)})
         await self.audit("runtime", "task.status", task_id, result=status, detail={"status": status, **{k: v for k, v in kw.items() if k in ("error",)}})
+        if status in TERMINAL:
+            try:
+                await self.health.on_task_finished(t)
+            except Exception as e:
+                print(f"[health] {e!r}", flush=True)
         if status in TERMINAL:   # let the browser recycle this task's page later (best effort, never blocks)
             async def _release():
                 try:
@@ -763,7 +878,7 @@ class Runtime:
     @staticmethod
     def task_brief(t: dict) -> dict:
         return {k: t.get(k) for k in ("id", "conv_id", "goal", "status", "plan", "result", "error", "source", "schedule_id",
-                                       "parent_id", "steps", "waiting", "created_at", "updated_at", "finished_at")}
+                                       "parent_id", "steps", "waiting", "created_at", "updated_at", "finished_at", "outcome")}
 
     # ================================================================ public entry points
     async def submit(self, conv_id: str, goal: str, source="chat", schedule_id="", attachments: list | None = None) -> dict:
@@ -804,6 +919,7 @@ class Runtime:
             t = self.store.task(task_id)
             if not t or t["status"] in ("COMPLETED", "FAILED", "CANCELLED"):
                 self.evidence.pop(task_id, None)
+                self._tool_texts.pop(task_id, None)
 
     async def _warn_unattended(self, t: dict, what: tuple[str, str], detail: str):
         """A scheduled / triggered run went wrong while nobody was watching: tell the user (app + Telegram).
@@ -982,10 +1098,89 @@ class Runtime:
                 out.append({"name": name, "description": m.group(1).strip() if m else "", "path": p})
         return out
 
-    def _facts_for(self, goal: str) -> list[dict]:
-        """Long-term facts for this task: the ones related to the goal, then the most used preferences / people.
-        Recent one-off details and the profile are not included (memory_search / profile_get fetch them on demand)."""
-        found = self.store.search_facts(goal, 10)
+    def _facts_for(self, goal: str, history_txt: str = "", task_id: str = "") -> list[dict]:
+        """Long-term facts for this task (personal context v1, app/runtime/context.py): the ones that matter for what
+        is asked — sizes for clothes, cabin class for flights, the site's checkout habits for that shop — grouped by
+        domain. Recent one-off details and the profile are not included (memory_search / profile_get fetch them).
+        A golden A/B run can ask for the old selection with ctx_mode[task_id] = "legacy"."""
+        if self.ctx_mode.get(task_id) == "legacy":
+            return self._facts_legacy(goal)
+        from app.runtime import context
+        users = [ln[6:] for ln in (history_txt or "").splitlines() if ln.startswith("user: ")][-3:]
+        try:
+            out = context.select(goal, self.store.facts(500), self.store.entities(), limit=12, context="\n".join(users))
+        except Exception as e:
+            print(f"[context] {e!r}", flush=True)
+            return self._facts_legacy(goal)
+        try:
+            if (self.store.task(task_id) or {}).get("source") != "golden":
+                self.store.mark_used([f["id"] for f in out][:12])
+        except Exception:
+            pass
+        return out
+
+    async def _ledger_confirm(self, task_id: str, oc: dict, final: str):
+        """Tell the ledger how a purchase ended: the order number from the confirmation page, or none."""
+        num = next((r.get("order_number") for r in (oc.get("evidence") or [])
+                    if isinstance(r, dict) and r.get("kind") == "purchase"), "") or ""
+        try:
+            res = await self.sentinel("POST", "/internal/ledger/confirm", {
+                "task_id": task_id, "order_number": num,
+                "evidence": {"kind": "confirmation", "text": truncate(final, 400)} if num else None}, timeout=15)
+            if res.get("orders"):
+                await self.event(task_id, "ledger", {"orders": [{"merchant": o["merchant"], "order_number": o["order_number"],
+                                                                 "status": o["status_label"]} for o in res["orders"]]})
+        except Exception as e:
+            print(f"[ledger] {e!r}", flush=True)
+
+    async def _learn_site_block(self, task_id: str, site: str, detail: str) -> None:
+        """Remember that a site blocks the automated browser, so next time OMuse goes another way from the start
+        (a site habit, domain=site, kept as 'to confirm'). Recorded once per site."""
+        if not site or len(site) < 3:
+            return
+        seen = self.__dict__.setdefault("_block_noted", set())
+        if site in seen:
+            return
+        seen.add(site)
+        try:
+            existing = self.store.search_facts(f"{site} 反机器人 bot", 5)
+            if any(site in (f.get("fact") or "") and ("反机器人" in f["fact"] or "bot" in f["fact"].lower())
+                   for f in existing):
+                return
+            fact = (f"{site} 会拦截自动浏览器（{detail or '反机器人检查'}）：直接浏览通常进不去，优先用别的来源，"
+                    f"必须用时让用户接管浏览器通过验证 ({site} blocks the automated browser — prefer another source, "
+                    "or a user takeover when it must be used)")
+            self.store.add_fact(fact, "habit", site, source=f"learned:block:{task_id}", confidence=0.8,
+                                domain="site", status="pending")
+            await self.publish({"kind": "memory_update"})
+        except Exception as e:
+            print(f"[block-learn] {e!r}", flush=True)
+
+    async def _site_note(self, task_id: str, url: str) -> str:
+        """The first time a task lands on a site, what OMuse already learned about it (guest checkout, phone format …)."""
+        from app.runtime import context
+        name = context.site_name(url)
+        seen = self.site_noted.setdefault(task_id, set())
+        if not name or name in seen:
+            return ""
+        seen.add(name)
+        try:
+            found = context.site_facts(url, self.store.facts(500))
+        except Exception:
+            return ""
+        if not found:
+            return ""
+        try:
+            self.store.mark_used([f["id"] for f in found])
+        except Exception:
+            pass
+        lines = [f"- {f['fact']}" + (" (unconfirmed)" if f.get("status") == "pending" else "") for f in found]
+        await self.event(task_id, "context_site", {"site": name, "facts": [truncate(f["fact"], 160) for f in found]})
+        return (f"[记忆：你以前在 {name} 学到的 — what you learned about this site before; follow it]\n" + "\n".join(lines))
+
+    def _facts_legacy(self, goal: str) -> list[dict]:
+        """The selection before batch 2 (kept for the A/B comparison)."""
+        found = self.store.search_facts(goal, 10, fuzzy=False)
         prefs = sorted((f for f in self.store.facts(300) if f["category"] in ("preference", "person", "habit")),
                        key=lambda f: (-(f.get("uses") or 0), -(f.get("last_verified") or 0)))[:10]
         seen, out = set(), []
@@ -993,12 +1188,7 @@ class Runtime:
             if f["id"] not in seen:
                 seen.add(f["id"])
                 out.append(f)
-        out = out[:15]
-        try:
-            self.store.mark_used([f["id"] for f in found if f["id"] in seen][:10])
-        except Exception:
-            pass
-        return out
+        return out[:15]
 
     @staticmethod
     def reply_lang(task: dict, settings: dict) -> str:
@@ -1066,11 +1256,15 @@ class Runtime:
                 "otherwise read at most 2–3 more pages or delegate the rest to a sub-agent.")})
         if remaining <= BUDGET_RESERVE and BUDGET_MARK not in said:
             transcript.append({"role": "user", "content": prompts.L(
-                lang, f"（系统）[{BUDGET_MARK}] 只剩 {remaining} 步了。停止继续搜集资料，用已有的信息马上完成"
-                      "用户要的交付物（写文件、生成 PDF/Excel、send_file、发邮件等），然后给出最终回答，并说明哪些没来得及核实。",
-                f"(System) [{BUDGET_MARK}] Only {remaining} steps left: stop gathering, produce the deliverable the user asked for "
-                "with what you have (write the file, make_pdf/make_xlsx, send_file, send the email…), then give the final answer "
-                "and note anything left unverified.")})
+                lang, f"（系统）[{BUDGET_MARK}] 只剩 {remaining} 步了。停止自己继续搜集资料，用已有的信息马上完成"
+                      "用户要的交付物（写文件、生成 PDF/Excel、send_file、发邮件等），然后给出最终回答，并说明哪些没来得及核实。"
+                      "如果用户要的固定数量条目还没凑齐，用一次 delegate 把剩下的交给子 Agent（不占用这里的步数）。"
+                      "这是内部控制，不要向用户提「预算」或剩余步数。",
+                f"(System) [{BUDGET_MARK}] Only {remaining} steps left: stop gathering yourself and produce the deliverable the "
+                "user asked for with what you have (write the file, make_pdf/make_xlsx, send_file, send the email…), then give "
+                "the final answer and note anything left unverified. If a fixed number of items the user asked for is still "
+                "short, use one delegate call for the rest (it doesn't use these steps). Internal control — do not mention a "
+                "'budget' or remaining steps to the user.")})
         if remaining <= 2:
             tools = [x for x in tools if x["function"]["name"] in FINISH_TOOLS] or tools
         return tools
@@ -1112,8 +1306,12 @@ class Runtime:
             return
         s = self.store.settings()
         catalog = await self.catalog(force=True)
-        facts = self._facts_for(t["goal"])
         history, history_txt = self._history(t["conv_id"], task_id)
+        facts = self._facts_for(t["goal"], history_txt, task_id)
+        if facts and facts[0].get("score") is not None and not t["transcript"]:
+            await self.event(task_id, "context_used", {"facts": [{"id": f["id"], "fact": truncate(f["fact"], 160),
+                                                                  "domain": f.get("domain"), "why": f.get("why"),
+                                                                  "status": f.get("status")} for f in facts]})
 
         if t["status"] in ("CREATED", "PLANNING") and not t["plan"].get("steps") and not t["transcript"]:
             await self.set_status(task_id, "PLANNING")
@@ -1172,6 +1370,7 @@ class Runtime:
             first = pend["calls"][0]
             transcript.append({"role": "tool", "tool_call_id": first["id"],
                                "content": self._format_external(first["name"], resolved.get("result") or {})})
+            self._note_tool_text(task_id, transcript[-1]["content"])
             await self.event(task_id, "tool_result", {"call_id": first["id"], "name": first["name"],
                                                       "status": (resolved.get("result") or {}).get("status", resolved.get("decision")),
                                                       "preview": truncate(transcript[-1]["content"], 800)})
@@ -1199,6 +1398,7 @@ class Runtime:
         nudged = False
         cut_nudged = False
         numbers_checked = False
+        outcome_checked = False
         ctx_retries = 0
         while True:
             if task_id in self.cancel_flags:
@@ -1229,10 +1429,15 @@ class Runtime:
                     str(m.get("content") or "") for m in transcript if m.get("role") == "user"):
                 # 2026-10-02 R4-04b: a "top 3 products" lookup made 47 web calls in 12 minutes chasing cleaner results
                 transcript.append({"role": "user", "content": prompts.L(
-                    agent_lang(s), f"（系统）[{WEB_MARK}] 这个任务已经调用了 {web_calls} 次网页工具。除非还缺用户必需的关键信息，"
-                    "不要再搜索或打开网页了：现在就用已有的信息完成回答，并说明哪些没核实。",
-                    f"(System) [{WEB_MARK}] This task has made {web_calls} web calls. Unless something the user needs is still "
-                    "missing, stop searching and opening pages: answer now with what you have and note what is unverified.")})
+                    agent_lang(s), f"（系统）[{WEB_MARK}] 这个任务已经调用了 {web_calls} 次网页工具。不要自己再一个个翻网页了。"
+                    "如果用户要的是固定数量的条目（例如 3 个岗位、5 家公司）而你还没凑齐，就用 delegate 把还差的交给子 Agent 去查"
+                    "（子 Agent 的调用不算在这里），再由你汇总；如果已经够了或确实查不到更多，就用已有信息完成回答，说明哪些没核实。"
+                    "这是内部效率控制，不要向用户提起「预算」或调用次数。",
+                    f"(System) [{WEB_MARK}] This task has made {web_calls} web calls. Stop opening pages one by one yourself. "
+                    "If the user asked for a fixed number of items (e.g. 3 jobs, 5 companies) and you don't have them all yet, "
+                    "use delegate to fetch the rest (a sub-agent per remaining item — its calls don't count here) and compile "
+                    "them yourself; if you have enough or truly cannot find more, answer with what you have and note what is "
+                    "unverified. This is an internal efficiency control — never mention a 'budget' or a call count to the user.")})
             timed_out = minutes >= max_minutes
             force_final = steps >= max_steps or gave_up or timed_out
             tools = None if force_final else self._tools(catalog, schedule=bool(t["schedule_id"]) and not goal, goal=bool(goal))
@@ -1416,9 +1621,27 @@ class Runtime:
                         "inputs — then write the complete final answer again using only figures the tools produced. Start "
                         "straight with the content: don't mention this check or say \"here is the complete answer\".")})
                     continue
+            if final and not outcome_checked and not force_final and not timed_out and steps < max_steps - 1:
+                outcome_checked = True
+                oc = outcome.assess(self.store.events(task_id), final, self._tool_texts.get(task_id), t["goal"])
+                hint = outcome.nudge(oc, zh=agent_lang(s) != "en")
+                if hint:
+                    # 2026-10-06 (roadmap batch 1): "done" needs proof — an order number the confirmation page shows,
+                    # or no claim at all
+                    await self.event(task_id, "outcome_check", {"status": oc["status"], "missing": oc["missing"]})
+                    transcript.append({"role": "assistant", "content": final})
+                    transcript.append({"role": "user", "content": hint})
+                    continue
             final = merge_stranded_answer(transcript, final)
             if agent_lang(s) == "en" and prompts.cjk_share(final) > 0.5 and not prompts.wants_cjk_output(t["goal"]):
                 final = await self._rewrite_in_english(task_id, transcript, final)
+            oc = outcome.assess(self.store.events(task_id), final, self._tool_texts.get(task_id), t["goal"])
+            final += outcome.notice(oc, zh=agent_lang(s) != "en")
+            self.store.update_task(task_id, outcome=oc)
+            await self.event(task_id, "outcome", oc)
+            if "purchase" in (oc.get("actions") or []) or any(isinstance(a, dict) and a.get("kind") == "purchase"
+                                                              for a in (oc.get("actions") or [])):
+                await self._ledger_confirm(task_id, oc, final)
             transcript.append({"role": "assistant", "content": final})
             plan = t["plan"]
             for st in plan.get("steps", []):
@@ -1944,6 +2167,10 @@ class Runtime:
                        "in the chat) and write the final answer.")
             ok = False
             call["_refused"] = True
+        elif name in DRY_RUN_LOCAL and t.get("source") == "golden":
+            content = await self._dry_run_stop(task_id, name, args, "")
+            ok = False
+            call["_refused"] = True
         elif name in LOCAL_NAMES:
             try:
                 content = await self._local(t, name, args)
@@ -1974,9 +2201,13 @@ class Runtime:
         elif name in ext_names:
             try:
                 res = await self.sentinel("POST", "/internal/act", {"task_id": task_id, "call_id": call["id"], "tool": name,
-                                                                    "args": args, "no_ask": sub})
+                                                                    "args": args, "no_ask": sub,
+                                                                    "dry_run": t.get("source") == "golden"})
             except Exception as e:
                 res = {"status": "error", "error": f"Sentinel 不可用: {e}"}
+            if res.get("dry_run"):
+                res = {"status": "denied", "reason": await self._dry_run_stop(task_id, name, args, res.get("reason", ""))}
+                call["_refused"] = True
             st = res.get("status")
             if st == "approval_required" and not sub:
                 raise Suspend("WAITING_APPROVAL", {"type": "approval", "approval_id": res.get("approval_id"),
@@ -2016,6 +2247,9 @@ class Runtime:
                         seen_h.add(str(r0.get("url") or ""))
                 if hint:
                     content = hint + "\n" + content
+                note = await self._site_note(task_id, str(r0.get("url") or args.get("url") or ""))
+                if note:
+                    content = note + "\n" + content
             if st == "ok" and name != "browser_locate":
                 self._remember(task_id, name, res.get("result"))
             blk = (res.get("result") or {}).get("blocked") if st == "ok" and isinstance(res.get("result"), dict) else None
@@ -2028,6 +2262,7 @@ class Runtime:
                            "on this site; switch to another source, or request a takeover if this site is essential.\n" + content)
                 ok = False
                 await self.event(task_id, "site_blocked", {"site": site, "kind": blk.get("kind"), "detail": blk.get("detail")})
+                await self._learn_site_block(task_id, site, str(blk.get("detail") or ""))
         else:
             content = f"ERROR: 未知工具 unknown tool '{name}'. Available tools are listed in the tool schema."
             ok = False
@@ -2038,6 +2273,7 @@ class Runtime:
             if len(ids) < 50000:
                 ids.update(re.findall(r"(?:[a-z]\d+:)?[A-Za-z0-9_\-]{8,}", str(content)))
         transcript.append({"role": "tool", "tool_call_id": call["id"], "content": content})
+        self._note_tool_text(task_id, content)
         await self.event(task_id, "tool_result", {"call_id": call["id"], "name": name, "ok": ok, "sub": sub,
                                                   "preview": truncate(content, 800)})
         return ok
@@ -2111,6 +2347,233 @@ class Runtime:
                     " Don't send it again; summarise what it shows in your answer.")
         return (f"图表已生成 chart saved: {path}（未发送 not sent）。放进 PDF：在 make_pdf 的 Markdown 里写 ![标题]({path})；"
                 "要给用户看就用 send_file。")
+
+    async def _make_image(self, t: dict, a: dict) -> str:
+        """AI image generation (make_image): OpenAI-compatible Images API via app.runtime.imagegen; files land in
+        images/<title>.png and are shown in the chat like a chart."""
+        from app.runtime import imagegen as IG
+        prompt = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", str(a.get("prompt") or "")).strip()[:4000]   # Round 10: sane prompt
+        if not prompt:
+            return "ERROR: 需要 prompt（画面描述）prompt required."
+        prompt = IG.with_style(prompt, a.get("style"))
+        if a.get("background") == "transparent" and "transparent" not in prompt.lower():
+            prompt += ", isolated on a transparent background"   # models that ignore the parameter still get the hint
+        n = self._img_n(a, 1)
+        # cost guard: a task gets a small budget of generated pictures — the model must not regenerate the base image
+        # when a later step (caption, upscale) fails, nor loop on "try once more" (each call bills the user)
+        made = self._img_count.get(t["id"], 0)
+        if made + n > IMAGE_BUDGET_PER_TASK:
+            return (f"ERROR: 本任务已生成 {made} 张图片，达到上限 {IMAGE_BUDGET_PER_TASK} 张（每张都要付费）。不要再生成：把已有的图交付给用户，"
+                    f"或说明情况并询问是否继续 (image budget for this task reached; deliver what you have or ask the user).")
+        s = self.store.settings()
+        fmt = str(a.get("output_format") or "png").lower()
+        if fmt not in ("png", "jpeg", "webp"):
+            fmt = "png"
+        try:
+            self._img_count[t["id"]] = made + n
+            res = await IG.generate(s, prompt, size=a.get("size"), aspect=a.get("aspect"), n=n,
+                                    quality=a.get("quality") or None, negative_prompt=a.get("negative_prompt") or None,
+                                    background=a.get("background") or None,
+                                    output_format=fmt if fmt != "png" else None)
+        except IG.ImageError as e:
+            return self._img_error(e)
+        except Exception as e:
+            return f"ERROR: 图像生成失败 image generation failed: {str(e)[:200]}"
+        return await self._save_images(t, a, res, prompt, fmt, kind="image", verb="生成 generated")
+
+    @staticmethod
+    def _img_n(a: dict, default: int) -> int:
+        try:
+            return max(1, min(int(a.get("n") or default), 4))
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _img_error(e: Exception) -> str:
+        msg = str(e)
+        if any(k in msg for k in ("没有图像生成模型", "no image-generation model", "image_base_url", "没有配置模型地址",
+                                  "no model endpoint", "无法读取模型列表", "could not list models")):
+            return ("ERROR: 图像生成没有配置 (image generation is not set up): " + msg +
+                    " 告诉用户：需要在 Settings 里配置图像模型后才能生成图片；不要重试，不要改用其他工具画。"
+                    " Tell the user an image model must be configured in Settings first; do not retry or draw another way.")
+        if "不支持图片编辑" in msg or "does not support image edits" in msg:
+            return ("ERROR: " + msg + " 告诉用户这个图像模型不支持编辑/变体，可以用 make_image 按新描述重新生成一张。"
+                    " Tell the user this model can't edit; offer to regenerate with make_image instead.")
+        return f"ERROR: {msg}。不要用同样的参数重试超过一次 (don't retry the same request more than once)."
+
+    def _img_read(self, rel: str) -> tuple[str, bytes]:
+        """A workspace image as (filename, bytes); raises ValueError with a message for the model."""
+        rel = str(rel or "").strip()
+        if not rel:
+            raise ValueError("需要图片路径 (image path required)")
+        full = self._path(rel)
+        if not os.path.isfile(full):
+            raise ValueError(f"找不到图片 image not found: {rel}")
+        if os.path.splitext(full)[1].lower() not in (".png", ".jpg", ".jpeg", ".webp"):
+            raise ValueError(f"不是 PNG/JPEG/WebP 图片 not a PNG/JPEG/WebP image: {rel}")
+        if os.path.getsize(full) > 50 * 1024 * 1024:
+            raise ValueError(f"图片太大 image over 50 MB: {rel}")
+        with open(full, "rb") as f:
+            return os.path.basename(full), f.read()
+
+    async def _save_images(self, t: dict, a: dict, res: dict, prompt: str, fmt: str, *, kind: str, verb: str) -> str:
+        ext = {"jpeg": "jpg", "webp": "webp"}.get(fmt, "png")
+        slug = re.sub(r"[^\w\-一-鿿]+", "_", str(a.get("title") or prompt[:40])).strip("_")[:50] or "image"
+        out = str(a.get("output") or f"images/{slug}.{ext}")
+        stem, oext = os.path.splitext(out)
+        if oext.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
+            stem, oext = out, "." + ext
+        out = stem + oext
+        paths = []
+        for i, png in enumerate(res["images"]):
+            p = out if i == 0 else f"{stem}-{i + 1}{oext}"
+            base, k = os.path.splitext(p)[0], 2
+            while os.path.exists(self._path(p)) and not a.get("output"):
+                p, k = f"{base}-{k}{oext}", k + 1
+            full = self._path(p)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "wb") as f:
+                f.write(png)
+            paths.append(p)
+        self._last_image[t["id"]] = paths[0]   # "change the colour" / "more like this" without a path
+        await self.event(t["id"], "image", {"paths": paths, "model": res["model"], "size": res["size"], "kind": kind,
+                                            "latency_s": res["latency_s"], "prompt": prompt[:300]})
+        info = f"{res['model']} {res['size']} {res['latency_s']}s" + (f" via {res['via']}" if res.get("via") else "")
+        if a.get("send", True) is not False and str(a.get("send")).lower() != "false":
+            sent = await self._send_file(t, {"paths": paths, "note": str(a.get("title") or "")} if len(paths) > 1
+                                         else {"path": paths[0], "note": str(a.get("title") or "")})
+            if sent.startswith("ERROR"):
+                return f"图片已{verb}: {', '.join(paths)}（{info}），但发送失败 but sending failed: {sent}"
+            return (f"图片已{verb}并显示在对话里 shown in the chat: {', '.join(paths)}（{info}）。"
+                    "不要再用 send_file 重复发送；在回答里用一两句话描述画面并问用户是否要调整。要改这张就用 edit_image，"
+                    "要更多类似的用 vary_image（都可以不传 path）。"
+                    + (f" 模型改写后的描述 revised prompt: {res['revised_prompt'][:200]}" if res.get("revised_prompt") else "")
+                    + " Don't send it again; describe it briefly and offer adjustments (edit_image / vary_image).")
+        return f"图片已{verb}: {', '.join(paths)}（{info}，未发送 not sent）。要给用户看就用 send_file。"
+
+    async def _edit_image(self, t: dict, a: dict, *, vary: bool = False) -> str:
+        """edit_image (inpainting by mask / prompt edit / reference-guided) and vary_image (close variations)."""
+        from app.runtime import imagegen as IG
+        rel = str(a.get("path") or "").strip() or self._last_image.get(t["id"], "")
+        if not rel:
+            return ("ERROR: 没有可以修改的图片 (no image to edit): 先用 make_image 生成一张，或给 path（工作区里的图片）。"
+                    " Generate one with make_image first, or pass the workspace path of an image.")
+        try:
+            main = self._img_read(rel)
+            refs = [self._img_read(r) for r in (a.get("references") or [])[:4]]
+            mask = self._img_read(a["mask"])[1] if a.get("mask") else None
+        except ValueError as e:
+            return f"ERROR: {e}"
+        prompt = str(a.get("prompt") or "").strip()
+        n = self._img_n(a, 2 if vary else 1)
+        made = self._img_count.get(t["id"], 0)
+        if made + n > IMAGE_BUDGET_PER_TASK:
+            return (f"ERROR: 本任务已生成 {made} 张图片，达到上限 {IMAGE_BUDGET_PER_TASK} 张（每张都要付费）。不要再生成：把已有的图交付给用户，"
+                    f"或说明情况并询问是否继续 (image budget for this task reached; deliver what you have or ask the user).")
+        self._img_count[t["id"]] = made + n
+        s = self.store.settings()
+        try:
+            if vary:
+                res = await IG.variation(s, main, prompt=prompt, n=n, size=a.get("size"), aspect=a.get("aspect"))
+                label = prompt or f"variation of {os.path.basename(rel)}"
+            else:
+                if not prompt:
+                    return "ERROR: 需要 prompt（说明改什么）prompt required: what to change."
+                if refs:
+                    prompt += " Use the additional reference images for style, character and object consistency."
+                res = await IG.edit(s, [main] + refs, prompt, mask=mask, size=a.get("size"), aspect=a.get("aspect"), n=n)
+                label = prompt
+        except IG.ImageError as e:
+            return self._img_error(e)
+        except Exception as e:
+            return f"ERROR: 图像编辑失败 image edit failed: {str(e)[:200]}"
+        a = dict(a); a.setdefault("title", (("variation_" if vary else "edited_") + os.path.splitext(os.path.basename(rel))[0])[:50])
+        return await self._save_images(t, a, res, label, "png", kind="variation" if vary else "edit",
+                                       verb="生成变体 varied" if vary else "修改 edited")
+
+    async def _caption_image(self, t: dict, a: dict) -> str:
+        """caption_image: exact text on an image, laid out by the browser container (CJK fonts), offline."""
+        rel = str(a.get("path") or "").strip() or self._last_image.get(t["id"], "")
+        if not rel:
+            return "ERROR: 没有图片可以加字 (no image): 先 make_image 生成底图，或给 path。Generate one first or pass a path."
+        try:
+            self._img_read(rel)
+        except ValueError as e:
+            return f"ERROR: {e}"
+        text = str(a.get("text") or "").strip()
+        if not text:
+            return "ERROR: 需要 text（要写的文字）text required."
+        stem = os.path.splitext(rel)[0]
+        out = f"{stem}_text.png"
+        k = 2
+        while os.path.exists(self._path(out)):
+            out, k = f"{stem}_text-{k}.png", k + 1
+        body = {"task_id": t["id"], "image": rel, "text": text[:400], "position": a.get("position") or "bottom",
+                "size": a.get("size") or 0, "color": a.get("color") or "", "band": bool(a.get("band")),
+                "weight": str(a.get("weight") or "700"), "output": out}
+        r = await self.sentinel("POST", "/internal/compose_image", body, timeout=120)
+        if r.get("error") or not r.get("path"):
+            return f"ERROR: 加字失败 (caption failed): {r.get('error') or r}。不要重试超过一次。"
+        res = {"images": [], "model": "local-compose", "size": f"{r.get('width')}x{r.get('height')}", "latency_s": 0}
+        path = r["path"]
+        self._last_image[t["id"]] = path
+        await self.event(t["id"], "image", {"paths": [path], "model": "local-compose", "size": res["size"], "kind": "caption",
+                                            "latency_s": 0, "prompt": text[:300]})
+        if a.get("send", True) is not False and str(a.get("send")).lower() != "false":
+            sent = await self._send_file(t, {"path": path, "note": str(a.get("title") or "")})
+            if sent.startswith("ERROR"):
+                return f"已加字 text added: {path}，但发送失败 but sending failed: {sent}"
+            return (f"已把文字加到图上并显示在对话里 text added and shown: {path}（字号 {r.get('font_px')}px）。"
+                    "不要再 send_file；文字是本机排版的，字对字准确。Don't send again; the text is letter-perfect.")
+        return f"已加字 text added: {path}（未发送）。"
+
+    async def _upscale_image(self, t: dict, a: dict) -> str:
+        """upscale_image: local 2x/4x Lanczos resampling + unsharp mask (no new detail; true AI super-resolution needs a model)."""
+        rel = str(a.get("path") or "").strip() or self._last_image.get(t["id"], "")
+        if not rel:
+            return "ERROR: 没有图片可以放大 (no image): 先 make_image 生成一张，或给 path。"
+        try:
+            name, _ = self._img_read(rel)
+        except ValueError as e:
+            return f"ERROR: {e}"
+        try:
+            factor = 4 if int(a.get("factor") or 2) >= 4 else 2
+        except (TypeError, ValueError):
+            factor = 2
+
+        def _do():
+            from PIL import Image, ImageFilter
+            with Image.open(self._path(rel)) as im:
+                im = im.convert("RGBA") if im.mode in ("P", "LA", "RGBA") else im.convert("RGB")
+                w, h = im.size
+                if w * factor > 8192 or h * factor > 8192:
+                    raise ValueError(f"放大后超过 8192px 上限 (would exceed 8192px): {w*factor}x{h*factor}")
+                big = im.resize((w * factor, h * factor), Image.LANCZOS)
+                big = big.filter(ImageFilter.UnsharpMask(radius=1.2, percent=80, threshold=2))
+                stem = os.path.splitext(rel)[0]
+                out = f"{stem}_x{factor}.png"
+                k = 2
+                while os.path.exists(self._path(out)):
+                    out, k = f"{stem}_x{factor}-{k}.png", k + 1
+                os.makedirs(os.path.dirname(self._path(out)), exist_ok=True)
+                big.save(self._path(out), "PNG", optimize=True)
+                return out, w, h
+        try:
+            out, w, h = await asyncio.to_thread(_do)
+        except ValueError as e:
+            return f"ERROR: {e}"
+        except Exception as e:
+            return f"ERROR: 放大失败 upscale failed: {str(e)[:200]}"
+        self._last_image[t["id"]] = out
+        await self.event(t["id"], "image", {"paths": [out], "model": "local-lanczos", "size": f"{w*factor}x{h*factor}",
+                                            "kind": "upscale", "latency_s": 0, "prompt": f"{factor}x of {rel}"})
+        if a.get("send", True) is not False and str(a.get("send")).lower() != "false":
+            sent = await self._send_file(t, {"path": out, "note": str(a.get("title") or "")})
+            if sent.startswith("ERROR"):
+                return f"已放大 upscaled: {out}（{w*factor}x{h*factor}），但发送失败 but sending failed: {sent}"
+            return (f"已放大 {factor}x 并显示在对话里 upscaled and shown: {out}（{w}x{h} → {w*factor}x{h*factor}）。"
+                    "说明一下这是像素放大、不会新增细节。Mention it is pixel upscaling, no new detail.")
+        return f"已放大 upscaled: {out}（{w*factor}x{h*factor}，未发送）。"
 
     async def _market_data(self, task_id: str, a: dict) -> str:
         syms = a.get("symbols") or a.get("symbol") or []
@@ -2423,6 +2886,14 @@ class Runtime:
             return self._make_docx(a)
         if name == "make_chart":
             return await self._make_chart(t, a)
+        if name == "make_image":
+            return await self._make_image(t, a)
+        if name in ("edit_image", "vary_image"):
+            return await self._edit_image(t, a, vary=(name == "vary_image"))
+        if name == "caption_image":
+            return await self._caption_image(t, a)
+        if name == "upscale_image":
+            return await self._upscale_image(t, a)
         if name == "market_data":
             return await self._market_data(tid, a)
         if name == "stock_fundamentals":
@@ -2476,7 +2947,8 @@ class Runtime:
         if name == "memory_search":
             rows = self.store.search_facts(str(a.get("query", "")), 15, tier=None)
             eps = [e for e in self.store.episodes(200) if any(w in e["summary"] for w in str(a.get("query", "")).split() if len(w) > 1)][:5]
-            out = [f"[{r['id']}]{' (recent)' if r.get('tier') == 'recent' else ''} {r['fact']}" for r in rows]
+            out = [f"[{r['id']}]{' (recent)' if r.get('tier') == 'recent' else ''}{' (unconfirmed)' if r.get('status') == 'pending' else ''}"
+                   f" ({r.get('domain') or ''}) {r['fact']}" for r in rows]
             out += [f"(episode {time.strftime('%Y-%m-%d', time.localtime(e['ts']))}) {truncate(e['summary'], 300)}" for e in eps]
             return "\n".join(out) or "没有相关记忆 no memories found"
         if name == "profile_get":
@@ -2513,10 +2985,30 @@ class Runtime:
             if looks_sensitive(str(a.get("fact", ""))):
                 return ("ERROR: 证件号、会员号、卡号和密码不存进记忆 — ID / membership / card numbers and passwords are not kept in "
                         "memory. Tell the user to add it to the vault (Memory page → Vault (记忆 → 保险箱)); you can then fill it with browser_fill_secret.")
+            asked = bool(_REMEMBER_ASK.search(str((t or {}).get("goal") or "") if isinstance(t, dict) else ""))
             r = self.store.add_fact(str(a["fact"]), str(a.get("category") or "other"), str(a.get("entity") or ""),
-                                    source=f"user-request:{tid}", confidence=0.95)
+                                    source=f"user-request:{tid}" if asked else f"learned:{tid}",
+                                    confidence=0.95 if asked else 0.8, domain=str(a.get("domain") or ""),
+                                    status="active" if asked else "pending")
             await self.publish({"kind": "memory_update"})
+            if r and r.get("status") == "pending":
+                return (f"已记下，等用户在「记忆」页确认 — saved as 'to confirm' (used meanwhile): {r['fact']} "
+                        f"[{r.get('domain')}]")
             return f"已记住 remembered: {r}" if r else "ERROR: empty fact"
+        if name == "orders_list":
+            try:
+                res = await self.sentinel("GET", "/internal/ledger?limit=50", None, timeout=20)
+            except Exception as e:
+                return f"ERROR: 账本不可用 ledger unavailable: {e}"
+            q = str(a.get("query") or "").strip().lower()
+            rows = [o for o in res.get("orders") or [] if not q or q in (o["merchant"] + " " + o["order_number"]).lower()]
+            if not rows:
+                return "账本里没有匹配的订单 — no matching order in the ledger (OMuse has not placed one). Ask the user which order they mean."
+            return "\n".join(
+                f"- {time.strftime('%Y-%m-%d', time.localtime(o['created_at']))} · {o['merchant']} · 订单号 order "
+                f"{o['order_number'] or '(无 none)'} · {o['currency']} {o['total']:.2f} · {o['card'] or ''} · {o['status_label']} "
+                f"({o['status']})" + (f" · items: {', '.join(str(i.get('name', '')) for i in o['items'][:3] if isinstance(i, dict))}"
+                                      if o.get('items') else "") for o in rows[:20])
         if name == "memory_forget":
             self.store.delete_fact(str(a["id"]))
             await self.publish({"kind": "memory_update"})
@@ -2806,9 +3298,13 @@ class Runtime:
             if not fact or len(fact) > 300 or looks_sensitive(fact):
                 continue
             tier = "recent" if kind == "ephemeral" else "long"
+            from app.runtime.context import DOMAIN_KEYS
             cat = kind if kind in ("preference", "person", "company", "project", "habit") else "other"
+            dom = kind if kind in DOMAIN_KEYS else ("work" if kind in ("company", "project") else "")
+            # the user's own words are kept as they are; a habit OMuse inferred waits for the user's OK
             res = self.store.add_fact(fact, cat, str(f.get("entity") or ""), source=f"extracted:{task_id}",
-                                      confidence=0.7, tier=tier)
+                                      confidence=0.7, tier=tier, domain=dom,
+                                      status="pending" if kind == "habit" else "active")
             if res and not res.get("duplicate"):
                 (recent if tier == "recent" else added).append(res["fact"])
         if added or recent or suggested:
@@ -2817,6 +3313,9 @@ class Runtime:
                              detail={"facts": added, "recent": recent, "profile_suggestions": suggested})
             await self.publish({"kind": "memory_update"})
         return {"facts": added, "recent": recent, "profile_suggestions": suggested}
+
+
+_REMEMBER_ASK = re.compile(r"记住|记下|记得|记一下|以后|下次|从现在起|\b(remember|from now on|next time|always|note that)\b", re.I)
 
 
 _POINTS_BACK = re.compile(r"\babove\b|\bpreceding\b|\bearlier (table|summary|message)\b|上面|上方|如上|上述|前面(的|那)", re.I)

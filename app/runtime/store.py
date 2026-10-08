@@ -55,6 +55,8 @@ DEFAULT_SETTINGS = {
     "planner_model": os.environ.get("OMUSE_PLANNER_MODEL", "").strip(),
     "vision_model": os.environ.get("OMUSE_VISION_MODEL", "").strip(),       # "" = the executor model (Qwen3.x on Olares can read images)
     "stt_model": os.environ.get("OMUSE_STT_MODEL", "").strip(),          # speech-to-text for audio/video attachments; "" = a whisper-like model on the endpoint, if any
+    "image_base_url": os.environ.get("OMUSE_IMAGE_URL", ""),   # OpenAI-Images-compatible endpoint for make_image; "" = the model endpoint
+    "image_model": os.environ.get("OMUSE_IMAGE_MODEL", ""),    # image model id (gpt-image-1 / dall-e-3 / FLUX …); "" = auto-pick
     "temperature": 0.3,
     "max_steps": 40,
     "llm_concurrency": 2,   # model requests in flight at once (match the model server's parallel slots, llama.cpp -np)
@@ -160,11 +162,15 @@ class RStore:
         tcols = {r["name"] for r in self.db.all("PRAGMA table_info(tasks)")}
         if "attachments" not in tcols:
             self.db.execute("ALTER TABLE tasks ADD COLUMN attachments TEXT DEFAULT ''")
+        if "outcome" not in tcols:   # proof that a consequential task really finished (app/runtime/outcome.py)
+            self.db.execute("ALTER TABLE tasks ADD COLUMN outcome TEXT DEFAULT ''")
         fcols = {r["name"] for r in self.db.all("PRAGMA table_info(facts)")}
         for col, ddl in (("tier", "TEXT DEFAULT 'long'"), ("uses", "INTEGER DEFAULT 0"), ("last_used", "REAL"),
-                         ("expires_at", "REAL"), ("history", "TEXT DEFAULT ''")):
+                         ("expires_at", "REAL"), ("history", "TEXT DEFAULT ''"), ("domain", "TEXT DEFAULT ''"),
+                         ("status", "TEXT DEFAULT 'active'")):
             if col not in fcols:
                 self.db.execute(f"ALTER TABLE facts ADD COLUMN {col} {ddl}")
+        self._sort_domains()
 
     # ------------------------------------------------------------ settings
     def settings(self) -> dict:
@@ -235,17 +241,18 @@ class RStore:
         for k, d in (("plan", {}), ("transcript", []), ("pending", None), ("waiting", None)):
             r[k] = loads(r[k], d)
         r["attachments"] = loads(r.get("attachments") or "", []) or []
+        r["outcome"] = loads(r.get("outcome") or "", None)
         return r
 
     def update_task(self, tid: str, **kw):
         data = {}
         for k, v in kw.items():
-            data[k] = dumps(v) if k in ("plan", "transcript", "pending", "waiting") else v
+            data[k] = dumps(v) if k in ("plan", "transcript", "pending", "waiting", "outcome") else v
         data["updated_at"] = now_ts()
         self.db.update("tasks", "id", tid, data)
 
     def tasks(self, status: str | None = None, limit=100, conv_id: str | None = None) -> list[dict]:
-        q = "SELECT id, conv_id, goal, status, plan, result, error, source, schedule_id, parent_id, steps, waiting, created_at, updated_at, finished_at FROM tasks WHERE parent_id=''"
+        q = "SELECT id, conv_id, goal, status, plan, result, error, source, schedule_id, parent_id, steps, waiting, created_at, updated_at, finished_at, outcome FROM tasks WHERE parent_id=''"
         p: list = []
         if status:
             q += " AND status IN (%s)" % ",".join("?" for _ in status.split(","))
@@ -259,6 +266,7 @@ class RStore:
         for r in rows:
             r["plan"] = loads(r["plan"], {})
             r["waiting"] = loads(r["waiting"], None)
+            r["outcome"] = loads(r.get("outcome") or "", None)
         return rows
 
     # ------------------------------------------------------------ events
@@ -279,7 +287,9 @@ class RStore:
     RECENT_DAYS = 30
 
     def add_fact(self, fact: str, category: str = "general", entity: str = "", source: str = "user",
-                 confidence: float = 0.9, ttl_days: int | None = None, tier: str = "long") -> dict | None:
+                 confidence: float = 0.9, ttl_days: int | None = None, tier: str = "long",
+                 domain: str = "", status: str = "active") -> dict | None:
+        from app.runtime.context import DOMAIN_KEYS, domain_of
         fact = fact.strip()
         if not fact:
             return None
@@ -288,17 +298,23 @@ class RStore:
         for r in self.db.all("SELECT id, fact, tier FROM facts"):
             if norm_fact(r["fact"]) == norm:
                 upd = {"last_verified": now_ts()}
+                if status == "active":           # the user said it again: no longer just something OMuse learned
+                    upd["status"] = "active"
                 if tier == "long" and r["tier"] == "recent":     # said again / asked to remember: keep it for good
                     upd.update(tier="long", expires_at=None)
                 self.db.update("facts", "id", r["id"], upd)
                 return {"id": r["id"], "fact": r["fact"], "duplicate": True}
         fid = new_id("fact")
         exp = now_ts() + self.RECENT_DAYS * 86400 if tier == "recent" else None
+        domain = domain if domain in DOMAIN_KEYS else domain_of(fact, category, entity)
+        status = "pending" if status == "pending" else "active"
         self.db.insert("facts", {"id": fid, "fact": fact, "category": category, "entity": entity, "source": source,
                                  "confidence": confidence, "created_at": now_ts(), "last_verified": now_ts(),
-                                 "ttl_days": ttl_days, "tier": tier, "uses": 0, "expires_at": exp, "history": ""})
+                                 "ttl_days": ttl_days, "tier": tier, "uses": 0, "expires_at": exp, "history": "",
+                                 "domain": domain, "status": status})
         self.db.execute("INSERT INTO facts_fts(id, fact, entity) VALUES (?,?,?)", (fid, fact, entity))
-        return {"id": fid, "fact": fact, "tier": tier}
+        self.sync_entity(domain, entity)
+        return {"id": fid, "fact": fact, "tier": tier, "domain": domain, "status": status}
 
     def fact(self, fid: str) -> dict | None:
         return self.db.one("SELECT * FROM facts WHERE id=?", (fid,))
@@ -307,8 +323,18 @@ class RStore:
         r = self.fact(fid)
         if not r:
             return None
+        from app.runtime.context import DOMAIN_KEYS, domain_of
         data = {k: v for k, v in kw.items() if k in ("fact", "category", "entity", "tier", "uses", "last_used", "expires_at",
-                                                    "history", "last_verified", "confidence")}
+                                                    "history", "last_verified", "confidence", "domain", "status")}
+        if data.get("domain") not in (None, *DOMAIN_KEYS):
+            data.pop("domain")
+        if data.get("status") not in (None, "active", "pending"):
+            data.pop("status")
+        if "domain" not in data and any(k in data for k in ("fact", "category", "entity")):
+            # re-sort only if the domain was the automatic one (a domain the user picked stays)
+            if (r.get("domain") or "") in ("", domain_of(r["fact"], r.get("category") or "", r.get("entity") or "")):
+                data["domain"] = domain_of(data.get("fact", r["fact"]), data.get("category", r.get("category") or ""),
+                                           data.get("entity", r.get("entity") or ""))
         if data.get("tier") == "long":
             data.setdefault("expires_at", None)
         elif data.get("tier") == "recent" and r["tier"] != "recent":
@@ -319,7 +345,62 @@ class RStore:
             self.db.execute("INSERT INTO facts_fts(id, fact, entity) VALUES (?,?,?)", (fid, data["fact"], data.get("entity", r["entity"])))
         if data:
             self.db.update("facts", "id", fid, data)
+            if "domain" in data or "entity" in data:
+                self.sync_entity(data.get("domain", r.get("domain") or ""), data.get("entity", r.get("entity") or ""))
         return self.fact(fid)
+
+    # ------------------------------------------------------------ personal context (domains + entities)
+    def _sort_domains(self):
+        """Give older facts a domain (one-off, cheap; the user can change it on the Memory page)."""
+        from app.runtime.context import domain_of
+        rows = self.db.all("SELECT id, fact, category, entity FROM facts WHERE COALESCE(domain,'')=''")
+        for r in rows:
+            dom = domain_of(r["fact"] or "", r["category"] or "", r["entity"] or "")
+            self.db.execute("UPDATE facts SET domain=? WHERE id=?", (dom, r["id"]))
+            self.sync_entity(dom, r["entity"] or "")
+
+    ENTITY_DOMAINS = ("person", "place", "account", "site")
+
+    def sync_entity(self, domain: str, name: str):
+        """People, places, accounts and sites named by facts become entities (aliases + relation live there)."""
+        name = (name or "").strip()
+        if domain not in self.ENTITY_DOMAINS or not (2 <= len(name) <= 60) or "@" in name:
+            return
+        if not self.db.one("SELECT id FROM entities WHERE lower(name)=lower(?)", (name,)):
+            self.db.insert("entities", {"id": new_id("ent"), "type": domain, "name": name, "attrs": dumps({"aliases": []}),
+                                        "created_at": now_ts()})
+
+    def entities(self, kind: str | None = None) -> list[dict]:
+        rows = self.db.all("SELECT * FROM entities" + (" WHERE type=?" if kind else "") + " ORDER BY type, name",
+                           (kind,) if kind else ())
+        rel = {r["dst"]: r["rel"] for r in self.db.all("SELECT dst, rel FROM relations WHERE src='me'")}
+        for r in rows:
+            r["attrs"] = loads(r["attrs"], {}) or {}
+            r["relation"] = rel.get(r["id"], "")
+        return rows
+
+    def update_entity(self, eid: str, aliases: list[str] | None = None, relation: str | None = None,
+                      kind: str | None = None) -> dict | None:
+        e = self.db.one("SELECT * FROM entities WHERE id=?", (eid,))
+        if not e:
+            return None
+        attrs = loads(e["attrs"], {}) or {}
+        if aliases is not None:
+            attrs["aliases"] = [a.strip()[:40] for a in aliases if a and a.strip()][:12]
+        upd = {"attrs": dumps(attrs)}
+        if kind in self.ENTITY_DOMAINS:
+            upd["type"] = kind
+        self.db.update("entities", "id", eid, upd)
+        if relation is not None:
+            self.db.execute("DELETE FROM relations WHERE src='me' AND dst=?", (eid,))
+            if relation.strip():
+                self.db.insert("relations", {"src": "me", "rel": relation.strip()[:40], "dst": eid, "source": "user",
+                                             "created_at": now_ts()})
+        return next((x for x in self.entities() if x["id"] == eid), None)
+
+    def delete_entity(self, eid: str):
+        self.db.execute("DELETE FROM entities WHERE id=?", (eid,))
+        self.db.execute("DELETE FROM relations WHERE dst=? OR src=?", (eid, eid))
 
     def delete_fact(self, fid: str):
         row = self.db.one("SELECT fact FROM facts WHERE id=?", (fid,))
@@ -345,7 +426,7 @@ class RStore:
         rows = self.db.all(q + " ORDER BY created_at DESC LIMIT ?", (*p, limit))
         return [r for r in rows if self._live(r)]
 
-    def search_facts(self, query: str, limit=12, tier: str | None = "long") -> list[dict]:
+    def search_facts(self, query: str, limit=12, tier: str | None = "long", fuzzy: bool = True) -> list[dict]:
         terms = [t for t in re.split(r"[\s,，。.!?？！;；:：]+", query or "") if len(t) >= 2][:12]
         rows: list[dict] = []
         if terms:
@@ -362,6 +443,23 @@ class RStore:
                 r = self.fact(i)
                 if r and self._live(r) and (not tier or (r.get("tier") or "long") == tier):
                     rows.append(r)
+        if fuzzy and len(rows) < limit:
+            # a Chinese query is one long "word" ("我穿多大码的鞋"): rank by shared bigrams / words and by topic
+            from app.runtime import context
+            qt = context.tokens(query)
+            its = context.intents(query)
+            have = {r["id"] for r in rows}
+            pool = self.facts(1000, tier=tier) if tier else self.facts(1000, tier=None)
+            ranked = []
+            for r in pool:
+                if r["id"] in have:
+                    continue
+                txt = f"{r['fact']} {r.get('entity') or ''}"
+                sc = len(qt & context.tokens(txt)) + sum(2 for k in its if context._INTENT_RX[k][1].search(txt))
+                if sc >= 2:
+                    ranked.append((sc, r))
+            ranked.sort(key=lambda x: -x[0])
+            rows += [r for _, r in ranked[:limit - len(rows)]]
         return rows[:limit]
 
     def mark_used(self, ids: list[str]):
