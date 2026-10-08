@@ -83,6 +83,12 @@ def reg_domain(url: str) -> str:
         return ".".join(parts[-3:])
     return ".".join(parts[-2:]) if len(parts) >= 2 else host
 
+def _display_alive(disp: str) -> bool:
+    """True when an X server socket exists for DISPLAY (":99" -> /tmp/.X11-unix/X99); a stale DISPLAY must not pick headed mode."""
+    n = str(disp or "").split(".")[0].lstrip(":")
+    return bool(n) and (os.path.exists(f"/tmp/.X11-unix/X{n}") or not n.isdigit())
+
+
 class Broker:
     def __init__(self):
         self.pw = None
@@ -121,7 +127,7 @@ class Broker:
                 return
             if HEADLESS_ENV == "1":
                 self.headless = True
-            elif HEADLESS_ENV == "0" or os.environ.get("DISPLAY"):
+            elif HEADLESS_ENV == "0" or (os.environ.get("DISPLAY") and _display_alive(os.environ["DISPLAY"])):
                 self.headless = False
             else:
                 self.headless = not self._start_xvfb()   # must happen before the Playwright driver starts (env)
@@ -222,7 +228,13 @@ class Broker:
                 except Exception:
                     pass
                 self.xvfb = None
+                # the DISPLAY we exported for our own Xvfb must go with it: left behind, the next ensure_pw() would
+                # pick "headed" mode with no X server and every Chromium launch would fail (0.2.74 regression)
+                if os.environ.get("DISPLAY") == self._own_display:
+                    os.environ.pop("DISPLAY", None)
             print("[browser] chromium shut down (idle)", flush=True)
+
+    _own_display: str = ""
 
     def _start_xvfb(self) -> bool:
         if not shutil.which("Xvfb"):
@@ -242,6 +254,7 @@ class Broker:
         for _ in range(50):
             if os.path.exists(f"/tmp/.X11-unix/X{n}"):
                 os.environ["DISPLAY"] = disp
+                self._own_display = disp
                 return True
             if self.xvfb.poll() is not None:
                 return False
@@ -967,6 +980,54 @@ def _css_color(s: str, default: str) -> str:
     return s if re.fullmatch(r"#[0-9a-fA-F]{3,8}|[a-zA-Z]{3,20}|rgba?\([0-9., %]+\)", s) else default
 
 
+def _image_size(path: str) -> tuple[int, int]:
+    """(width, height) from the file header of a PNG / JPEG / GIF / WebP — no imaging library needed."""
+    import struct
+    with open(path, "rb") as f:
+        head = f.read(32)
+        if head[:8] == b"\x89PNG\r\n\x1a\n":
+            w, h = struct.unpack(">II", head[16:24])
+            return int(w), int(h)
+        if head[:6] in (b"GIF87a", b"GIF89a"):
+            w, h = struct.unpack("<HH", head[6:10])
+            return int(w), int(h)
+        if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+            tag = head[12:16]
+            f.seek(12)
+            chunk = f.read(30)
+            if tag == b"VP8X":
+                w = 1 + int.from_bytes(chunk[12:15], "little"); h = 1 + int.from_bytes(chunk[15:18], "little")
+                return w, h
+            if tag == b"VP8L":
+                b0, b1, b2, b3 = chunk[9:13]
+                return 1 + (((b1 & 0x3F) << 8) | b0), 1 + (((b3 & 0xF) << 10) | (b2 << 2) | ((b1 & 0xC0) >> 6))
+            if tag == b"VP8 ":
+                w, h = struct.unpack("<HH", chunk[14:18])
+                return int(w & 0x3FFF), int(h & 0x3FFF)
+        if head[:2] == b"\xff\xd8":
+            f.seek(2)
+            while True:
+                marker = f.read(2)
+                if len(marker) < 2 or marker[0] != 0xFF:
+                    break
+                m = marker[1]
+                if m in (0xD8, 0x01) or 0xD0 <= m <= 0xD7:
+                    continue
+                (ln,) = struct.unpack(">H", f.read(2))
+                if m in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                    data = f.read(5)
+                    h, w = struct.unpack(">HH", data[1:5])
+                    return int(w), int(h)
+                f.seek(ln - 2, 1)
+    try:
+        from PIL import Image as _Img
+        with _Img.open(path) as im:
+            return im.size
+    except ImportError:
+        raise ValueError("unsupported image format (png/jpeg/gif/webp only)")
+
+
+
 @app.post("/compose", dependencies=[Depends(auth)])
 async def compose_image(req: Request):
     """Overlay exact text on a workspace image and save a PNG: JavaScript off, no network, the image is loaded from the
@@ -1012,10 +1073,8 @@ async def compose_image(req: Request):
         out_rel += ".png"
     op = _ws(out_rel)
     # size the text to the picture when not given: ~1/12 of the shorter side, smaller for long text
-    from PIL import Image as _Img   # the playwright image has Pillow; only used to read dimensions
     try:
-        with _Img.open(src) as im:
-            w, h = im.size
+        w, h = _image_size(src)   # header parse, no Pillow (the playwright image does not ship it)
     except Exception as e:
         raise HTTPException(400, f"无法读取图片 cannot read image: {str(e)[:100]}")
     if not size:

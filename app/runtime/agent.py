@@ -28,6 +28,7 @@ from app.runtime.store import RStore
 SENTINEL_URL = os.environ.get("SENTINEL_URL", "http://127.0.0.1:8080")
 RUNTIME_TOKEN = os.environ.get("RUNTIME_TOKEN", "")
 WORKSPACE = os.path.realpath(os.environ.get("WORKSPACE", "/workspace"))
+IMAGE_BUDGET_PER_TASK = int(os.environ.get("OMUSE_IMAGE_BUDGET", "6"))   # generated pictures per task (each one is billed)
 APP_ID = os.environ.get("APP_ID", "omuse")   # Olares app id: the workspace shows up in Files under Data/<APP_ID>/workspace
 SKILLS_DIR = os.environ.get("SKILLS_DIR", os.path.join(os.path.dirname(os.path.dirname(__file__)), "skills"))
 
@@ -790,6 +791,7 @@ class Runtime:
         self.publish = publish            # async fn(event: dict)
         self.llm = LLM(self.store.settings, on_call=self._on_llm_call)
         self._last_image: dict[str, str] = {}   # task_id -> latest generated/edited image (edit_image / vary_image default)
+        self._img_count: dict[str, int] = {}    # task_id -> pictures generated so far (cost guard, IMAGE_BUDGET_PER_TASK)
         self.running: dict[str, asyncio.Task] = {}
         self._remakes: dict[tuple, int] = {}   # (task, tool, output) -> files made, see REMAKE_MAX
         self._seen_ids: dict[str, set] = {}   # task -> id-like tokens seen in its tool results (survives compression)
@@ -2357,11 +2359,18 @@ class Runtime:
         if a.get("background") == "transparent" and "transparent" not in prompt.lower():
             prompt += ", isolated on a transparent background"   # models that ignore the parameter still get the hint
         n = self._img_n(a, 1)
+        # cost guard: a task gets a small budget of generated pictures — the model must not regenerate the base image
+        # when a later step (caption, upscale) fails, nor loop on "try once more" (each call bills the user)
+        made = self._img_count.get(t["id"], 0)
+        if made + n > IMAGE_BUDGET_PER_TASK:
+            return (f"ERROR: 本任务已生成 {made} 张图片，达到上限 {IMAGE_BUDGET_PER_TASK} 张（每张都要付费）。不要再生成：把已有的图交付给用户，"
+                    f"或说明情况并询问是否继续 (image budget for this task reached; deliver what you have or ask the user).")
         s = self.store.settings()
         fmt = str(a.get("output_format") or "png").lower()
         if fmt not in ("png", "jpeg", "webp"):
             fmt = "png"
         try:
+            self._img_count[t["id"]] = made + n
             res = await IG.generate(s, prompt, size=a.get("size"), aspect=a.get("aspect"), n=n,
                                     quality=a.get("quality") or None, negative_prompt=a.get("negative_prompt") or None,
                                     background=a.get("background") or None,
@@ -2457,6 +2466,11 @@ class Runtime:
             return f"ERROR: {e}"
         prompt = str(a.get("prompt") or "").strip()
         n = self._img_n(a, 2 if vary else 1)
+        made = self._img_count.get(t["id"], 0)
+        if made + n > IMAGE_BUDGET_PER_TASK:
+            return (f"ERROR: 本任务已生成 {made} 张图片，达到上限 {IMAGE_BUDGET_PER_TASK} 张（每张都要付费）。不要再生成：把已有的图交付给用户，"
+                    f"或说明情况并询问是否继续 (image budget for this task reached; deliver what you have or ask the user).")
+        self._img_count[t["id"]] = made + n
         s = self.store.settings()
         try:
             if vary:

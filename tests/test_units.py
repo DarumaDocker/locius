@@ -2741,3 +2741,92 @@ async def test_settings_test_image_endpoint(monkeypatch):
     monkeypatch.setenv("OMUSE_IMAGE_API_KEY", "k")
     r = await rmain.test_image(Req({"image_model": "gpt-image-1"}))
     assert r["key"] == "OMUSE_IMAGE_API_KEY"
+
+
+def test_image_size_header_parser(tmp_path):
+    from PIL import Image
+    from app.browser.main import _image_size
+    for fmt, ext in (("PNG", "png"), ("JPEG", "jpg"), ("WEBP", "webp"), ("GIF", "gif")):
+        p = tmp_path / f"t.{ext}"
+        Image.new("RGB", (321, 123), "red").save(p, fmt)
+        assert _image_size(str(p)) == (321, 123)
+    (tmp_path / "x.bin").write_bytes(b"not an image at all")
+    with pytest.raises(Exception):
+        _image_size(str(tmp_path / "x.bin"))
+
+
+def test_image_budget_per_task(tmp_path, monkeypatch):
+    """Round 10 follow-up: a task may generate only IMAGE_BUDGET_PER_TASK pictures (each call bills the user)."""
+    import asyncio
+    from app.runtime.agent import Runtime
+    import app.runtime.agent as _ag
+    IG, calls, png = _fake_edits_api(monkeypatch)
+    monkeypatch.setattr(_ag, "WORKSPACE", os.path.realpath(str(tmp_path)))
+    monkeypatch.setattr(_ag, "IMAGE_BUDGET_PER_TASK", 2)
+
+    async def pub(_): pass
+    rt = Runtime(str(tmp_path), pub)
+    sent = []
+    monkeypatch.setattr(rt, "_send_file", lambda t, a: asyncio.sleep(0, result=(sent.append(a) or "ok")))
+    monkeypatch.setattr(rt, "event", lambda *a, **k: asyncio.sleep(0))
+    monkeypatch.setattr(rt.store, "settings", lambda: {"model_base_url": "http://x/v1", "image_model": "gpt-image-1", "llm_timeout": 60})
+    _png(rt._path("images/fox.png"))
+    rt._last_image["tb1"] = "images/fox.png"
+    t = {"id": "tb1"}
+    assert "edited" in asyncio.run(rt._edit_image(t, {"prompt": "scarf"}))
+    assert "edited" in asyncio.run(rt._edit_image(t, {"prompt": "hat"}))
+    r3 = asyncio.run(rt._edit_image(t, {"prompt": "boots"}))
+    assert r3.startswith("ERROR") and "上限" in r3 and rt._img_count["tb1"] == 2
+    r4 = asyncio.run(rt._make_image(t, {"prompt": "a cat"}))
+    assert r4.startswith("ERROR") and "上限" in r4
+    assert "edited" in asyncio.run(rt._edit_image({"id": "tb2"}, {"path": "images/fox.png", "prompt": "x"}))   # other task: own budget
+
+
+def test_reply_compose_unfolds_folded_headers():
+    """E2E-1: a reply to a long thread has a References header folded over several lines; it must not crash."""
+    from app.sentinel.gmail import Gmail, _unfold
+    g = Gmail.__new__(Gmail)
+    g.email, g.display_name = "me@example.com", "Me"
+    folded = "<a@x.com>\r\n <b@x.com>\r\n\t<c@x.com>"
+    msg = g._compose("to@example.com", "", "hi", in_reply_to={"subject": "Invoice\r\n VAP-INV-1 - ACH failing",
+                                                            "message_id_header": "<d@x.com>", "references": folded})
+    assert msg["References"] == "<a@x.com> <b@x.com> <c@x.com> <d@x.com>"
+    assert msg["Subject"] == "Re: Invoice VAP-INV-1 - ACH failing" and msg["In-Reply-To"] == "<d@x.com>"
+    assert _unfold(None) == ""
+
+
+def test_relaunch_after_idle_shutdown_does_not_keep_stale_display(monkeypatch):
+    """0.2.74 regression (E2E-3): after the idle teardown killed our Xvfb, DISPLAY stayed exported, the next start chose
+    headed mode with no X server and every Chromium launch failed. Teardown must drop DISPLAY; a stale one is ignored."""
+    import asyncio, time
+    m, launches = _fake_pw(monkeypatch)
+    monkeypatch.setattr(m, "HEADLESS_ENV", "")        # auto mode: decide by Xvfb availability
+    monkeypatch.delenv("DISPLAY", raising=False)
+    b = m.Broker()
+    starts = []
+
+    class FakeX:
+        def terminate(self): pass
+        def poll(self): return None
+
+    def fake_start():
+        starts.append(1)
+        os.environ["DISPLAY"] = ":99"; b._own_display = ":99"; b.xvfb = FakeX()
+        return True
+    monkeypatch.setattr(b, "_start_xvfb", fake_start)
+
+    async def go():
+        await b.page_for("t1")                   # first use: Xvfb started, headed
+        assert b.headless is False and os.environ.get("DISPLAY") == ":99"
+        b.finished["t1"] = 0.0; b.last_activity = time.time() - 10_000
+        await b.teardown()
+        assert "DISPLAY" not in os.environ        # our DISPLAY went away with our Xvfb
+        await b.page_for("t2")                   # relaunch: Xvfb started again, not "headed without X"
+    asyncio.run(go())
+    assert len(starts) == 2 and b.headless is False and launches["ctx"] == 2
+    # a DISPLAY inherited from the environment that points at no X socket is not trusted either
+    b2 = m.Broker(); monkeypatch.setattr(b2, "_start_xvfb", lambda: False)
+    os.environ["DISPLAY"] = ":77"
+    asyncio.run(b2.ensure_pw())
+    assert b2.headless is True
+    os.environ.pop("DISPLAY", None)
