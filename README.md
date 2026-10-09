@@ -85,12 +85,27 @@ Docker reads the file when the container is created: after editing it, `docker r
 | `OMUSE_USER` | Login name (default `omuse`) |
 | `OMUSE_AUTH=off` | No login — only behind another proxy that already authenticates |
 | `OMUSE_MODEL_URL`, `OMUSE_MODEL` | OpenAI-compatible endpoint and model id (defaults; a value saved in Settings wins) |
+| `OMUSE_PLANNER_MODEL`, `OMUSE_VISION_MODEL`, `OMUSE_STT_MODEL` | Optional model ids for planning, vision (screenshots, images) and speech-to-text on the same endpoint. Unset: planner and vision use `OMUSE_MODEL`, speech-to-text uses a whisper-like model if the endpoint has one. A value saved in Settings wins |
 | `OMUSE_MODEL_API_KEY` | API key for the model endpoint (environment only, not in Settings) |
 | `TZ` | Default timezone (a value saved in Settings wins) |
 | `TELEGRAM_BOT=0`, `VOICE_PORT=0` | Turn off the Telegram bot / the phone port |
 | `BROWSER_HEADLESS=1` | Run the browser headless instead of on the virtual display |
+| `OMUSE_STRIPE_API_KEY`, `OMUSE_STRIPE_CUSTOMER_ID`, `OMUSE_STRIPE_SUBSCRIPTION_ID` | Optional. With all three set, Settings ends with a "Manage subscription" section that opens the Stripe customer portal |
 
 Everything else (connections, vault, language, limits) is set in the web UI and stored in the volume.
+
+### Deploy on Fly.io
+
+`fly.toml` and `Dockerfile.fly` run the same container on [Fly.io](https://fly.io): one always-on machine with one volume for all state, HTTPS from Fly.
+
+```bash
+fly launch --no-deploy --copy-config        # once: creates the app (choose a name and region)
+fly volumes create omuse_data --size 10     # once
+fly secrets set OMUSE_PASSWORD='choose-a-long-password' OMUSE_MODEL_API_KEY=sk-...
+fly deploy
+```
+
+Then open `https://<app>.fly.dev` and sign in as `omuse`. The model endpoint and the other variables from the table above go in `[env]` in `fly.toml` (secrets with `fly secrets set`). Keep it at one machine: the state is on the volume.
 
 ### Development
 

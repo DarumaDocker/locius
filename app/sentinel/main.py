@@ -29,6 +29,7 @@ from app.sentinel.store import Store
 from app.sentinel.telegram_bot import TelegramBot
 from app.sentinel import phone
 from app.sentinel import dialmcp, mcp_oauth
+from app.sentinel import billing
 from app.sentinel import vault
 
 SDATA = os.environ.get("SENTINEL_DATA", "/sdata")
@@ -1881,6 +1882,33 @@ async def b_input(req: Request):
 @app.get("/sentinel/api/health")
 async def health():
     return {"ok": True, "version": VERSION}
+
+
+# ------------------------------------------------------------------ subscription (hosted installs)
+@app.get("/sentinel/api/subscription", dependencies=[Depends(ui_auth)])
+async def subscription():
+    """Whether Settings shows "Manage subscription", plus the subscription's state when Stripe answers."""
+    if not billing.config():
+        return {"enabled": False}
+    try:
+        return {"enabled": True, **(await billing.status())}
+    except billing.BillingError as e:
+        return {"enabled": True, "error": str(e)}
+
+
+@app.post("/sentinel/api/subscription/portal", dependencies=[Depends(ui_auth)])
+async def subscription_portal(req: Request):
+    if not billing.config():
+        raise HTTPException(404, "subscription management is not configured")
+    host = (req.headers.get("x-forwarded-host") or req.headers.get("host", "")).split(",")[0].strip()
+    proto = (req.headers.get("x-forwarded-proto") or req.url.scheme or "https").split(",")[0].strip()
+    try:
+        url = await billing.portal_url(f"{proto}://{host}/#settings")
+    except billing.BillingError as e:
+        store.audit("user", "subscription.portal", resource="stripe", result="failed", detail={"error": str(e)[:300]})
+        raise HTTPException(502, str(e))
+    store.audit("user", "subscription.portal", resource="stripe", result="success")
+    return {"url": url}
 
 
 HOP = {"host", "content-length", "connection", "keep-alive", "transfer-encoding", "te", "trailer", "upgrade",

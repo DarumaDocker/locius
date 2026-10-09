@@ -480,3 +480,47 @@ async def ics_gone():
 @app.get("/ics/notcal.ics")
 async def ics_notcal():
     return HTMLResponse("<html>login</html>")
+
+
+# ---------------------------------------------------------------- Stripe (billing portal, subscription_e2e.py)
+STRIPE = {"key": "sk_test_fake_omuse", "sessions": [],
+          "sub": {"id": "sub_test123", "customer": "cus_test123", "status": "active", "cancel_at_period_end": False,
+                  "current_period_end": 1798761600}}
+
+
+def _stripe_auth(req: Request) -> bool:
+    import base64
+    return req.headers.get("authorization", "") in (f"Bearer {STRIPE['key']}",
+                                                    "Basic " + base64.b64encode(f"{STRIPE['key']}:".encode()).decode())
+
+
+@app.get("/stripe/v1/subscriptions/{sid}")
+async def stripe_subscription(sid: str, req: Request):
+    if not _stripe_auth(req):
+        return JSONResponse({"error": {"message": "Invalid API Key provided"}}, status_code=401)
+    if sid != STRIPE["sub"]["id"]:
+        return JSONResponse({"error": {"message": f"No such subscription: '{sid}'"}}, status_code=404)
+    return STRIPE["sub"]
+
+
+@app.post("/stripe/v1/billing_portal/sessions")
+async def stripe_portal_session(req: Request):
+    if not _stripe_auth(req):
+        return JSONResponse({"error": {"message": "Invalid API Key provided"}}, status_code=401)
+    f = dict(await req.form())
+    if f.get("customer") != STRIPE["sub"]["customer"]:
+        return JSONResponse({"error": {"message": f"No such customer: '{f.get('customer')}'"}}, status_code=400)
+    STRIPE["sessions"].append(f)
+    return {"id": f"bps_test_{len(STRIPE['sessions'])}", "url": f"http://127.0.0.1:8094/stripe/portal/bps_test_{len(STRIPE['sessions'])}"}
+
+
+@app.get("/stripe/portal/{sid}")
+async def stripe_portal(sid: str):
+    return HTMLResponse(f"<title>Fake Stripe portal</title><h1>Billing portal {sid}</h1>")
+
+
+@app.api_route("/_stripe", methods=["GET", "POST"])
+async def stripe_state(req: Request):
+    if req.method == "POST":
+        STRIPE["sub"].update(await req.json())
+    return STRIPE

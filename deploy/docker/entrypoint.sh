@@ -10,6 +10,12 @@ if [ "${OMUSE_AUTH:-}" != "off" ] && [ -z "${OMUSE_PASSWORD:-}" ]; then
 fi
 
 DATA="${OMUSE_DATA:-/omuse}"
+# started as root (Dockerfile.fly: Fly.io mounts its volume root-owned): hand the data dir to pwuser, drop privileges
+if [ "$(id -u)" = 0 ]; then
+  mkdir -p "$DATA"
+  [ "$(stat -c %U "$DATA")" = pwuser ] || chown -R pwuser:pwuser "$DATA"
+  exec setpriv --reuid=pwuser --regid=pwuser --init-groups env HOME=/home/pwuser "$0" "$@"
+fi
 export SENTINEL_DATA="$DATA/sentinel" RUNTIME_DATA="$DATA/runtime" WORKSPACE="$DATA/workspace" BROWSER_PROFILE="$DATA/browser-profile"
 mkdir -p "$SENTINEL_DATA" "$RUNTIME_DATA" "$WORKSPACE" "$BROWSER_PROFILE"
 chmod 700 "$SENTINEL_DATA"

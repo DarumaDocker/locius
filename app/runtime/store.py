@@ -52,9 +52,9 @@ CREATE TABLE IF NOT EXISTS notifications (
 DEFAULT_SETTINGS = {
     "model_base_url": os.environ.get("OMUSE_MODEL_URL") or os.environ.get("PERSONA_MODEL_URL", ""),
     "model_name": os.environ.get("OMUSE_MODEL") or os.environ.get("PERSONA_MODEL", "Olares/unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL"),
-    "planner_model": "",
-    "vision_model": "",       # "" = the executor model (Qwen3.x on Olares can read images)
-    "stt_model": "",          # speech-to-text for audio/video attachments; "" = a whisper-like model on the endpoint, if any
+    "planner_model": os.environ.get("OMUSE_PLANNER_MODEL", "").strip(),
+    "vision_model": os.environ.get("OMUSE_VISION_MODEL", "").strip(),       # "" = the executor model (Qwen3.x on Olares can read images)
+    "stt_model": os.environ.get("OMUSE_STT_MODEL", "").strip(),          # speech-to-text for audio/video attachments; "" = a whisper-like model on the endpoint, if any
     "image_base_url": os.environ.get("OMUSE_IMAGE_URL", ""),   # OpenAI-Images-compatible endpoint for make_image; "" = the model endpoint
     "image_model": os.environ.get("OMUSE_IMAGE_MODEL", ""),    # image model id (gpt-image-1 / dall-e-3 / FLUX …); "" = auto-pick
     "temperature": 0.3,

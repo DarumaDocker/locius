@@ -879,5 +879,14 @@ window.OMUSE_EN = {
 "被拦": "Blocked",
 "拦截率": "Block rate",
 "最近没有网站拦截记录。": "No site blocks recently.",
-"拦截类型：": "Block types: "
+"拦截类型：": "Block types: ",
+"💳 管理订阅 Manage subscription": "💳 Manage subscription",
+"在 Stripe 的页面上取消或续订这台 OMuse 的订阅。": "Cancel or renew the subscription for this OMuse on Stripe's page.",
+"打开订阅页面 Open subscription page": "Open subscription page",
+"订阅已取消。": "The subscription is cancelled.",
+"订阅已设为到期取消，{0} 结束。": "The subscription is set to cancel and ends on {0}.",
+"订阅已设为到期取消。": "The subscription is set to cancel at the end of the period.",
+"订阅生效中，{0} 续订。": "The subscription is active and renews on {0}.",
+"订阅生效中。": "The subscription is active.",
+"订阅状态：{0}": "Subscription status: {0}"
 };
